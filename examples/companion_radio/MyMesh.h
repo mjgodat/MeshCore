@@ -4,6 +4,9 @@
 #include <Mesh.h>
 #include "AbstractUITask.h"
 #include "CompanionFeatures.h"
+#if UI_REPEATER_HEAD
+#include "HeadTerminalLog.h"
+#endif
 #include <helpers/CompanionReader.h>
 #include <helpers/PowerSavingDiagnostics.h>
 #include <helpers/ui/DisplayBuildFlags.h>
@@ -606,6 +609,17 @@ protected:
   bool hasPendingReqs() const;
 
 public:
+#if UI_REPEATER_HEAD
+  // Touch compose on a repeater head. Same send paths as the terminal's
+  // `channel`/`public` and `send` commands. sender_name lets a channel post
+  // carry the paired repeater's name ("Send as").
+  bool headSendChannel(int channel_idx, const char* sender_name, const char* text);
+  bool headSendDirect(ContactInfo& recipient, const char* text);
+  const char* headNodeName() const { return _prefs.node_name; }
+  // Run one companion terminal line (`to`, `login`, `cmd`, ...) for the
+  // on-screen Admin console; output lands in headTerminalLog().
+  void headTerminal(const char* line);
+#endif
   // Runtime copies use the wire PSK; storage/app keep the original alias PSK.
   bool getChannel(int channel_idx, ChannelDetails& channel);
   bool setChannel(int channel_idx, const ChannelDetails& channel);
@@ -750,7 +764,13 @@ private:
 #endif
 #if COMPANION_FEATURE_TEXT_TERMINAL
   Stream& terminalOutput();
+#if UI_REPEATER_HEAD
+  // The on-screen Admin console is always a terminal client, with or
+  // without USB attached.
+  bool hasTerminalOutput() const { return true; }
+#else
   bool hasTerminalOutput() const { return _terminal_output != NULL; }
+#endif
   void printTerminalBanner(bool show_binary_stop);
   ContactInfo* getTerminalRecipient();
   void printTerminalPath(const ContactInfo& recipient);

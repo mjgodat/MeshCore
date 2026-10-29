@@ -6,6 +6,9 @@
 #include <helpers/esp32/CpuClockPolicy.h>
 #include <helpers/esp32/PowerTestControls.h>
 #endif
+#if COMPANION_IDENTITY_NVS_BACKUP
+#include <helpers/esp32/IdentityNvsBackup.h>
+#endif
 #include <helpers/LedSettings.h>
 #include <helpers/ui/DisplayPowerSettings.h>
 #if defined(HELTEC_V4_DISPLAY_UNIFIED) && HELTEC_V4_DISPLAY_UNIFIED && defined(DISPLAY_CLASS)
@@ -664,6 +667,19 @@ bool MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
       pos++;
     }
     MESH_DEBUG_PRINTLN("INFO: no channel messages to remove from queue.");
+#ifdef UI_REPEATER_HEAD
+    // Only an app drains this queue and the head has none. Drop the oldest
+    // frame rather than refuse new ones (a refused room post is never acked).
+    popOfflineQueue();
+    Frame& tail = offlineQueueFrameAt(offline_queue_len);
+    tail.len = len;
+    memcpy(tail.buf, frame, len);
+    offline_queue_len++;
+#ifdef DISPLAY_CLASS
+    if (_ui) _ui->syncMessageQueue(offline_queue_len, 0);
+#endif
+    return true;
+#endif
   } else {
     Frame& tail = offlineQueueFrameAt(offline_queue_len);
     tail.len = len;
@@ -2634,6 +2650,11 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       modern_login = true;
 #endif
       keep_alive_secs = ((uint16_t)data[5]) * 16;
+#if UI_REPEATER_HEAD
+      // The modern reply carries the repeater's clock; a head has no RTC
+      // battery, so take it (forward only) as trusted time.
+      if (tag > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(tag);
+#endif
       out_frame[i++] = PUSH_CODE_LOGIN_SUCCESS;
       out_frame[i++] = data[6]; // permissions (eg. is_admin)
       memcpy(&out_frame[i], contact.id.pub_key, 6);
@@ -3026,8 +3047,13 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.rx_ps_preamble = RXPS_FIXED_PREAMBLE;
   _prefs.rx_ps_rx_us = RX_POWERSAVING_DEFAULT_RX_US;
   _prefs.rx_ps_sleep_us = RX_POWERSAVING_DEFAULT_SLEEP_US;
-  _prefs.powersaving_enabled = 1;
+  _prefs.powersaving_enabled = COMPANION_POWERSAVING_DEFAULT;
   _prefs.powersaving_policy_version = 0;
+#ifdef COMPANION_FLOOD_RETRY_DEFAULT
+  // Fresh-install flood retry attempts. A head behind an ESP-NOW bridge never
+  // hears its own flood echoed back, so every retry would be spent.
+  _prefs.flood_retry_attempts = COMPANION_FLOOD_RETRY_DEFAULT;
+#endif
   // Keep WiFi-only compatibility builds reachable when they have no other
   // CLI transport. Full and Bluetooth/wired-capable Companions are opt-in.
 #if defined(WIFI_SSID) && !defined(BLE_PIN_CODE) && !defined(ENABLE_USB_INTERFACE) \
@@ -3089,7 +3115,24 @@ void MyMesh::begin(bool has_display, bool radio_available,
 #ifdef DISPLAY_CLASS
   if (startup_screen != nullptr) startup_screen->loadingIdentity();
 #endif
-  const bool identity_loaded = _store->loadMainIdentity(self_id);
+  bool identity_loaded = _store->loadMainIdentity(self_id);
+#if COMPANION_IDENTITY_NVS_BACKUP
+  // An app launcher may have replaced the data partition since the last
+  // boot. Restore the key from NVS rather than becoming a different node.
+  bool identity_restored = false;
+  if (!identity_loaded || mesh::hasReservedIdentityPrefix(self_id)) {
+    mesh::LocalIdentity backup;
+    if (mesh::esp32::loadIdentityBackup(backup)
+        && !mesh::hasReservedIdentityPrefix(backup)
+        && _store->canCreateMainIdentity()
+        && _store->saveMainIdentity(backup)) {
+      self_id = backup;
+      identity_loaded = true;
+      identity_restored = true;
+      MESH_DEBUG_PRINTLN("Identity restored from NVS backup");
+    }
+  }
+#endif
   const bool is_new_install = !identity_loaded
       || mesh::hasReservedIdentityPrefix(self_id);
   if (is_new_install && !_store->canCreateMainIdentity()) {
@@ -3131,6 +3174,9 @@ void MyMesh::begin(bool has_display, bool radio_available,
     board.reboot();
     return;
   }
+#if COMPANION_IDENTITY_NVS_BACKUP
+  if (!identity_restored) mesh::esp32::saveIdentityBackup(self_id);
+#endif
 #if defined(ENABLE_OTA)
   mesh::ota::ota_refresh_seeder_identity(self_id.pub_key);
 #endif
@@ -7193,6 +7239,9 @@ void MyMesh::handleCmdFrame(size_t len) {
         identity.readFrom(&cmd_frame[1], 64);
         if (_store->saveMainIdentity(identity)) {
           self_id = identity;
+#if COMPANION_IDENTITY_NVS_BACKUP
+          mesh::esp32::saveIdentityBackup(self_id);
+#endif
 #if MESH_ENABLE_MESHTEXT_CHAT
           refreshMeshtextIdentity();
 #endif
@@ -9545,9 +9594,28 @@ void MyMesh::appendRxPowerSavingAdjustmentNote(char* reply, size_t reply_size,
 }
 
 #if COMPANION_FEATURE_TEXT_TERMINAL
+#if UI_REPEATER_HEAD
+HeadTerminalLog& headTerminalLog() {
+  static HeadTerminalLog log;
+  return log;
+}
+
+void MyMesh::headTerminal(const char* line) {
+  char command[MAX_TRANS_UNIT * 2 + 32];  // terminal line capacity
+  StrHelper::strzcpy(command, line, sizeof(command));
+  handleTerminalCommand(command, false);
+}
+#endif
+
 Stream& MyMesh::terminalOutput() {
+#if UI_REPEATER_HEAD
+  // The on-screen Admin console shows the same text the USB terminal gets.
+  if (isTerminalWaitingForInput()) return headTerminalLog().wrap(mesh::usbTerminalPort(false));
+  return headTerminalLog().wrap(_terminal_output != NULL ? *_terminal_output : Serial);
+#else
   if (isTerminalWaitingForInput()) return mesh::usbTerminalPort(false);
   return _terminal_output != NULL ? *_terminal_output : Serial;
+#endif
 }
 
 void MyMesh::resetTerminalSession() {
@@ -9951,6 +10019,45 @@ void MyMesh::sendTerminalChannelMessage(ChannelDetails& channel,
   }
 }
 
+#if UI_REPEATER_HEAD
+bool MyMesh::headSendChannel(int channel_idx, const char* sender_name,
+                             const char* text) {
+  ChannelDetails channel;
+  if (!getChannel(channel_idx, channel) || channel.name[0] == 0) return false;
+  if (sender_name == NULL || sender_name[0] == 0) sender_name = _prefs.node_name;
+  const size_t prefix_len = strlen(sender_name) + 2;  // "name: "
+  const size_t text_len = text == NULL ? 0 : strlen(text);
+  if (text_len == 0 || prefix_len + text_len > MAX_TEXT_LEN) return false;
+  return sendGroupMessage(getRTCClock()->getCurrentTimeUnique(), channel.channel,
+                          sender_name, text, text_len);
+}
+
+bool MyMesh::headSendDirect(ContactInfo& recipient, const char* text) {
+  if (text == NULL || *text == 0 || strlen(text) > MAX_TEXT_LEN) return false;
+  uint32_t expected_ack = 0;
+  uint32_t est_timeout = 0;
+  uint32_t message_timestamp = getRTCClock()->getCurrentTimeUnique();
+  uint8_t text_fingerprint[MAX_HASH_SIZE] = { 0 };
+  uint8_t packet_retry_key[MAX_HASH_SIZE] = { 0 };
+  mesh::Utils::sha256(text_fingerprint, sizeof(text_fingerprint),
+                      recipient.id.pub_key, PUB_KEY_SIZE,
+                      (const uint8_t*)text, strlen(text));
+  AckTableEntry* replacement_entry =
+      findPendingTextMessage(text_fingerprint, message_timestamp);
+  int result = sendMessage(recipient, message_timestamp, 0, text,
+                           expected_ack, est_timeout, packet_retry_key,
+                           NULL, text_fingerprint);
+  if (result == MSG_SEND_FAILED) return false;
+#if COMPANION_FEATURE_TEXT_TERMINAL
+  rememberTerminalAck(recipient, text, message_timestamp, expected_ack,
+                      est_timeout, packet_retry_key, replacement_entry);
+#else
+  (void)replacement_entry;
+#endif
+  return true;
+}
+#endif
+
 void MyMesh::printTerminalSendStatus(const char* operation,
                                      const ContactInfo& recipient, int result,
                                      uint32_t timeout_millis) {
@@ -10043,6 +10150,13 @@ void MyMesh::sendTerminalLogin(ContactInfo& recipient,
     terminalOutput().print("  ERROR: unable to send login\r\n");
     return;
   }
+#ifdef COMPANION_REPLY_TIMEOUT_FLOOR_MS
+  // Airtime estimates assume a direct reply; a head behind an ESP-NOW bridge
+  // also waits for the bridge's queue delay and the repeater's processing.
+  if (est_timeout < COMPANION_REPLY_TIMEOUT_FLOOR_MS) {
+    est_timeout = COMPANION_REPLY_TIMEOUT_FLOOR_MS;
+  }
+#endif
 
   uint32_t tag;
   memcpy(&tag, recipient.id.pub_key, 4);
@@ -10128,6 +10242,13 @@ void MyMesh::sendTerminalCommand(ContactInfo& recipient,
     terminalOutput().print("  ERROR: unable to send remote command\r\n");
     return;
   }
+#ifdef COMPANION_REPLY_TIMEOUT_FLOOR_MS
+  // Airtime estimates assume a direct reply; a head behind an ESP-NOW bridge
+  // also waits for the bridge's queue delay and the repeater's processing.
+  if (est_timeout < COMPANION_REPLY_TIMEOUT_FLOOR_MS) {
+    est_timeout = COMPANION_REPLY_TIMEOUT_FLOOR_MS;
+  }
+#endif
 
   _terminal_command.begin(recipient.id.pub_key, command_started_at,
                           est_timeout);
@@ -10566,8 +10687,13 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
     }
     sendTerminalTrace(*recipient);
   } else if (strcmp(command, "advert") == 0) {
+#if UI_REPEATER_HEAD
+    terminalOutput().print(advert() ? "  advert sent (flood)\r\n"
+                          : "  ERROR: unable to send advert\r\n");
+#else
     terminalOutput().print(advert() ? "  advert sent (zero hop)\r\n"
                           : "  ERROR: unable to send advert\r\n");
+#endif
   } else if (strcmp(command, "reset path") == 0) {
     ContactInfo* recipient = getTerminalRecipient();
     if (recipient == NULL) {
@@ -11920,7 +12046,17 @@ bool MyMesh::advert() {
     pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
   }
   if (pkt) {
+#if UI_REPEATER_HEAD
+    // A head reaches the mesh only through a repeater's bridge, which does
+    // not repeat zero-hop adverts; flood so LoRa nodes can learn the head
+    // (needed before they can decrypt its DMs). Same as the app's flood
+    // advert request.
+    TransportKey default_scope;
+    memcpy(&default_scope.key, _prefs.default_scope_key, sizeof(default_scope.key));
+    sendFloodScoped(default_scope, pkt, 0);
+#else
     sendZeroHop(pkt);
+#endif
     return true;
   } else {
     return false;
