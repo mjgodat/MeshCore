@@ -45,6 +45,7 @@ class HeadAdminScreen : public UIScreen {
     _touch_down = false;
     _presets_awaiting = false;
     _preset_step = PresetStep::Idle;
+    _commit_detached = false;
     _preset_msg[0] = 0;
     loadRepeaters();
   }
@@ -114,9 +115,10 @@ class HeadAdminScreen : public UIScreen {
           _presets_valid = false;
           _presets_awaiting = false;
           _preset_step = PresetStep::Idle;
+          _commit_detached = false;
           if (isPresetMode()) _mode = Mode::Console;
         }
-      } else {
+      } else if (!presetBusy()) {  // a login clears the log and would lose the reply
         startLogin(false);
       }
       return true;
@@ -263,9 +265,10 @@ class HeadAdminScreen : public UIScreen {
   }
 
   // The repeater's reply is the first non-empty line after the terminal's
-  // "CLI -> from <name>" header, without the "> " / "-> " markers.
+  // last "CLI -> from <name>" header, without the "> " / "-> " markers.
   static bool lastReplyValue(const char* tail, char* out, size_t size) {
-    const char* hdr = strstr(tail, "CLI -> from");
+    const char* hdr = nullptr;
+    for (const char* h = strstr(tail, "CLI -> from"); h; h = strstr(h + 1, "CLI -> from")) hdr = h;
     if (!hdr) return false;
     const char* p = strchr(hdr, '\n');
     while (p) {
@@ -620,6 +623,7 @@ class HeadAdminScreen : public UIScreen {
       _revert_deadline_ms = millis() + (uint32_t)_presets.pending_minutes * 60000UL;
       _preset_step = PresetStep::Loaded;
     }
+    _commit_detached = false;
     _preset_msg[0] = 0;
     _mode = Mode::PresetCommit;
   }
@@ -641,12 +645,24 @@ class HeadAdminScreen : public UIScreen {
       if (_preset_step == PresetStep::AwaitLoad) {
         _preset_step = PresetStep::Idle;  // a late reply is ignored; the list tells
         setPresetMsg("Tap Refresh to check the load");
+      } else if (_preset_step == PresetStep::CommitWait) {
+        _preset_step = PresetStep::Loaded;  // cancelled before the login went out
+        refreshPresets();
+      } else if (_preset_step == PresetStep::CommitLogin) {
+        _commit_detached = true;  // login already sent: finish silently
       } else if (_preset_step == PresetStep::Loaded) {
         refreshPresets();
       }
     } else {
       _mode = Mode::Console;
     }
+  }
+
+  // A preset request or commit is in flight: its reply must not be lost to
+  // a log clear (login, refresh) or mixed up with another request's.
+  bool presetBusy() const {
+    return _presets_awaiting || _preset_step == PresetStep::AwaitLoad
+        || _preset_step == PresetStep::CommitWait || _preset_step == PresetStep::CommitLogin;
   }
 
   // Copies the terminal's own "ERROR: ..." line (send failure, timeout).
@@ -687,6 +703,7 @@ class HeadAdminScreen : public UIScreen {
     if (_preset_step == PresetStep::CommitLogin && _login == Login::Pending
         && now - _commit_ms > kReplyTimeoutMillis) {
       _preset_step = PresetStep::Loaded;
+      _commit_detached = false;
       setPresetMsg("No login reply - try again");
     }
   }
@@ -698,10 +715,17 @@ class HeadAdminScreen : public UIScreen {
       // poll() has already turned the login reply into _login.
       if (_login == Login::Ok) {
         _preset_step = PresetStep::Idle;
+        if (_commit_detached) {
+          // The user went Back while the login was out: no mode change.
+          _commit_detached = false;
+          if (_mode == Mode::Presets) refreshPresets();
+          return;
+        }
         _mode = Mode::Presets;
         _preset_msg[0] = 0;
         refreshPresets();  // shows the committed slot, no pending banner
       } else if (_login == Login::Failed) {
+        _commit_detached = false;
         _preset_step = PresetStep::Loaded;
         setPresetMsg("Login failed - not confirmed");
       }
@@ -709,9 +733,17 @@ class HeadAdminScreen : public UIScreen {
     }
     const bool cli_reply = strstr(tail, "CLI -> from") != nullptr;
     if (_preset_step == PresetStep::AwaitLoad) {
+      // Only "OK - loading ..." or "Error ..." answer a load; any other
+      // reply (e.g. a late `get preset`) is ignored until the timeout.
+      bool failed = false;
       if (cli_reply && isLoadPresetOk(tail)) {
         _preset_step = PresetStep::Loaded;
-      } else if (cli_reply ? lastReplyValue(tail, err, sizeof(err)) : terminalError(tail, err, sizeof(err))) {
+      } else if (cli_reply) {
+        failed = lastReplyValue(tail, err, sizeof(err)) && strncmp(err, "Error", 5) == 0;
+      } else {
+        failed = terminalError(tail, err, sizeof(err));  // the head could not send it
+      }
+      if (failed) {
         _preset_step = PresetStep::Idle;
         setPresetMsg(err);
         if (_mode == Mode::PresetCommit) _mode = Mode::Presets;
@@ -776,7 +808,7 @@ class HeadAdminScreen : public UIScreen {
       drawButton(d, 0, top + i * row_h, d.width(), row_h, label, i == active, used);
     }
     const int y = d.height() - kButtonH;
-    drawButton(d, 0, y, d.width() / 2, kButtonH, "Refresh", false, !_presets_awaiting);
+    drawButton(d, 0, y, d.width() / 2, kButtonH, "Refresh", false, !presetBusy());
     drawButton(d, d.width() / 2, y, d.width() - d.width() / 2, kButtonH, "Back", false);
   }
 
@@ -785,7 +817,7 @@ class HeadAdminScreen : public UIScreen {
     _preset_msg[0] = 0;
     if (y >= _h - kButtonH) {
       if (x >= _w / 2) _mode = Mode::Console;
-      else if (!_presets_awaiting) refreshPresets();
+      else if (!presetBusy()) refreshPresets();
       return true;
     }
     const int top = presetRowsTop();
@@ -793,6 +825,7 @@ class HeadAdminScreen : public UIScreen {
       if (!had_msg && _presets_valid && _presets.pending) openPresetCommitFromList();
       return true;
     }
+    if (presetBusy()) return had_msg;  // a reply is still due
     const int i = (y - top) / presetRowH(_h);
     if (i < 0 || i >= kPresetSlots || !_presets_valid || !_presets.slot[i].used) return had_msg;
     _preset_sel = i;
@@ -920,6 +953,7 @@ class HeadAdminScreen : public UIScreen {
   uint32_t _load_sent_ms = 0;
   uint32_t _revert_deadline_ms = 0;
   uint32_t _commit_ms = 0;
+  bool _commit_detached = false;  // Back pressed while the commit login was out
   Repeater _repeaters[kMaxRepeaters];
   int _repeater_count = 0;
   int _repeater_idx = 0;
