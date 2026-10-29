@@ -6,12 +6,18 @@
 //   - header: target repeater (tap to cycle) and login state (tap to log in)
 //   - console: tail of the terminal output
 //   - buttons: ver / neighbors / clock / radio, settings, free command,
-//     advert, back
+//     advert, presets, back
 // Settings reads a value with `cmd get <key>` and writes it with
 // `cmd set <key> <value>`. Any `set` that can cut this head off from the
-// repeater (bridge/espnow/wifi) or move its LoRa radio (radio/freq), from
-// Settings or typed under Cmd, first shows a warning screen with the old
-// value and how to recover; nothing is sent until Apply.
+// repeater (bridge/espnow/wifi) or move its LoRa radio (radio/freq), and a
+// typed `load preset`, first shows a warning screen with the old value and
+// how to recover; nothing is sent until Apply.
+//
+// Presets (logged in only) lists the repeater's radio presets
+// (`cmd get preset`) and loads one with `cmd load preset <n>`. A remote load
+// reverts after 10 minutes unless a fresh admin login confirms it, so the
+// screen after a load offers Confirm, which re-sends `login` once the radio
+// switch has settled and then re-reads the list.
 //
 // The admin password is entered once per repeater and kept in this head's
 // NVS (namespace "hadmin"); "Forget password" in Settings removes it.
@@ -23,6 +29,7 @@
 #include "../MyMesh.h"
 #include "../HeadTerminalLog.h"
 #include "TouchKeyboard.h"
+#include "HeadPresets.h"
 
 extern MyMesh the_mesh;
 
@@ -36,6 +43,9 @@ class HeadAdminScreen : public UIScreen {
     _mode = Mode::Console;
     _status = nullptr;
     _touch_down = false;
+    _presets_awaiting = false;
+    _preset_step = PresetStep::Idle;
+    _preset_msg[0] = 0;
     loadRepeaters();
   }
 
@@ -55,16 +65,20 @@ class HeadAdminScreen : public UIScreen {
       case Mode::Command:
       case Mode::SetValue: renderEntry(d); break;
       case Mode::Confirm: renderConfirm(d); break;
+      case Mode::Presets: renderPresets(d); break;
+      case Mode::PresetAsk: renderPresetAsk(d); break;
+      case Mode::PresetCommit: renderPresetCommit(d); break;
     }
     return 500;
   }
 
   void poll() override {
+    pollPresetTimers();
     // Track login outcome and capture `cmd get` values as replies arrive.
     const uint32_t gen = headTerminalLog().generation();
     if (gen == _seen_generation) return;
     _seen_generation = gen;
-    char tail[256];
+    char tail[400];  // a full `get preset` reply plus its header
     headTerminalLog().copyTail(tail, sizeof(tail));
     if (_login == Login::Pending) {
       if (strstr(tail, "accepted")) _login = Login::Ok;
@@ -78,6 +92,7 @@ class HeadAdminScreen : public UIScreen {
         _awaiting_value = false;
       }
     }
+    pollPresetReplies(tail);
   }
 
   bool handleInput(char c) override {
@@ -95,6 +110,11 @@ class HeadAdminScreen : public UIScreen {
         if (_repeater_count) {
           _repeater_idx = (_repeater_idx + 1) % _repeater_count;
           _login = Login::None;
+          // Presets belong to the previous repeater.
+          _presets_valid = false;
+          _presets_awaiting = false;
+          _preset_step = PresetStep::Idle;
+          if (isPresetMode()) _mode = Mode::Console;
         }
       } else {
         startLogin(false);
@@ -105,12 +125,19 @@ class HeadAdminScreen : public UIScreen {
       case Mode::Console: return touchConsole(x, y, width);
       case Mode::Settings: return touchSettings(x, y);
       case Mode::Confirm: return touchConfirm(x, y);
+      case Mode::Presets: return touchPresets(x, y);
+      case Mode::PresetAsk: return touchPresetAsk(x, y);
+      case Mode::PresetCommit: return touchPresetCommit(x, y);
       default: return touchEntry(x, y, width);
     }
   }
 
  private:
-  enum class Mode : uint8_t { Console, Settings, Password, Command, SetValue, Confirm };
+  enum class Mode : uint8_t {
+    Console, Settings, Password, Command, SetValue, Confirm, Presets, PresetAsk, PresetCommit
+  };
+  // Load/confirm progress for a remote `load preset`.
+  enum class PresetStep : uint8_t { Idle, AwaitLoad, Loaded, CommitWait, CommitLogin };
   enum class Login : uint8_t { None, Pending, Ok, Failed };
   struct Repeater { uint8_t pub_prefix[4]; char name[32]; };
   struct Setting { const char* key; };
@@ -122,6 +149,13 @@ class HeadAdminScreen : public UIScreen {
   static constexpr int kKeyH = 22;
   static constexpr int kMaxRepeaters = 8;
   static constexpr int kSettingRows = 7;
+  static constexpr int kConsoleCols = 3;
+  static constexpr int kConsoleRows = 3;
+  static constexpr int kPresetSlots = 5;
+  static constexpr int kPresetsButton = 7;  // index in the console grid
+  static constexpr uint32_t kRevertMillis = 10UL * 60UL * 1000UL;  // repeater's revert timer
+  static constexpr uint32_t kSwitchSettleMillis = 3000;  // radio switches ~2 s after the reply
+  static constexpr uint32_t kReplyTimeoutMillis = 30000;
 
   static const Setting* settings(int& count) {
     static const Setting list[] = {
@@ -265,7 +299,7 @@ class HeadAdminScreen : public UIScreen {
 
   void renderConsole(DisplayDriver& d) {
     const int top = kHeaderH + 1;
-    const int bottom = d.height() - 2 * kButtonH;
+    const int bottom = d.height() - kConsoleRows * kButtonH;
     const int line_h = 10;
     const int max_lines = (bottom - top) / line_h;
     char tail[400];
@@ -304,26 +338,38 @@ class HeadAdminScreen : public UIScreen {
       d.setCursor(1, bottom - line_h);
       d.print(_status);
     }
-    static const char* labels[8] = {"Ver", "Nbrs", "Clock", "Radio", "Settings", "Cmd", "Advert", "Back"};
-    const int w = d.width() / 4;
-    for (int i = 0; i < 8; i++) {
-      drawButton(d, (i % 4) * w, bottom + (i / 4) * kButtonH, w, kButtonH, labels[i], false);
+    // 3x3 grid. "Settings" sits in the last column, which gets the
+    // remainder pixel(s) of the width, so its label fits unclipped.
+    static const char* labels[kConsoleCols * kConsoleRows] = {
+        "Ver", "Nbrs", "Clock", "Radio", "Cmd", "Settings", "Advert", "Presets", "Back"};
+    for (int i = 0; i < kConsoleCols * kConsoleRows; i++) {
+      const int col = i % kConsoleCols;
+      const int x0 = col * d.width() / kConsoleCols;
+      const int x1 = (col + 1) * d.width() / kConsoleCols;
+      const bool enabled = i != kPresetsButton || _login == Login::Ok;
+      drawButton(d, x0, bottom + (i / kConsoleCols) * kButtonH, x1 - x0, kButtonH, labels[i], false, enabled);
     }
   }
 
   bool touchConsole(int x, int y, int width) {
-    const int bottom = _h - 2 * kButtonH;
-    if (y < bottom) return false;
-    const int idx = ((y - bottom) / kButtonH) * 4 + x / (width / 4);
+    const int bottom = _h - kConsoleRows * kButtonH;
+    if (y < bottom || width <= 0) return false;
+    int col = x * kConsoleCols / width;
+    if (col >= kConsoleCols) col = kConsoleCols - 1;
+    const int idx = ((y - bottom) / kButtonH) * kConsoleCols + col;
     switch (idx) {
       case 0: remote("ver"); break;
       case 1: remote("neighbors"); break;
       case 2: remote("clock"); break;
       case 3: remote("get radio"); break;
-      case 4: _mode = Mode::Settings; _settings_scroll = 0; break;
-      case 5: _mode = Mode::Command; _keyboard.reset(""); _old_value[0] = 0; break;
+      case 4: _mode = Mode::Command; _keyboard.reset(""); _old_value[0] = 0; break;
+      case 5: _mode = Mode::Settings; _settings_scroll = 0; break;
       case 6: remote("advert"); break;
-      case 7: back(); break;
+      case kPresetsButton:
+        if (_login != Login::Ok) { _status = "Log in first"; break; }
+        openPresets();
+        break;
+      case 8: back(); break;
       default: return false;
     }
     return true;
@@ -433,11 +479,13 @@ class HeadAdminScreen : public UIScreen {
 
   // ---- disclaimer for changes that can cut off the head or the mesh -----
 
-  enum class Hazard : uint8_t { None, HeadLink, LoRa };
+  enum class Hazard : uint8_t { None, HeadLink, LoRa, Preset };
 
   // `set` commands that change the ESP-NOW link this head depends on, or the
-  // repeater's LoRa radio. Matches both the Settings list and typed commands.
+  // repeater's LoRa radio, and a typed `load preset`. Matches both the
+  // Settings list and typed commands.
   static Hazard hazardOf(const char* command) {
+    if (isLoadPresetCommand(command)) return Hazard::Preset;
     while (*command == ' ') command++;
     if (strncmp(command, "set ", 4) != 0) return Hazard::None;
     const char* key = command + 4;
@@ -461,6 +509,12 @@ class HeadAdminScreen : public UIScreen {
                "cannot undo it. Recovery: connect the repeater by USB and "
                "set it back%s%s.",
                _pending, _old_value[0] ? " to: " : "", _old_value);
+    } else if (_hazard == Hazard::Preset) {
+      snprintf(text, sizeof(text),
+               "\"%s\" moves the repeater's LoRa radio to that preset; nodes "
+               "on the old settings lose it. It reverts in 10 min unless you "
+               "confirm under Presets.",
+               _pending);
     } else {
       snprintf(text, sizeof(text),
                "\"%s\" changes the repeater's LoRa radio. Phones, nodes and "
@@ -479,6 +533,7 @@ class HeadAdminScreen : public UIScreen {
     if (y < _h - kButtonH) return false;
     if (x >= _w / 2) {
       remote(_pending);
+      if (_hazard == Hazard::Preset) _load_sent_ms = millis();  // Presets > Confirm waits for the switch
       _mode = Mode::Console;
     } else {
       _mode = _pending_from;  // back to editing, nothing sent
@@ -486,7 +541,8 @@ class HeadAdminScreen : public UIScreen {
     return true;
   }
 
-  static void drawWrapped(DisplayDriver& d, const char* text, int y, int bottom) {
+  // Returns the y below the last line drawn.
+  static int drawWrapped(DisplayDriver& d, const char* text, int y, int bottom) {
     const int cols = d.width() / 6 - 1;
     const int line_h = 10;
     char line[40];
@@ -506,22 +562,334 @@ class HeadAdminScreen : public UIScreen {
       while (*text == ' ') text++;
       y += line_h;
     }
+    return y;
+  }
+
+  // ---- presets ----------------------------------------------------------
+  //
+  // Presets: list from `get preset`, one row per slot (active highlighted,
+  // empty greyed). PresetAsk: confirm a load. PresetCommit: after a load,
+  // Confirm re-sends `login` (the repeater commits a remote load on a fresh
+  // admin login) and shows an approximate revert countdown.
+
+  bool isPresetMode() const {
+    return _mode == Mode::Presets || _mode == Mode::PresetAsk || _mode == Mode::PresetCommit;
+  }
+
+  const char* repeaterName() const {
+    return _repeater_count ? _repeaters[_repeater_idx].name : "?";
+  }
+
+  const char* presetName(int i) const {
+    return i >= 0 && i < kPresetSlots && _presets.slot[i].name[0] ? _presets.slot[i].name : "preset";
+  }
+
+  void setPresetMsg(const char* text) { snprintf(_preset_msg, sizeof(_preset_msg), "%s", text); }
+
+  void openPresets() {
+    _mode = Mode::Presets;
+    _preset_msg[0] = 0;
+    refreshPresets();
+  }
+
+  void refreshPresets() {
+    _presets_awaiting = true;
+    _presets_sent_ms = millis();
+    headTerminalLog().clear();  // so only this reply is parsed
+    remote("get preset");
+  }
+
+  void sendPresetLoad() {
+    char line[24];
+    snprintf(line, sizeof(line), "load preset %d", _preset_sel + 1);
+    _preset_msg[0] = 0;
+    _presets_awaiting = false;  // a list reply now would be mixed up with this one
+    headTerminalLog().clear();
+    remote(line);
+    _load_sent_ms = millis();
+    _revert_deadline_ms = _load_sent_ms + kRevertMillis;
+    _preset_step = PresetStep::AwaitLoad;
+    _mode = Mode::PresetCommit;
+  }
+
+  // The list says a load is pending (from this head or anyone): open the
+  // Confirm screen, keeping the local countdown if this head started it.
+  void openPresetCommitFromList() {
+    _preset_sel = headPresetActiveSlot(_presets);
+    if (_preset_step == PresetStep::Idle || _preset_step == PresetStep::AwaitLoad) {
+      _revert_deadline_ms = millis() + (uint32_t)_presets.pending_minutes * 60000UL;
+      _preset_step = PresetStep::Loaded;
+    }
+    _preset_msg[0] = 0;
+    _mode = Mode::PresetCommit;
+  }
+
+  void startPresetCommit() {
+    char pw[32];
+    if (!loadPassword(pw, sizeof(pw))) {
+      setPresetMsg("No saved password - tap Login");
+      return;
+    }
+    _preset_step = PresetStep::CommitWait;  // pollPresetTimers() logs in once the switch settled
+  }
+
+  void presetBack() {
+    if (_mode == Mode::PresetAsk) {
+      _mode = Mode::Presets;
+    } else if (_mode == Mode::PresetCommit) {
+      _mode = Mode::Presets;
+      if (_preset_step == PresetStep::AwaitLoad) {
+        _preset_step = PresetStep::Idle;  // a late reply is ignored; the list tells
+        setPresetMsg("Tap Refresh to check the load");
+      } else if (_preset_step == PresetStep::Loaded) {
+        refreshPresets();
+      }
+    } else {
+      _mode = Mode::Console;
+    }
+  }
+
+  // Copies the terminal's own "ERROR: ..." line (send failure, timeout).
+  static bool terminalError(const char* tail, char* out, size_t size) {
+    const char* e = strstr(tail, "ERROR:");
+    if (!e) return false;
+    const char* end = strchr(e, '\n');
+    size_t n = end ? (size_t)(end - e) : strlen(e);
+    if (n >= size) n = size - 1;
+    memcpy(out, e, n);
+    out[n] = 0;
+    return true;
+  }
+
+  // Time-driven steps; runs every loop, before the log-change check.
+  void pollPresetTimers() {
+    const uint32_t now = millis();
+    if (_presets_awaiting && now - _presets_sent_ms > kReplyTimeoutMillis) {
+      _presets_awaiting = false;
+      setPresetMsg("No reply - tap Refresh");
+    }
+    if (_preset_step == PresetStep::AwaitLoad && now - _load_sent_ms > kReplyTimeoutMillis) {
+      _preset_step = PresetStep::Idle;
+      setPresetMsg("No reply to load - Refresh");
+      if (_mode == Mode::PresetCommit) _mode = Mode::Presets;
+    }
+    if (_preset_step == PresetStep::CommitWait && now - _load_sent_ms >= kSwitchSettleMillis) {
+      char pw[32];
+      if (!loadPassword(pw, sizeof(pw))) {
+        _preset_step = PresetStep::Loaded;
+        setPresetMsg("No saved password - tap Login");
+      } else {
+        _preset_step = PresetStep::CommitLogin;
+        _commit_ms = now;
+        startLogin(false);  // saved password: stays on this screen
+      }
+    }
+    if (_preset_step == PresetStep::CommitLogin && _login == Login::Pending
+        && now - _commit_ms > kReplyTimeoutMillis) {
+      _preset_step = PresetStep::Loaded;
+      setPresetMsg("No login reply - try again");
+    }
+  }
+
+  // Reply-driven steps; `tail` is the terminal log since the last clear().
+  void pollPresetReplies(const char* tail) {
+    char err[sizeof(_preset_msg)];
+    if (_preset_step == PresetStep::CommitLogin) {
+      // poll() has already turned the login reply into _login.
+      if (_login == Login::Ok) {
+        _preset_step = PresetStep::Idle;
+        _mode = Mode::Presets;
+        _preset_msg[0] = 0;
+        refreshPresets();  // shows the committed slot, no pending banner
+      } else if (_login == Login::Failed) {
+        _preset_step = PresetStep::Loaded;
+        setPresetMsg("Login failed - not confirmed");
+      }
+      return;
+    }
+    const bool cli_reply = strstr(tail, "CLI -> from") != nullptr;
+    if (_preset_step == PresetStep::AwaitLoad) {
+      if (cli_reply && isLoadPresetOk(tail)) {
+        _preset_step = PresetStep::Loaded;
+      } else if (cli_reply ? lastReplyValue(tail, err, sizeof(err)) : terminalError(tail, err, sizeof(err))) {
+        _preset_step = PresetStep::Idle;
+        setPresetMsg(err);
+        if (_mode == Mode::PresetCommit) _mode = Mode::Presets;
+      }
+      return;
+    }
+    if (!_presets_awaiting) return;
+    if (cli_reply) {
+      _presets_awaiting = false;
+      HeadPresetList list;
+      if (parseHeadPresetReply(tail, list)) {
+        _presets = list;
+        _presets_valid = true;
+        if (!list.pending && _preset_step == PresetStep::Loaded) _preset_step = PresetStep::Idle;
+      } else {
+        setPresetMsg(lastReplyValue(tail, err, sizeof(err)) ? err : "Unreadable preset reply");
+      }
+    } else if (terminalError(tail, err, sizeof(err))) {
+      _presets_awaiting = false;
+      setPresetMsg(err);
+    }
+  }
+
+  int presetRowsTop() const { return kHeaderH + 11; }
+  int presetRowH(int h) const { return (h - kButtonH - presetRowsTop()) / kPresetSlots; }
+  int presetConfirmTop() const { return kHeaderH + 35; }
+
+  void renderPresets(DisplayDriver& d) {
+    char line[48];
+    const char* banner = nullptr;
+    bool warn = false;
+    if (_preset_msg[0]) {
+      banner = _preset_msg;
+      warn = true;
+    } else if (_presets_awaiting) {
+      banner = "Reading presets...";
+    } else if (_presets_valid && _presets.pending) {
+      // Tapping the banner opens Confirm.
+      snprintf(line, sizeof(line), "Pending - reverts in ~%um >", (unsigned)_presets.pending_minutes);
+      banner = line;
+      warn = true;
+    } else if (_presets_valid && _presets.names_only) {
+      banner = "Names only (reply too long)";
+    } else if (_presets_valid) {
+      banner = "Tap a preset to load it";
+    }
+    if (banner) {
+      d.setColor(warn ? UIColor::warning_txt : UIColor::secondary_txt);
+      d.drawTextEllipsized(2, kHeaderH + 1, d.width() - 4, banner);
+    }
+    const int top = presetRowsTop();
+    const int row_h = presetRowH(d.height());
+    const int active = _presets_valid ? headPresetActiveSlot(_presets) : -1;
+    char label[32];
+    for (int i = 0; i < kPresetSlots; i++) {
+      const HeadPresetSlot& s = _presets.slot[i];
+      const bool used = _presets_valid && s.used;
+      if (!_presets_valid) snprintf(label, sizeof(label), "%d ...", i + 1);
+      else if (!s.used) snprintf(label, sizeof(label), "%d -", i + 1);
+      else if (s.freq[0]) snprintf(label, sizeof(label), "%d %s %s", i + 1, s.name, s.freq);
+      else snprintf(label, sizeof(label), "%d %s", i + 1, s.name);
+      drawButton(d, 0, top + i * row_h, d.width(), row_h, label, i == active, used);
+    }
+    const int y = d.height() - kButtonH;
+    drawButton(d, 0, y, d.width() / 2, kButtonH, "Refresh", false, !_presets_awaiting);
+    drawButton(d, d.width() / 2, y, d.width() - d.width() / 2, kButtonH, "Back", false);
+  }
+
+  bool touchPresets(int x, int y) {
+    const bool had_msg = _preset_msg[0] != 0;
+    _preset_msg[0] = 0;
+    if (y >= _h - kButtonH) {
+      if (x >= _w / 2) _mode = Mode::Console;
+      else if (!_presets_awaiting) refreshPresets();
+      return true;
+    }
+    const int top = presetRowsTop();
+    if (y < top) {
+      if (!had_msg && _presets_valid && _presets.pending) openPresetCommitFromList();
+      return true;
+    }
+    const int i = (y - top) / presetRowH(_h);
+    if (i < 0 || i >= kPresetSlots || !_presets_valid || !_presets.slot[i].used) return had_msg;
+    _preset_sel = i;
+    if (_presets.slot[i].active) {
+      snprintf(_preset_msg, sizeof(_preset_msg), "Already on %s", _presets.slot[i].name);
+      return true;
+    }
+    _mode = Mode::PresetAsk;
+    return true;
+  }
+
+  void renderPresetAsk(DisplayDriver& d) {
+    const int bottom = d.height() - kButtonH - 2;
+    char text[96];
+    snprintf(text, sizeof(text), "Load %s on %s?", presetName(_preset_sel), repeaterName());
+    d.setColor(UIColor::primary_txt);
+    int y = drawWrapped(d, text, kHeaderH + 2, bottom);
+    const HeadPresetSlot& s = _presets.slot[_preset_sel];
+    if (s.freq[0]) {
+      snprintf(text, sizeof(text), "%s MHz", s.freq);
+      y = drawWrapped(d, text, y, bottom);
+    }
+    d.setColor(UIColor::warning_txt);
+    drawWrapped(d, "It reverts in 10 min unless you confirm.", y + 4, bottom);
+    const int by = d.height() - kButtonH;
+    drawButton(d, 0, by, d.width() / 2, kButtonH, "Cancel", false);
+    drawButton(d, d.width() / 2, by, d.width() - d.width() / 2, kButtonH, "Load", true);
+  }
+
+  bool touchPresetAsk(int x, int y) {
+    if (y < _h - kButtonH) return false;
+    if (x >= _w / 2) sendPresetLoad();
+    else _mode = Mode::Presets;
+    return true;
+  }
+
+  void renderPresetCommit(DisplayDriver& d) {
+    const int top = kHeaderH + 2;
+    char line[48];
+    switch (_preset_step) {
+      case PresetStep::AwaitLoad: snprintf(line, sizeof(line), "Loading %s...", presetName(_preset_sel)); break;
+      case PresetStep::CommitWait: snprintf(line, sizeof(line), "Waiting for radio switch..."); break;
+      case PresetStep::CommitLogin: snprintf(line, sizeof(line), "Logging in to confirm..."); break;
+      default: snprintf(line, sizeof(line), "On %s, not confirmed", presetName(_preset_sel)); break;
+    }
+    d.setColor(UIColor::primary_txt);
+    d.drawTextEllipsized(2, top, d.width() - 4, line);
+    if (_preset_step != PresetStep::AwaitLoad) {
+      const int32_t left = (int32_t)(_revert_deadline_ms - millis());
+      if (left > 0) {
+        const unsigned long secs = (unsigned long)left / 1000UL;
+        snprintf(line, sizeof(line), "Reverts in ~%lu:%02lu (approx)", secs / 60UL, secs % 60UL);
+      } else {
+        snprintf(line, sizeof(line), "Revert time passed - go Back");
+      }
+      d.setColor(UIColor::warning_txt);
+      d.drawTextEllipsized(2, top + 11, d.width() - 4, line);
+    }
+    if (_preset_msg[0]) {
+      d.setColor(UIColor::warning_txt);
+      d.drawTextEllipsized(2, top + 22, d.width() - 4, _preset_msg);
+    }
+    const bool can_confirm = _preset_step == PresetStep::Loaded;
+    const int cy = presetConfirmTop();
+    drawButton(d, 0, cy, d.width(), d.height() - kButtonH - 2 - cy, "Confirm", can_confirm, can_confirm);
+    drawButton(d, 0, d.height() - kButtonH, d.width(), kButtonH, "Back", false);
+  }
+
+  bool touchPresetCommit(int x, int y) {
+    (void)x;
+    _preset_msg[0] = 0;
+    if (y >= _h - kButtonH) {
+      presetBack();
+      return true;
+    }
+    if (y >= presetConfirmTop() && _preset_step == PresetStep::Loaded) startPresetCommit();
+    return true;
   }
 
   // ---- shared -----------------------------------------------------------
 
-  void drawButton(DisplayDriver& d, int x, int y, int w, int h, const char* label, bool on) const {
-    d.setColor(on ? UIColor::corp_blue : UIColor::title_bkg);
+  // A disabled button is drawn hollow with dim text.
+  void drawButton(DisplayDriver& d, int x, int y, int w, int h, const char* label, bool on,
+                  bool enabled = true) const {
+    d.setColor(on ? UIColor::corp_blue : enabled ? UIColor::title_bkg : UIColor::window_bkg);
     d.fillRect(x + 1, y + 1, w - 2, h - 2);
     d.setColor(UIColor::secondary_txt);
     d.drawRect(x, y, w, h);
-    d.setColor(UIColor::title_txt);
+    d.setColor(enabled ? UIColor::title_txt : UIColor::secondary_txt);
     d.drawTextEllipsized(x + 3, y + (h - 8) / 2, w - 6, label);
   }
 
   void back() {
     if (_mode == Mode::Console) {
       if (_on_close) _on_close(_ctx);
+    } else if (isPresetMode()) {
+      presetBack();
     } else {
       _mode = Mode::Console;
     }
@@ -542,6 +910,16 @@ class HeadAdminScreen : public UIScreen {
   const char* _status = nullptr;
   uint32_t _seen_generation = 0;
   int _settings_scroll = 0;
+  HeadPresetList _presets = {};
+  bool _presets_valid = false;
+  bool _presets_awaiting = false;
+  uint32_t _presets_sent_ms = 0;
+  int _preset_sel = 0;
+  char _preset_msg[48] = {};
+  PresetStep _preset_step = PresetStep::Idle;
+  uint32_t _load_sent_ms = 0;
+  uint32_t _revert_deadline_ms = 0;
+  uint32_t _commit_ms = 0;
   Repeater _repeaters[kMaxRepeaters];
   int _repeater_count = 0;
   int _repeater_idx = 0;

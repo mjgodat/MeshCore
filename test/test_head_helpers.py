@@ -191,6 +191,120 @@ int main() {
 '''
 
 
+PRESETS_HARNESS = r'''
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include "../examples/companion_radio/ui-new/HeadPresets.h"
+static int failures = 0;
+#define CHECK(cond) do { if (!(cond)) { std::printf("FAIL line %d: %s\n", __LINE__, #cond); failures++; } } while (0)
+#define STREQ(a, b) CHECK(std::strcmp((a), (b)) == 0)
+int main() {
+  HeadPresetList l;
+  // full list, as the raw reply text
+  CHECK(parseHeadPresetReply("1*USA-Canada 910.5250244,62.5,7,5\n2 Test 925.5,62.5,9,5\n3 -\n4 -\n5 -", l));
+  CHECK(!l.pending && !l.names_only);
+  CHECK(l.slot[0].used && l.slot[0].active);
+  STREQ(l.slot[0].name, "USA-Canada");
+  STREQ(l.slot[0].freq, "910.525");
+  CHECK(l.slot[1].used && !l.slot[1].active);
+  STREQ(l.slot[1].name, "Test");
+  STREQ(l.slot[1].freq, "925.5");
+  for (int i = 2; i < 5; i++) { CHECK(!l.slot[i].used && !l.slot[i].active); STREQ(l.slot[i].name, ""); STREQ(l.slot[i].freq, ""); }
+  CHECK(headPresetActiveSlot(l) == 0);
+
+  // pending prefix
+  CHECK(parseHeadPresetReply("pending, reverts in 9m; 1 USA-Canada 910.5250244,62.5,7,5\n2*Test 925.5,62.5,9,5\n3 -\n4 -\n5 -", l));
+  CHECK(l.pending && l.pending_minutes == 9);
+  CHECK(!l.slot[0].active && l.slot[1].active);
+  STREQ(l.slot[0].name, "USA-Canada");
+  STREQ(l.slot[1].freq, "925.5");
+  CHECK(headPresetActiveSlot(l) == 1);
+
+  // names-only fallback (single line)
+  CHECK(parseHeadPresetReply("1*USA-Canada 2 Test 3 - 4 Long Name 5 - (get preset N)", l));
+  CHECK(l.names_only && !l.pending);
+  CHECK(l.slot[0].used && l.slot[0].active);
+  STREQ(l.slot[0].name, "USA-Canada");
+  STREQ(l.slot[0].freq, "");
+  CHECK(l.slot[1].used && !l.slot[1].active);
+  STREQ(l.slot[1].name, "Test");
+  CHECK(!l.slot[2].used);
+  CHECK(l.slot[3].used);
+  STREQ(l.slot[3].name, "Long Name");
+  CHECK(!l.slot[4].used);
+
+  // pending + names-only
+  CHECK(parseHeadPresetReply("pending, reverts in 10m; 1 A 2*B 3 - 4 - 5 - (get preset N)", l));
+  CHECK(l.pending && l.pending_minutes == 10 && l.names_only);
+  CHECK(l.slot[1].active);
+  STREQ(l.slot[1].name, "B");
+
+  // 5th tuple field (preamble), names longer than the slot are truncated
+  CHECK(parseHeadPresetReply("1 -\n2 -\n3 EU-Narrow-Long-Name 869.6179999,62.5,8,8,16\n4 -\n5*X 915,250,11,5", l));
+  STREQ(l.slot[2].name, "EU-Narrow-Lo");
+  STREQ(l.slot[2].freq, "869.618");
+  STREQ(l.slot[4].freq, "915");
+  CHECK(l.slot[4].active);
+
+  // all empty
+  CHECK(parseHeadPresetReply("1 -\n2 -\n3 -\n4 -\n5 -", l));
+  for (int i = 0; i < 5; i++) CHECK(!l.slot[i].used);
+  CHECK(headPresetActiveSlot(l) == -1);
+
+  // as captured by the head terminal log: header, "  " / "  -> " / "> " prefixes, CRLF, prompt after
+  CHECK(parseHeadPresetReply(
+      "\n> cmd get preset\n\n(direct) CLI -> from CaptCallahan-Base (round trip 412 ms)\n"
+      "  1*USA-Canada 910.5250244,62.5,7,5\n2 Test 925.5,62.5,9,5\n3 -\n4 -\n5 -\n> ", l));
+  CHECK(l.slot[0].active);
+  STREQ(l.slot[1].name, "Test");
+  CHECK(!l.slot[4].used);
+  CHECK(parseHeadPresetReply("  -> pending, reverts in 3m; 1*A 910.5,62.5,7,5\r\n2 -\r\n3 -\r\n4 -\r\n5 B 920.125,62.5,7,5\r\n> ", l));
+  CHECK(l.pending && l.pending_minutes == 3);
+  STREQ(l.slot[0].name, "A");
+  STREQ(l.slot[0].freq, "910.5");
+  STREQ(l.slot[4].name, "B");
+  STREQ(l.slot[4].freq, "920.125");
+  CHECK(parseHeadPresetReply("> 1*A 910.5,62.5,7,5\n2 -\n3 -\n4 -\n5 -", l));
+
+  // garbage and other replies
+  CHECK(!parseHeadPresetReply("", l));
+  CHECK(!parseHeadPresetReply(nullptr, l));
+  CHECK(!parseHeadPresetReply("Error: unknown command", l));
+  CHECK(!parseHeadPresetReply("OK - loading Test ...", l));
+  CHECK(!parseHeadPresetReply("> cmd get preset\n", l));
+  CHECK(!parseHeadPresetReply("1*A 910.5,62.5,7,5\n2 -\n3 -", l));        // truncated list
+  CHECK(!parseHeadPresetReply("2 A 910.5,62.5,7,5\n1 -\n3 -\n4 -\n5 -", l));  // out of order
+  CHECK(!parseHeadPresetReply("pending, reverts in Xm; garbage", l));
+
+  // load replies
+  CHECK(isLoadPresetOk("OK - loading Test ..."));
+  CHECK(isLoadPresetOk("\n> cmd load preset 2\n(direct) CLI -> from R\n  OK - loading Test (reverts in 10m)\n> "));
+  CHECK(!isLoadPresetOk("Error: preset 3 is empty"));
+  CHECK(!isLoadPresetOk("> cmd load preset 2\n"));
+  CHECK(!isLoadPresetOk(nullptr));
+
+  // hazard matcher for typed commands
+  CHECK(isLoadPresetCommand("load preset 2"));
+  CHECK(isLoadPresetCommand("  load   preset 2"));
+  CHECK(!isLoadPresetCommand("get preset"));
+  CHECK(!isLoadPresetCommand("loadpreset 2"));
+  CHECK(!isLoadPresetCommand(nullptr));
+
+  // display frequency trimming
+  char f[12];
+  headPresetTrimFreq("910.5250244", f, sizeof(f)); STREQ(f, "910.525");
+  headPresetTrimFreq("925.5", f, sizeof(f)); STREQ(f, "925.5");
+  headPresetTrimFreq("869.6179999", f, sizeof(f)); STREQ(f, "869.618");
+  headPresetTrimFreq("915.000", f, sizeof(f)); STREQ(f, "915");
+  headPresetTrimFreq("abc", f, sizeof(f)); STREQ(f, "abc");
+  if (failures) return 1;
+  std::printf("PASS presets\n");
+  return 0;
+}
+'''
+
+
 class HeadHelpersTest(unittest.TestCase):
     def build_and_run(self, name, source, expected, extra_flags=()):
         compiler = shutil.which('g++') or shutil.which('clang++')
@@ -228,6 +342,12 @@ class HeadHelpersTest(unittest.TestCase):
             '"../examples/companion_radio/ui-new/TouchKeyboard.h"',
             '"' + (ROOT / 'examples/companion_radio/ui-new/TouchKeyboard.h').as_posix() + '"'),
             'PASS keyboard', ('-Wno-unused-parameter',))
+
+    def test_preset_reply_parsing(self):
+        self.build_and_run('presets', PRESETS_HARNESS.replace(
+            '"../examples/companion_radio/ui-new/HeadPresets.h"',
+            '"' + (ROOT / 'examples/companion_radio/ui-new/HeadPresets.h').as_posix() + '"'),
+            'PASS presets')
 
 
 if __name__ == '__main__':
