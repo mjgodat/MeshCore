@@ -370,6 +370,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   uint32_t last_millis;
   uint64_t uptime_millis;
   unsigned long next_local_advert, next_flood_advert;
+#ifdef ESPNOW_HEARTBEAT_SECS
+  unsigned long _espnow_heartbeat_at = 0;  // 0: first heartbeat right after boot
+#endif
   mesh::DeferredCliCommand deferred_cli_command;
   mesh::RemoteCliReplyCache remote_cli_reply_cache;
   mesh::ReplayResetNonce replay_reset_nonce;
@@ -784,6 +787,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   }
   void formatEspNowStatus(char* reply, size_t capacity) override {
     diagnosticEspNowBridge().formatStatus(reply, capacity);
+  }
+  void formatEspNowNodes(char* reply, size_t capacity) override {
+    diagnosticEspNowBridge().formatNodes(reply, capacity);
   }
   void formatEspNowStats(const char* page, char* reply, size_t capacity) override {
     diagnosticEspNowBridge().formatStats(page, reply, capacity);
@@ -1277,6 +1283,10 @@ public:
   NodePrefs* getNodePrefs() {
     return &_prefs;
   }
+#if defined(WITH_ESPNOW_BRIDGE)
+  // Heads/relays the ESP-NOW bridge heard directly in the last 15 minutes.
+  uint8_t espNowActiveNodeCount() { return diagnosticEspNowBridge().activeNodeCount(); }
+#endif
   bool isHiddenNode() const {
     return _prefs.advert_interval == 0 && _prefs.flood_advert_interval == 0;
   }

@@ -3429,6 +3429,11 @@ bool CommonCLI::handleEspNowDiagnosticCommand(uint32_t sender_timestamp,
     }
     return true;
   }
+  if (strcmp(command, "get espnow.nodes") == 0) {
+    // ESP-NOW stations (heads, relays) heard directly in the last 15 min.
+    _callbacks->formatEspNowNodes(reply, capacity);
+    return true;
+  }
   if (strncmp(command, "get espnow.stats", 16) == 0) {
     const char* page = command + 16;
     if (*page == 0) {

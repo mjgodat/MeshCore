@@ -13989,6 +13989,18 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
 
     updateAdvertTimer(); // schedule next local advert
   }
+#ifdef ESPNOW_HEARTBEAT_SECS
+  // ESP-NOW relays otherwise stay silent until they have traffic to repeat
+  // (local adverts are 60+ minutes apart, floods 47 hours), so a bridge
+  // cannot tell which relays are alive. A short zero-hop advert keeps them
+  // counted (`get espnow.nodes`) and in neighbour lists; zero-hop adverts
+  // are not repeated, so nothing reaches LoRa.
+  if (millisHasNowPassed(_espnow_heartbeat_at)) {
+    mesh::Packet *pkt = createSelfAdvert();
+    if (pkt) sendZeroHop(pkt);
+    _espnow_heartbeat_at = futureMillis(ESPNOW_HEARTBEAT_SECS * 1000UL);
+  }
+#endif
 
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
   if (_ota_update_at && millisHasNowPassed(_ota_update_at)) { // deferred `ota update`

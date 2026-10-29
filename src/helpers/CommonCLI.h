@@ -718,6 +718,9 @@ public:
   virtual void formatEspNowStatus(char* reply, size_t capacity) {
     snprintf(reply, capacity, "Error: ESP-NOW diagnostics unavailable");
   }
+  virtual void formatEspNowNodes(char* reply, size_t capacity) {
+    snprintf(reply, capacity, "Error: ESP-NOW diagnostics unavailable");
+  }
   virtual void formatEspNowStats(const char* page, char* reply, size_t capacity) {
     (void)page;
     snprintf(reply, capacity, "Error: ESP-NOW diagnostics unavailable");
