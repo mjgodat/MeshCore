@@ -104,6 +104,12 @@ class UITask : public AbstractUITask {
   UIScreen* home;
   UIScreen* msg_preview = nullptr;
   UIScreen* curr;
+#if UI_REPEATER_HEAD
+  UIScreen* compose = nullptr;
+  UIScreen* admin = nullptr;
+  static void onComposeClosed(void* ctx, const char* result);
+  static void onAdminClosed(void* ctx);
+#endif
 #if UI_POCKET_GUI
   mesh::ui::pocket::Settings _pocket_settings;
 #endif
@@ -146,6 +152,10 @@ public:
 
   void gotoHomeScreen() { setCurrScreen(home); }
   void showMessages();
+#if UI_REPEATER_HEAD
+  void showCompose();
+  void showAdmin();
+#endif
 #if COMPANION_FEATURE_READER
   bool isReaderActive() const { return reader && curr == reader; }
   void showReader();

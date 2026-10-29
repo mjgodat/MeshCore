@@ -22,6 +22,14 @@
 #include "../MyMesh.h"
 #include "../CompanionWiFi.h"
 #include "target.h"
+#include <helpers/ui/BacklightToggleButton.h>
+#if UI_REPEATER_HEAD
+#include <new>
+#include "HeadCompose.h"
+#include "HeadAdmin.h"
+#include "HeadClock.h"
+static HeadClockFloor head_clock_floor(rtc_clock);
+#endif
 #include <time.h>
 #include <math.h>
 #if UI_POCKET_GUI
@@ -66,6 +74,10 @@
   // historical OLED/headless Full policy.
   #define AUTO_SHUTDOWN_MILLIVOLTS 3400
   #define HELTEC_V4_TFT_SHUTDOWN_ONLY 1
+#endif
+
+#if defined(ESP32) && defined(BACKLIGHT_BTN)
+static mesh::ui::BacklightToggleButton companion_backlight_btn;
 #endif
 
 static uint64_t companionMessageNowMillis() {
@@ -432,6 +444,10 @@ public:
 class HomeScreen : public UIScreen {
   enum HomePage {
     FIRST,
+#if UI_REPEATER_HEAD
+    COMPOSE,
+    REPEATER,
+#endif
 #if UI_POCKET_GUI
     MAP,
     STATUS,
@@ -1112,11 +1128,14 @@ public:
           body_top + 2, tmp);
       display.setTextSize(1);
       display.setColor(UIColor::secondary_txt);
+#if !UI_REPEATER_HEAD
+      // App sync queue; a head has no app, so it would only ever grow.
       snprintf(tmp, sizeof(tmp), "Pending: %d", _task->getMsgCount());
       mesh::ui::drawTextCenteredEllipsized(display,
           {0, home_content_top, display.width(), display.textLineHeight()},
           home_content_top, tmp);
       home_content_top += display.textLineHeight() + 1;
+#endif
 #endif
 #ifdef UI_DEDICATED_PAIRING_BLOCK
       const mesh::ui::CompanionHomeLayout layout =
@@ -1460,6 +1479,22 @@ public:
       display.setTextSize(1);
       display.drawTextCentered(display.width() / 2, body_top + 33, "toggle: " PRESS_LABEL);
 #endif
+#if UI_REPEATER_HEAD
+    } else if (_page == HomePage::COMPOSE) {
+      display.setColor(UIColor::primary_txt);
+      display.setTextSize(2);
+      display.drawTextCentered(display.width() / 2, body_top + 4, "Write");
+      display.setTextSize(1);
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextCentered(display.width() / 2, body_top + 33, "message: " PRESS_LABEL);
+    } else if (_page == HomePage::REPEATER) {
+      display.setColor(UIColor::primary_txt);
+      display.setTextSize(2);
+      display.drawTextCentered(display.width() / 2, body_top + 4, "Repeater");
+      display.setTextSize(1);
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextCentered(display.width() / 2, body_top + 33, "admin: " PRESS_LABEL);
+#endif
     } else if (_page == HomePage::ADVERT) {
       display.setColor(UIColor::corp_blue);
       display.drawXbm((display.width() - 32) / 2, body_top - 2, advert_icon, 32, 32);
@@ -1790,6 +1825,16 @@ public:
       _task->showMessages();
       return true;
     }
+#if UI_REPEATER_HEAD
+    if (key == KEY_ENTER && _page == HomePage::COMPOSE) {
+      _task->showCompose();
+      return true;
+    }
+    if (key == KEY_ENTER && _page == HomePage::REPEATER) {
+      _task->showAdmin();
+      return true;
+    }
+#endif
 #if UI_MESSAGES_HOME_PAGE == 1
     if (key == KEY_ENTER && _page == HomePage::MESSAGES) {
       _task->showMessages();
@@ -2358,6 +2403,12 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
 #if UI_HAS_JOYSTICK
   back_btn.enableQuadrupleClick();
 #endif
+#if defined(ESP32) && defined(BACKLIGHT_BTN)
+  companion_backlight_btn.begin();
+#endif
+#if UI_REPEATER_HEAD
+  head_clock_floor.begin();
+#endif
 #if defined(TBEAM_1W) && defined(WIFI_SSID) && defined(PIN_WIFI_BTN)
   wifi_btn.begin();
 #endif
@@ -2417,6 +2468,35 @@ void UITask::showAlert(const char* text, int duration_millis) {
 void UITask::showMessages() {
   setCurrScreen(msg_preview);
 }
+
+#if UI_REPEATER_HEAD
+void UITask::onComposeClosed(void* ctx, const char* result) {
+  UITask* task = static_cast<UITask*>(ctx);
+  task->setCurrScreen(task->home);
+  if (result) task->showAlert(result, 1500);
+}
+
+void UITask::showCompose() {
+  if (!_display) return;
+  if (!compose) compose = new (std::nothrow) HeadComposeScreen(&UITask::onComposeClosed, this);
+  if (!compose) { showAlert("Compose: no memory", 1500); return; }
+  static_cast<HeadComposeScreen*>(compose)->open();
+  setCurrScreen(compose);
+}
+
+void UITask::onAdminClosed(void* ctx) {
+  UITask* task = static_cast<UITask*>(ctx);
+  task->setCurrScreen(task->home);
+}
+
+void UITask::showAdmin() {
+  if (!_display) return;
+  if (!admin) admin = new (std::nothrow) HeadAdminScreen(&UITask::onAdminClosed, this);
+  if (!admin) { showAlert("Admin: no memory", 1500); return; }
+  static_cast<HeadAdminScreen*>(admin)->open();
+  setCurrScreen(admin);
+}
+#endif
 
 #if COMPANION_FEATURE_READER
 void UITask::showReader() {
@@ -2905,6 +2985,22 @@ void UITask::loop() {
     int touch_x = -1;
     int touch_y = -1;
     const bool touched = _display->getTouch(&touch_x, &touch_y);
+#if UI_REPEATER_HEAD
+    // The compose keyboard needs raw positions, not prev/select/next zones.
+    const bool raw_touch_screen = _display->isOn()
+        && ((compose && curr == compose) || (admin && curr == admin));
+    if (raw_touch_screen) {
+      const bool changed = curr == compose
+          ? static_cast<HeadComposeScreen*>(compose)->handleTouch(
+                touched, touch_x, touch_y, _display->width())
+          : static_cast<HeadAdminScreen*>(admin)->handleTouch(
+                touched, touch_x, touch_y, _display->width());
+      if (changed) {
+        _display->wake(mesh::ui::DisplayWake::Button);
+        _next_refresh = millis();
+      }
+    } else {
+#endif
     mesh::ui::TouchSplitSelector transport_touch_selector = {};
     const mesh::ui::TouchSplitSelector* split_transport_selector = nullptr;
     const mesh::ui::TouchNavigationBar* reader_touch_bar = nullptr;
@@ -2962,6 +3058,9 @@ void UITask::loop() {
           break;
       }
     }
+#if UI_REPEATER_HEAD
+    }
+#endif
   }
 #endif
 #if defined(BACKLIGHT_BTN)
@@ -2977,6 +3076,13 @@ void UITask::loop() {
     button_state = pressed ? BacklightButtonState::Pressed : BacklightButtonState::Released;
     last_backlight_btn_check = millis();
   }
+#endif
+#if defined(ESP32) && defined(BACKLIGHT_BTN)
+  // The same press also flips the sticky backlight.
+  companion_backlight_btn.poll(millis());
+#endif
+#if UI_REPEATER_HEAD
+  head_clock_floor.loop();
 #endif
 
   // A button-wake PIN is a preview, not a modal pairing request. The next

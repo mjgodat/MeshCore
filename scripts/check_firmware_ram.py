@@ -180,6 +180,12 @@ def requirements(platform, defines, target):
         if platform != "ESP32_PLATFORM":
             raise ValueError("Wio Tracker L2 display budget requires ESP32")
         display_heap = wio_tracker_l2_display_heap(defines)
+    elif display == "CYDDisplay":
+        # LGFXDisplay keeps one internal-RAM sprite of the logical layout
+        # (320x240 / UI_ZOOM) at UI_BUFFER_COLOR_DEPTH, plus object metadata.
+        zoom = integer(defines, "UI_ZOOM", 1)
+        depth = integer(defines, "UI_BUFFER_COLOR_DEPTH", 8)
+        display_heap = ((320 // zoom) * (240 // zoom) * depth + 7) // 8 + 1024
     elif display == "HeltecV4Display":
         if platform != "ESP32_PLATFORM" or not integer(defines, "HELTEC_V4_DISPLAY_UNIFIED", 0):
             raise ValueError("unified Heltec V4 display budget requires ESP32 and its unified recipe")
@@ -230,6 +236,10 @@ def requirements(platform, defines, target):
         # (up to 320 rows, including overlap while growing) and SDK bus/touch
         # driver metadata. These allocations coexist with the UI sprite.
         parts["display_dma_and_bus"] = 16384
+    if display == "CYDDisplay":
+        # Two SPI hosts (VSPI panel, HSPI XPT2046 touch): LGFX DMA line
+        # buffers, bus/touch driver state and the LEDC backlight channel.
+        parts["display_dma_and_bus"] = 8192
     if display == "HeltecV4Display":
         # Pinned Arduino-ESP32 2.x: the private I2C controller owns two bounded
         # 128-byte buffers, HAL/IDF locks, master state and transient command
