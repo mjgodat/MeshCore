@@ -7,11 +7,23 @@
 #include <helpers/ui/WiFiSetupQrDisplay.h>
 #include <helpers/ui/CompanionHomeLayout.h>
 #include <helpers/ui/RadioProfileDisplayPage.h>
+#include <helpers/ui/BacklightToggleButton.h>
+#include <helpers/ui/GeoFormat.h>
+#if defined(THINKNODE_M5) && ENV_INCLUDE_GPS == 1
+#include <helpers/sensors/GpsHardwareSwitch.h>
+#endif
 #include <RadioProfiles.h>
 #include <Utils.h>
 #include "MyMesh.h"
 
 extern MyMesh the_mesh;
+
+#if defined(BACKLIGHT_BTN) && defined(ESP32)
+static mesh::ui::BacklightToggleButton backlight_btn;
+#endif
+#if defined(THINKNODE_M5) && ENV_INCLUDE_GPS == 1
+static mesh::GpsHardwareSwitch gps_switch;
+#endif
 
 namespace {
 
@@ -33,6 +45,25 @@ const char* secondaryRadioProfileTag() {
 // a genuinely short display.
 constexpr uint8_t RADIO_SYSTEM_STATUS_ROWS = 8;
 constexpr uint8_t RADIO_SYSTEM_STATUS_ROWS_WITHOUT_RADIO2 = 5;
+// GPS boards append the current fix (latitude, longitude in DMS).
+#if ENV_INCLUDE_GPS == 1
+constexpr uint8_t RADIO_SYSTEM_STATUS_GPS_ROWS = 2;
+#else
+constexpr uint8_t RADIO_SYSTEM_STATUS_GPS_ROWS = 0;
+#endif
+// ESP-NOW bridge boards show how many heads/relays they hear directly.
+#if defined(WITH_ESPNOW_BRIDGE)
+constexpr uint8_t RADIO_SYSTEM_STATUS_ESPNOW_ROWS = 1;
+#else
+constexpr uint8_t RADIO_SYSTEM_STATUS_ESPNOW_ROWS = 0;
+#endif
+constexpr uint8_t RADIO_SYSTEM_STATUS_EXTRA_ROWS =
+    RADIO_SYSTEM_STATUS_ESPNOW_ROWS + RADIO_SYSTEM_STATUS_GPS_ROWS;
+
+uint8_t radioSystemStatusBaseRows(bool dual_radio_enabled) {
+  return dual_radio_enabled ? RADIO_SYSTEM_STATUS_ROWS
+                            : RADIO_SYSTEM_STATUS_ROWS_WITHOUT_RADIO2;
+}
 
 uint8_t radioSystemStatusRowsPerPage(DisplayDriver& display) {
   const int line_height = display.textLineHeight();
@@ -44,8 +75,8 @@ uint8_t radioSystemStatusRowsPerPage(DisplayDriver& display) {
 
 uint8_t radioSystemStatusPageCount(DisplayDriver& display,
                                    bool dual_radio_enabled) {
-  const uint8_t row_count = dual_radio_enabled ? RADIO_SYSTEM_STATUS_ROWS
-                                                : RADIO_SYSTEM_STATUS_ROWS_WITHOUT_RADIO2;
+  const uint8_t row_count = radioSystemStatusBaseRows(dual_radio_enabled)
+      + RADIO_SYSTEM_STATUS_EXTRA_ROWS;
   const uint8_t rows_per_page = radioSystemStatusRowsPerPage(display);
   return (row_count + rows_per_page - 1) / rows_per_page;
 }
@@ -96,6 +127,29 @@ void drawRadioNoiseFloor(DisplayDriver& display, int y, const char* label,
   display.print(noise_floor);
 }
 
+#if ENV_INCLUDE_GPS == 1
+// Row 0: latitude (or "GPS: no fix, N sats" / "GPS: off"), row 1: longitude.
+void drawGpsFixRow(DisplayDriver& display, int y, uint8_t gps_row) {
+  char text[24] = "";
+  LocationProvider* gps = sensors.getLocationProvider();
+  const bool fix = gps != NULL && gps->isValid();
+  if (gps_row == 0) {
+    if (fix) {
+      mesh::ui::formatMicrodegreesDms(text, sizeof(text), gps->getLatitude(), true);
+    } else if (gps == NULL || the_mesh.getNodePrefs()->gps_enabled == 0) {
+      snprintf(text, sizeof(text), "GPS: off");
+    } else {
+      snprintf(text, sizeof(text), "GPS: no fix %ld sat", gps->satellitesCount());
+    }
+  } else if (fix) {
+    mesh::ui::formatMicrodegreesDms(text, sizeof(text), gps->getLongitude(), false);
+  }
+  display.setColor(fix ? UIColor::primary_txt : UIColor::warning_txt);
+  display.setCursor(0, y);
+  display.print(text);
+}
+#endif
+
 void drawRadioSystemStatusPage(DisplayDriver& display, const NodePrefs& prefs,
                                uint8_t status_page_index) {
   display.setTextSize(1);
@@ -103,13 +157,31 @@ void drawRadioSystemStatusPage(DisplayDriver& display, const NodePrefs& prefs,
   const bool dual_radio = profiles != NULL && profiles->enabled();
   const uint8_t rows_per_page = radioSystemStatusRowsPerPage(display);
   const uint8_t first_row = status_page_index * rows_per_page;
-  const uint8_t row_count = dual_radio ? RADIO_SYSTEM_STATUS_ROWS
-                                       : RADIO_SYSTEM_STATUS_ROWS_WITHOUT_RADIO2;
+  const uint8_t base_rows = radioSystemStatusBaseRows(dual_radio);
+  const uint8_t row_count = base_rows + RADIO_SYSTEM_STATUS_EXTRA_ROWS;
   const int row_height = display.textLineHeight() + 2;
 
   for (uint8_t row = first_row; row < row_count
       && row < first_row + rows_per_page; ++row) {
     const int y = (row - first_row) * row_height;
+    if (row >= base_rows) {
+      const uint8_t extra = row - base_rows;
+#if defined(WITH_ESPNOW_BRIDGE)
+      if (extra < RADIO_SYSTEM_STATUS_ESPNOW_ROWS) {
+        char text[24];
+        snprintf(text, sizeof(text), "ESPNOW nodes: %u",
+                 (unsigned)the_mesh.espNowActiveNodeCount());
+        display.setColor(UIColor::primary_txt);
+        display.setCursor(0, y);
+        display.print(text);
+        continue;
+      }
+#endif
+#if ENV_INCLUDE_GPS == 1
+      drawGpsFixRow(display, y, extra - RADIO_SYSTEM_STATUS_ESPNOW_ROWS);
+#endif
+      continue;
+    }
     switch (row) {
       case 0: {
         char identity_prefix[7];
@@ -370,6 +442,12 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
 
 #if defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
   user_btn.begin();
+#endif
+#if defined(BACKLIGHT_BTN) && defined(ESP32)
+  backlight_btn.begin();
+#endif
+#if defined(THINKNODE_M5)
+  mesh::usbConsolePort().printf("ThinkNode M5 hardware %s\r\n", board.hardwareRevision());
 #endif
 
   // strip off dash and commit hash without allocating a mutable version copy
@@ -905,6 +983,25 @@ void UITask::loop() {
     _rows_valid = false;
 #endif
   }
+#if defined(BACKLIGHT_BTN) && defined(ESP32)
+  // The top button only switches the light; it never changes pages.
+  backlight_btn.poll(millis());
+#endif
+#if defined(THINKNODE_M5) && ENV_INCLUDE_GPS == 1
+  // The slide switch is sensed, not a power cut: obey it like `gps on/off`
+  // (not saved; the switch position wins again at the next boot).
+  {
+    const auto change = gps_switch.poll(digitalRead(board.gpsSwitchPin()) == HIGH, millis());
+    if (change != mesh::GpsHardwareSwitch::Change::None) {
+      const bool on = change == mesh::GpsHardwareSwitch::Change::On;
+      if (sensors.setSettingValue("gps", on ? "1" : "0")) {
+        the_mesh.getNodePrefs()->gps_enabled = on ? 1 : 0;
+      }
+      mesh::usbConsolePort().printf("GPS switch: %s\r\n", on ? "on" : "off");
+      _next_refresh = 0;
+    }
+  }
+#endif
 #if defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
   int ev = user_btn.check();
   // Multiclick stays enabled on the R8 observer so triple-click can toggle
