@@ -10613,6 +10613,14 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
     if (strlen(recipient_prefix) < sizeof(ContactInfo::name)) {
       recipient = searchContactsByPrefix(recipient_prefix);
     }
+    if (recipient == NULL && strlen(recipient_prefix) == 8) {
+      // Fall back to a 4-byte public-key prefix in hex (the head's Repeater
+      // page selects targets this way so renamed repeaters still match).
+      uint8_t key_prefix[4];
+      if (mesh::Utils::fromHex(key_prefix, sizeof(key_prefix), recipient_prefix)) {
+        recipient = lookupContactByPubKey(key_prefix, sizeof(key_prefix));
+      }
+    }
     if (recipient == NULL || recipient->type == ADV_TYPE_NONE) {
       terminalOutput().print("  ERROR: name prefix not found\r\n");
     } else {
