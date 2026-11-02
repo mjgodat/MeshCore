@@ -16,6 +16,10 @@
   #include <helpers/ui/CHSC6XTouch.h>
 #endif
 
+#if defined(REPEATER_UI_HOLD_ACTIONS) && REPEATER_UI_HOLD_ACTIONS
+  #include <helpers/ui/RepeaterHoldAction.h>
+#endif
+
 class UITask {
   mesh::MainBoard* _board;
   DisplayDriver* _display;
@@ -35,6 +39,18 @@ class UITask {
   bool showingSecondaryRadioProfilePage();
   bool showingRadioProfileSystemStatusPage(uint8_t* status_page_index = nullptr);
   uint8_t radioProfileSystemStatusPageCount() const;
+
+#if defined(REPEATER_UI_HOLD_ACTIONS) && REPEATER_UI_HOLD_ACTIONS
+  // Long press runs a page-dependent action instead of powering off.
+  mesh::ui::RepeaterHoldAdvertLimiter _hold_advert_limiter;
+  char _hold_feedback[24] = "";
+  unsigned long _hold_feedback_until = 0;
+
+  mesh::ui::RepeaterHoldAction currentHoldAction();
+  bool holdFeedbackActive();
+  void handleUserButtonHold();
+  void drawHoldFeedback();
+#endif
 
 #ifdef DISPLAY_REDRAW_ON_CHANGE
   uint32_t _last_frame_signature = 0;
