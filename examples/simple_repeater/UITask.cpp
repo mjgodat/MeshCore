@@ -649,6 +649,15 @@ void UITask::renderCurrScreen() {
     // hold it, rather than overwriting an existing status line.
     if (the_mesh.isDualRadioActive()) rows.draw("DualRadio: ON", false);
 #endif
+#if defined(REPEATER_UI_HOLD_ACTIONS) && REPEATER_UI_HOLD_ACTIONS
+    // Hint for the hold action; omitted when the screen has no row left or
+    // while hold feedback is shown on the bottom line instead.
+    const char* hold_hint = mesh::ui::repeaterHoldHint(currentHoldAction());
+    if (hold_hint != NULL && !holdFeedbackActive()) {
+      _display->setColor(UIColor::secondary_txt);
+      rows.draw(hold_hint, false);
+    }
+#endif
   }
 }
 
@@ -866,6 +875,67 @@ void UITask::toggleDisplay(const char* source) {
 }
 #endif
 
+#if defined(REPEATER_UI_HOLD_ACTIONS) && REPEATER_UI_HOLD_ACTIONS
+mesh::ui::RepeaterHoldAction UITask::currentHoldAction() {
+  if (!_startup_complete || _powering_off_at > 0) return mesh::ui::RepeaterHoldAction::None;
+#ifdef WITH_WEBCONFIG
+  // The WiFi setup / reboot screens replace the home page.
+  char wc_ssid[33], wc_ip[16];
+  if (WebConfigServer::isRebootPending()
+      || WebConfigServer::getSetupInfo(wc_ssid, sizeof(wc_ssid), wc_ip, sizeof(wc_ip))) {
+    return mesh::ui::RepeaterHoldAction::None;
+  }
+#endif
+  return mesh::ui::repeaterHoldActionForPage(the_mesh.isDualRadioActive(),
+      radioProfileSystemStatusPageCount(), currentRadioProfileDisplayPage());
+}
+
+bool UITask::holdFeedbackActive() {
+  return _hold_feedback[0] != 0 && !millisReached(millis(), _hold_feedback_until);
+}
+
+void UITask::handleUserButtonHold() {
+  const bool display_was_on = _display->isOn();
+  const mesh::ui::RepeaterHoldAction action = currentHoldAction();
+  _display->wake(mesh::ui::DisplayWake::Button);
+  const unsigned long now = millis();
+  uint32_t wait_secs = 0;
+  const mesh::ui::RepeaterHoldOutcome outcome = mesh::ui::handleRepeaterHold(
+      display_was_on, action, _hold_advert_limiter, (uint32_t)now,
+      []() {
+        // Same call as the CLI `advert` command: a flood self-advert.
+        the_mesh.sendSelfAdvertisement(mesh::ui::REPEATER_HOLD_ADVERT_DELAY_MILLIS, true);
+      },
+      &wait_secs);
+  if (outcome == mesh::ui::RepeaterHoldOutcome::WakeOnly) resetRadioProfileDisplayPage();
+  mesh::ui::formatRepeaterHoldFeedback(_hold_feedback, sizeof(_hold_feedback), outcome, wait_secs);
+  if (_hold_feedback[0] != 0) {
+    _hold_feedback_until = now + mesh::ui::REPEATER_HOLD_FEEDBACK_MILLIS;
+    mesh::usbConsolePort().printf("Button hold: %s\r\n", _hold_feedback);
+  }
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+  _frame_valid = false;
+#endif
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  _rows_valid = false;
+#endif
+  _next_refresh = 0;
+}
+
+void UITask::drawHoldFeedback() {
+  if (!holdFeedbackActive()) return;
+  if (!_startup_complete || _powering_off_at > 0) return;
+  _display->setTextSize(1);
+  const int line_height = _display->textLineHeight();
+  const int y = _display->height() - line_height;
+  // Transient bottom line: clear it so it reads cleanly over any page.
+  _display->setColor(UIColor::window_bkg);
+  _display->fillRect(0, y, _display->width(), line_height);
+  _display->setColor(UIColor::warning_txt);
+  _display->drawTextEllipsized(0, y, _display->width(), _hold_feedback);
+}
+#endif
+
 void UITask::loop() {
 #if defined(HELTEC_V4_DISPLAY_UNIFIED) && HELTEC_V4_DISPLAY_UNIFIED
   static uint32_t display_generation = 0;
@@ -928,6 +998,11 @@ void UITask::loop() {
 #endif
     }
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
+#if defined(REPEATER_UI_HOLD_ACTIONS) && REPEATER_UI_HOLD_ACTIONS
+      // Opt-in boards (ThinkNode M5: power is the rotary knob) never power
+      // off from this button; the hold runs the current page's action.
+      handleUserButtonHold();
+#else
       _display->wake(mesh::ui::DisplayWake::Button);
       resetRadioProfileDisplayPage();
       mesh::usbConsolePort().printf("Powering Off\r\n");
@@ -939,6 +1014,7 @@ void UITask::loop() {
       _rows_valid = false;
 #endif
       _next_refresh = 0;
+#endif
 #ifdef WITH_WEBCONFIG
   } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
     // Preserve the fork's persistent WebUI toggle. R8 observer repeaters keep
@@ -968,11 +1044,18 @@ void UITask::loop() {
       bool redraw = true;
 #ifdef DISPLAY_REDRAW_ON_CHANGE
       uint32_t frame_signature = getFrameSignature();
+#if defined(REPEATER_UI_HOLD_ACTIONS) && REPEATER_UI_HOLD_ACTIONS
+      frame_signature = DisplayFrameSignature::append(frame_signature,
+          holdFeedbackActive() ? _hold_feedback : "no-hold-feedback");
+#endif
       redraw = !_frame_valid || frame_signature != _last_frame_signature;
 #endif
       if (redraw) {
         _display->startFrame();
         renderCurrScreen();
+#if defined(REPEATER_UI_HOLD_ACTIONS) && REPEATER_UI_HOLD_ACTIONS
+        drawHoldFeedback();
+#endif
         _display->endFrame();
 #ifdef DISPLAY_REDRAW_ON_CHANGE
         _last_frame_signature = frame_signature;
