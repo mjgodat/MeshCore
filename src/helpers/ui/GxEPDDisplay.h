@@ -12,6 +12,16 @@
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSans18pt7b.h>
+#ifdef EINK_BOLD_FONTS
+// Boards that opt in draw the small and large sizes in bold too (darker image).
+#include <Fonts/FreeSansBold9pt7b.h>
+#include <Fonts/FreeSansBold18pt7b.h>
+#define GXEPD_SMALL_FONT FreeSansBold9pt7b
+#define GXEPD_LARGE_FONT FreeSansBold18pt7b
+#else
+#define GXEPD_SMALL_FONT FreeSans9pt7b
+#define GXEPD_LARGE_FONT FreeSans18pt7b
+#endif
 #include <CRC32.h>
 
 #include "DisplayDriver.h"
