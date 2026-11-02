@@ -174,18 +174,19 @@ void GxEPDDisplay::setTextSize(int sz) {
   if (!_present || (!_isOn && _init)) return;
 #endif
   display_crc.update<int>(sz);
+  // Font names, not GFXfont pointers: the host display tests stub the fonts.
   switch(sz) {
     case 1:  // Small
-      display.setFont(&FreeSans9pt7b);
+      display.setFont(&GXEPD_SMALL_FONT);
       break;
     case 2:  // Medium Bold
       display.setFont(&FreeSansBold12pt7b);
       break;
     case 3:  // Large
-      display.setFont(&FreeSans18pt7b);
+      display.setFont(&GXEPD_LARGE_FONT);
       break;
     default:
-      display.setFont(&FreeSans9pt7b);
+      display.setFont(&GXEPD_SMALL_FONT);
       break;
   }
   // GFX uses a baseline; the UI supplies the top of the text line.
