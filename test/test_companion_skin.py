@@ -344,8 +344,9 @@ static int preview(const char* dir) {
     drawHeaderButton(d, 0, 80, "To:Public");
     drawHeaderButton(d, 80, 160, "As:CaptCallahan");
     TouchKeyboard kb; kb.reset("Test Ab");
-    kb.touch(4, 32 + 2 * 22 + 10, 240, 32, 22);    // mode: ABC
-    kb.touch(4, 32 + 2 * 22 + 10, 240, 32, 22);    // mode: 123
+    { HostDisplay s; kb.draw(s, 32, 22, "Send"); }   // drawn keys only: draw, then tap
+    kb.touch(4, 32 + 2 * 22 + 10);                  // mode: ABC
+    kb.touch(4, 32 + 2 * 22 + 10);                  // mode: 123
     d.setColor(UIColor::primary_txt); kb.drawText(d, 21);
     d.setColor(UIColor::secondary_txt); d.drawRect(0, 19, 240, 12);
     kb.draw(d, 32, 22, "Send");

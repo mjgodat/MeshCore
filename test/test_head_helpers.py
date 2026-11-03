@@ -112,9 +112,35 @@ KEYBOARD_HARNESS = r'''
 static int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { std::printf("FAIL line %d: %s\n", __LINE__, #cond); failures++; } } while (0)
 using R = TouchKeyboard::Result;
+ColorVal UIColor::window_bkg = 0, UIColor::title_bkg = 1, UIColor::title_txt = 2, UIColor::primary_txt = 3,
+         UIColor::secondary_txt = 4, UIColor::warning_txt = 5, UIColor::popup_bkg = 6, UIColor::popup_txt = 7,
+         UIColor::corp_blue = 8;
+// A screen that draws nothing: the keyboard records its geometry.
+class NullDisplay : public DisplayDriver {
+ public:
+  NullDisplay() : DisplayDriver(160, 200) {}
+  bool isOn() override { return true; }
+  void turnOn() override {}
+  void turnOff() override {}
+  void clear() override {}
+  void startFrame(ColorVal) override {}
+  void setTextSize(int) override {}
+  void setColor(ColorVal) override {}
+  void setCursor(int, int) override {}
+  void print(const char*) override {}
+  void fillRect(int, int, int, int) override {}
+  void drawRect(int, int, int, int) override {}
+  void drawXbm(int, int, const uint8_t*, int, int) override {}
+  uint16_t getTextWidth(const char* s) override { return (uint16_t)(6 * std::strlen(s)); }
+  void endFrame() override {}
+};
 // 160 wide, keys from y=0, 22 tall: rows at y 5 / 27 / 49 / 71.
 // Row 2: [mode 0..24][z..m][del 136..160]; row 3: [space 0..80][X 80..112][action 112..160].
-static R tap(TouchKeyboard& k, int x, int y) { return k.touch(x, y, 160, 0, 22); }
+static R tap(TouchKeyboard& k, int x, int y) {
+  NullDisplay d;
+  k.draw(d, 0, 22, "OK");   // as a screen does every frame
+  return k.touch(x, y);
+}
 int main() {
   TouchKeyboard k;
   k.reset("", 3);
@@ -150,6 +176,8 @@ int main() {
   CHECK(std::strcmp(k.modeLabel(), "abc") == 0);
   CHECK(tap(k, 5, 5) == R::Changed);           // q
   CHECK(std::strcmp(k.text(), "12-@.#q") == 0);
+  TouchKeyboard undrawn;
+  CHECK(undrawn.touch(5, 5) == R::None);       // nothing drawn: nothing to touch
   k.reset("x", 10);
   CHECK(tap(k, 2, 49) == R::Changed);          // ABC
   k.reset("", 10);                             // a new entry starts in lower case

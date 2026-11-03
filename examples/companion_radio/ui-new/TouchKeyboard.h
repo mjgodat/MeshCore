@@ -80,7 +80,7 @@ class TouchKeyboard {
     }
   }
 
-  // The mode key's label: "abc", "ABC", "123" or "#+=".
+  // The mode key's label: "abc", "ABC" or "123".
   const char* modeLabel() const {
     static const char* const kLabels[3] = {"abc", "ABC", "123"};
     return kLabels[_mode];
@@ -97,18 +97,6 @@ class TouchKeyboard {
     if (r < 0 || r >= _drawnRows) return Result::None;
     Key keys[kMaxKeysPerRow];
     const int count = rowKeys(r, _drawnWidth, "", keys);
-    for (int k = 0; k < count; k++) {
-      if (x >= keys[k].x && x < keys[k].x + keys[k].w) return press(keys[k]);
-    }
-    return Result::None;
-  }
-
-  Result touch(int x, int y, int width, int top, int key_h) {
-    if (y < top) return Result::None;
-    const int r = (y - top) / key_h;
-    if (r < 0 || r >= kRows) return Result::None;
-    Key keys[kMaxKeysPerRow];
-    const int count = rowKeys(r, width, "", keys);
     for (int k = 0; k < count; k++) {
       if (x >= keys[k].x && x < keys[k].x + keys[k].w) return press(keys[k]);
     }

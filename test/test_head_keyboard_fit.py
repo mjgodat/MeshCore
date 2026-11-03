@@ -128,15 +128,19 @@ static void check(const char* name, int w, int h, int top, int max_h, int min_ke
 }
 
 int main() {
-  // CYD visual head, HEAD page: 160 x 105.
-  check("cyd-hmi admin entry", 160, 105, 40, 20, 16, 16);
-  check("cyd-hmi compose", 160, 105, 32, 22, 16, 18);
+  // The hosts' own geometry (constants read from HeadAdmin.h / HeadCompose.h
+  // by the Python side): admin entry from ADMIN_TOP with at most
+  // ADMIN_MAX_H rows, compose from COMPOSE_TOP with at most COMPOSE_MAX_H.
+  // CYD visual head, HEAD page (160 x 105): rows shrink to fit, >= 16
+  // logical (32 px).
+  check("cyd-hmi admin entry", 160, 105, ADMIN_TOP, ADMIN_MAX_H, 16, 0);
+  check("cyd-hmi compose", 160, 105, COMPOSE_TOP, COMPOSE_MAX_H, 16, 0);
   // Plain CYD head (160 x 120) and the Freenove head (240 x 148): the key
-  // heights the screens always had.
-  check("cyd admin entry", 160, 120, 40, 20, 16, 20);
-  check("cyd compose", 160, 120, 32, 22, 16, 22);
-  check("freenove admin entry", 240, 148, 40, 20, 16, 20);
-  check("freenove compose", 240, 148, 32, 22, 16, 22);
+  // heights the screens always had (the hosts' maxima) where they fit.
+  check("cyd admin entry", 160, 120, ADMIN_TOP, ADMIN_MAX_H, 16, (120 - ADMIN_TOP) / 4 < ADMIN_MAX_H ? (120 - ADMIN_TOP) / 4 : ADMIN_MAX_H);
+  check("cyd compose", 160, 120, COMPOSE_TOP, COMPOSE_MAX_H, 16, COMPOSE_MAX_H);
+  check("freenove admin entry", 240, 148, ADMIN_TOP, ADMIN_MAX_H, 16, ADMIN_MAX_H);
+  check("freenove compose", 240, 148, COMPOSE_TOP, COMPOSE_MAX_H, 16, COMPOSE_MAX_H);
   if (failures) return 1;
   std::printf("PASS keyboard_fit\n");
   return 0;
@@ -149,6 +153,18 @@ def strip_comments(text):
     return re.sub(r'//[^\n]*', '', text)
 
 
+def host_geometry():
+    """(admin top, admin max key h, compose top, compose max key h) as the
+    hosts compute them: HeadAdmin draws from kHeaderH + 10 + kTextH - 2 with
+    at most kKeyH - 1, HeadCompose from kHeaderH + kTextH with at most kKeyH."""
+    def consts(name):
+        src = strip_comments((UI_NEW / name).read_text(encoding='ascii'))
+        return {k: int(re.search(r'static constexpr int %s = (\d+);' % k, src).group(1))
+                for k in ('kHeaderH', 'kTextH', 'kKeyH')}
+    a, c = consts('HeadAdmin.h'), consts('HeadCompose.h')
+    return a['kHeaderH'] + 10 + a['kTextH'] - 2, a['kKeyH'] - 1, c['kHeaderH'] + c['kTextH'], c['kKeyH']
+
+
 class KeyboardFitTest(unittest.TestCase):
     def test_keyboard_fits_and_only_drawn_keys_touch(self):
         compiler = shutil.which('g++') or shutil.which('clang++')
@@ -159,8 +175,10 @@ class KeyboardFitTest(unittest.TestCase):
             cpp = Path(tmp) / 'kb.cpp'
             cpp.write_text(HARNESS, encoding='ascii')
             exe = Path(tmp) / ('kb' + ('.exe' if os.name == 'nt' else ''))
+            at, am, ct, cm = host_geometry()
+            geometry = ['-DADMIN_TOP=%d' % at, '-DADMIN_MAX_H=%d' % am, '-DCOMPOSE_TOP=%d' % ct, '-DCOMPOSE_MAX_H=%d' % cm]
             built = subprocess.run([compiler, '-std=c++17', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
-                                    '-Wno-unused-parameter', *sanitize, '-I', str(UI_NEW), '-I', str(ROOT / 'src'),
+                                    '-Wno-unused-parameter', *sanitize, *geometry, '-I', str(UI_NEW), '-I', str(ROOT / 'src'),
                                     '-I', str(ROOT / 'test'), str(cpp), '-o', str(exe)],
                                    capture_output=True, text=True, timeout=180)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
@@ -178,9 +196,11 @@ class KeyboardFitTest(unittest.TestCase):
         # The admin entry's keyboard starts at y 40 (kHeaderH + 10 + kTextH - 2)
         # with at most kKeyH - 1 rows; compose at kHeaderH + kTextH, kKeyH.
         self.assertIn('kb_top = top + 10 + kTextH - 2', admin)
-        self.assertIn('static constexpr int kHeaderH = 18;', admin)
-        self.assertIn('static constexpr int kTextH = 14;', admin)
-        self.assertIn('static constexpr int kKeyH = 22;', admin)
+        self.assertIn('TouchKeyboard::keyHeight(kb_top, d.height(), kKeyH - 1)', admin)
+        self.assertIn('TouchKeyboard::keyHeight(kHeaderH + kTextH, d.height(), kKeyH)', compose)
+        # Only the drawn-keys hit test exists.
+        kb = strip_comments((UI_NEW / 'TouchKeyboard.h').read_text(encoding='ascii'))
+        self.assertEqual(len(re.findall(r'Result touch\(', kb)), 1)
 
 
 if __name__ == '__main__':
