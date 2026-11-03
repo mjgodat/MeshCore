@@ -14,6 +14,7 @@
 #include <string.h>
 #include <helpers/esp32/WiFiRadioPolicy.h>
 #include <helpers/esp32/WiFiStationPolicy.h>
+#include <helpers/esp32/StationJoinDriver.h>
 #include <helpers/bridges/ObserverFrame.h>
 
 namespace udp = mesh::bridge::udp;
@@ -28,14 +29,15 @@ public:
   using ObserverSink = void (*)(const uint8_t* frame, size_t len, void* ctx);
 
   HeadUdpLink(const hl::Config& cfg, ObserverSink sink, void* ctx)
-      : _cfg(cfg), _sink(sink), _ctx(ctx) {
+      : _cfg(cfg), _sink(sink), _ctx(ctx), _join(kDiagnoseEveryMs) {
     _secret_len = (uint8_t)strnlen(cfg.secret, sizeof(cfg.secret));
-    _retry_at = millis();
+    _join.reset(millis());
+    _driver.power_save = WIFI_PS_NONE;
+    _driver.after_begin = ESPNOWRadio::forceLongRangeRate;
   }
   ~HeadUdpLink() {
     closeSocket();
-    if (_diag_scan) WiFi.scanDelete();
-    WiFi.disconnect(false, false);
+    _join.stop(_driver);
     // Back to the LR-only ESP-NOW radio on its own channel.
     mesh::wifi::applyStationProtocolMask(WIFI_PROTOCOL_LR, true);
     mesh::wifi::restoreEspNowChannel();
@@ -71,14 +73,19 @@ public:
   hl::LinkState state() const {
     if (!hl::udpConfigured(_cfg)) return hl::LinkState::NotConfigured;
     if (_socket >= 0) return _session.remote ? hl::LinkState::Ready : hl::LinkState::Connected;
-    return _wrong_channel ? hl::LinkState::WrongChannel : hl::LinkState::Joining;
+    const uint8_t ap = _join.apChannel();
+    const bool off_channel = _join.reason() == mesh::wifi::JoinReason::ApMoved
+        || (_join.reason() == mesh::wifi::JoinReason::NotOnChannel && ap
+            && ap != mesh::wifi::activeEspNowChannel());
+    return off_channel ? hl::LinkState::WrongChannel : hl::LinkState::Joining;
   }
   bool ready() const { return _socket >= 0 && _session.remote; }
-  uint8_t apChannel() const { return _ap_channel; }
+  uint8_t apChannel() const { return _join.apChannel(); }
   uint32_t localAddress() const { return _local; }
 
 private:
   static const uint8_t kRxDepth = 4;
+  static const uint32_t kDiagnoseEveryMs = 600000;   // all-channel look, at most every 10 min
 
   static bool authenticate(void* context, const uint8_t* data, size_t size, uint8_t digest[32]) {
     const auto* self = static_cast<const HeadUdpLink*>(context);
@@ -97,44 +104,17 @@ private:
     return v;
   }
 
+  // StationJoin.h: never blocks, joins only on the ESP-NOW channel, drops an
+  // association that leaves it (AP channel switch) and backs off 15 s..2 min.
+  // When the network is not on the ESP-NOW channel, one all-channel scan at
+  // most every 10 min finds where it is (ESP-NOW receive pauses ~1.5 s).
   void serviceStation(uint32_t now) {
-    if (WiFi.status() == WL_CONNECTED && static_cast<uint32_t>(WiFi.localIP()) != 0) {
-      // Drops an association that moved off the ESP-NOW channel (AP channel switch).
-      if (!mesh::wifi::enforceStationChannel()) { closeSocket(); return; }
-      _ap_channel = (uint8_t)WiFi.channel();
-      _wrong_channel = false;
+    _join.poll(_driver, now, _cfg.ssid, _cfg.password);
+    if (_join.connected()) {
       if (_socket < 0) openSocket(static_cast<uint32_t>(WiFi.localIP()));
       return;
     }
     if (_socket >= 0) closeSocket();
-    if (_diag_scan) {
-      // One all-channel look for the SSID, only to report its channel.
-      const int16_t n = WiFi.scanComplete();
-      if (n == WIFI_SCAN_RUNNING) return;
-      int32_t best = INT32_MIN;
-      for (int16_t i = 0; i < n; ++i) {
-        if (WiFi.SSID(i) != _cfg.ssid || WiFi.RSSI(i) <= best) continue;
-        best = WiFi.RSSI(i);
-        _ap_channel = (uint8_t)WiFi.channel(i);
-      }
-      WiFi.scanDelete();
-      _diag_scan = false;
-      mesh::wifi::restoreEspNowChannel();
-      _wrong_channel = _ap_channel && _ap_channel != mesh::wifi::activeEspNowChannel();
-      return;
-    }
-    if (!udp::due(now, _retry_at)) return;
-    _retry_at = now + 20000U;
-    if (!mesh::wifi::stationMutationAllowed()) return;
-    // Scans the ESP-NOW channel only and joins there (WiFiStationPolicy.h).
-    const wl_status_t result = mesh::wifi::beginStation(_cfg.ssid, _cfg.password);
-    if (!_rate_forced) _rate_forced = ESPNOWRadio::forceLongRangeRate();
-    if (result == WL_NO_SSID_AVAIL && (!_diag_at || uint32_t(now - _diag_at) > 600000U)) {
-      // Not on our channel: find where it is (costs ESP-NOW about 1.5 s of
-      // receive while the radio visits the other channels, at most every 10 min).
-      _diag_at = now | 1U;
-      if (WiFi.scanNetworks(true, false, false, 110, 0, _cfg.ssid) == WIFI_SCAN_RUNNING) _diag_scan = true;
-    }
   }
 
   void openSocket(uint32_t local) {
@@ -252,12 +232,12 @@ private:
   void* _ctx;
   uint8_t _secret_len = 0;
   int _socket = -1;
-  uint32_t _local = 0, _retry_at = 0, _diag_at = 0, _subscribe_at = 0, _sequence = 0;
+  uint32_t _local = 0, _subscribe_at = 0, _sequence = 0;
   uint32_t _tx = 0, _tx_fail = 0;
   uint64_t _boot = 0;
   udp::Session _session;
-  bool _diag_scan = false, _wrong_channel = false, _rate_forced = false;
-  uint8_t _ap_channel = 0;
+  mesh::wifi::StationJoin<mesh::wifi::StationJoinDriver> _join;
+  mesh::wifi::StationJoinDriver _driver;
   uint8_t _rx[kRxDepth][udp::MAX_PAYLOAD];
   uint16_t _rx_len[kRxDepth] = {};
   uint8_t _rx_head = 0, _rx_count = 0;
@@ -314,6 +294,7 @@ void HeadLinkRadio::apply() {
   portENTER_CRITICAL(&_mux);
   _dedupe.reset();
   _auto.begin(millis());
+  _rx_mode = _cfg.mode;
   portEXIT_CRITICAL(&_mux);
   if (!hl::usesWiFi(_cfg.mode)) return;
   _link = new (std::nothrow) HeadUdpLink(_cfg, onUdpObserver, this);
@@ -386,11 +367,15 @@ void HeadLinkRadio::onUdpObserver(const uint8_t* frame, size_t len, void* ctx) {
 }
 
 void HeadLinkRadio::deliverObserver(const uint8_t* frame, size_t len, bool via_espnow) {
-  const hl::Mode mode = _cfg.mode;
-  if (via_espnow && mode == hl::Mode::Udp) return;   // udp: ESP-NOW is not used
   const bool vitals = len > 5 && frame[5] == (uint8_t)mesh::observer::Kind::Vitals;
   bool duplicate = false;
   portENTER_CRITICAL(&_mux);
+  // _cfg belongs to the main loop; the WiFi task reads only _rx_mode, under the lock.
+  const hl::Mode mode = _rx_mode;
+  if (via_espnow && mode == hl::Mode::Udp) {   // udp: ESP-NOW is not used
+    portEXIT_CRITICAL(&_mux);
+    return;
+  }
   if (vitals) {
     const uint32_t now = millis();
     if (via_espnow) {

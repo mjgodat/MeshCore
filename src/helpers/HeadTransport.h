@@ -12,7 +12,9 @@
 //   auto    receive on both; send on ESP-NOW while the repeater's ESP-NOW
 //           vitals keep arriving; after `transport.failover` seconds (30)
 //           without them, send on UDP; back to ESP-NOW after 3 vitals in a
-//           row and at least 30 s on UDP (no flapping)
+//           row and at least 30 s on UDP. Hysteresis both ways: after any
+//           switch back to ESP-NOW (including a lost UDP session) it stays
+//           on ESP-NOW at least 30 s before failing over again.
 //
 // Settings live in the head's NVS (namespace "headlink"); the WiFi password
 // and the shared secret are never printed (`get udp` shows "set").
@@ -137,9 +139,10 @@ public:
   static const uint8_t kFailbackVitals = 3;       // ESP-NOW vitals in a row
   static const uint32_t kStreakGapMs = 12000;     // a longer gap restarts the count
   static const uint32_t kMinUdpDwellMs = 30000;   // least time on UDP before fail-back
+  static const uint32_t kMinEspNowDwellMs = 30000; // least time on ESP-NOW before fail-over
 
   void begin(uint32_t now) {
-    _on_udp = false; _last_espnow = now; _streak = 0; _seen = false; _since = now;
+    _on_udp = false; _last_espnow = now; _streak = 0; _seen = false; _since = now; _switched = false;
   }
   void noteEspNowVitals(uint32_t now) {
     _streak = (_seen && now - _last_espnow <= kStreakGapMs && _streak < 255) ? (uint8_t)(_streak + 1) : 1;
@@ -150,7 +153,8 @@ public:
   bool update(uint32_t now, uint32_t failover_ms, bool udp_ready) {
     if (!_on_udp) {
       if (!udp_ready || now - _last_espnow < failover_ms) return false;
-      _on_udp = true; _since = now; _streak = 0; ++_failovers;
+      if (_switched && now - _since < kMinEspNowDwellMs) return false;   // no flapping
+      _on_udp = true; _since = now; _streak = 0; ++_failovers; _switched = true;
       return true;
     }
     if (now - _last_espnow > kStreakGapMs) _streak = 0;
@@ -166,7 +170,7 @@ public:
   uint32_t failbacks() const { return _failbacks; }
 
 private:
-  bool _on_udp = false, _seen = false;
+  bool _on_udp = false, _seen = false, _switched = false;
   uint8_t _streak = 0;
   uint32_t _last_espnow = 0, _since = 0, _failovers = 0, _failbacks = 0;
 };
@@ -175,11 +179,14 @@ private:
 // The same record sent over ESP-NOW and UDP is byte-identical, and every
 // record carries the repeater's receive time (packets) or uptime (vitals), so
 // a hash of the whole frame is the de-duplication key. No wire change: older
-// repeaters and heads are unaffected.
+// repeaters and heads are unaffected. The window holds the last 64 frames:
+// at the repeater's limit (20 records/s, bursts of 40) that is over 3 s of
+// skew between the two copies, far more than WiFi and ESP-NOW latency differ.
+// No sequence numbers are involved, so nothing wraps.
 
 class FrameDeduper {
 public:
-  static const uint8_t kDepth = 16;
+  static const uint8_t kDepth = 64;
   static uint32_t key(const uint8_t* f, size_t n) {
     uint32_t h = 2166136261u;
     for (size_t i = 0; i < n; ++i) h = (h ^ f[i]) * 16777619u;
