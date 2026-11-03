@@ -3740,7 +3740,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #endif
 #if defined(MESH_ESPNOW_OBSERVER_SETTINGS)
     // Reached remotely only by full admins: not in the manager allow lists.
-    {
+    if (strstr(command, "observer") != nullptr) {
       mesh::espnow::ObserverRuntime observer_runtime;
       _callbacks->getObserverRuntime(observer_runtime);
       if (mesh::espnow::handleEspNowObserverCommand(command, reply, 157, &observer_runtime)) return;

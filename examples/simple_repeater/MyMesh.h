@@ -84,6 +84,8 @@
 #ifdef WITH_UDP_BRIDGE
 #include "helpers/bridges/UDPBridge.h"
 #include "helpers/UDPBridgeSettings.h"
+#include "helpers/StationJoin.h"
+#include "helpers/esp32/StationJoinDriver.h"
 #endif
 
 #ifdef WITH_MQTT_BRIDGE
@@ -753,6 +755,14 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   UDPBridge* udp_bridge = nullptr;
   uint32_t udp_station_retry_at = 0;
   bool udp_network_paused = false;
+  // Non-blocking, ESP-NOW-channel-only station join for the UDP bridge
+  // (StationJoin.h): async scan, back-off 15 s..2 min, and an association
+  // that leaves the ESP-NOW channel is dropped at once.
+  mesh::wifi::StationJoin<mesh::wifi::StationJoinDriver> udp_join;
+  mesh::wifi::StationJoinDriver udp_join_driver;
+  char udp_station_ssid[33] = {};
+  char udp_station_password[65] = {};
+  void loadUDPStationCredentials();
   void serviceUDPBridge();
   bool ensureUDPBridge();
   const mesh::bridge::udp::Prefs* getUDPBridgePrefs() const override {

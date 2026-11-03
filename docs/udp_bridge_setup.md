@@ -209,3 +209,11 @@ the head. Payloads are authenticated, not encrypted: observer frames carry raw
 LoRa packets (already on air) and the repeater's vitals and position. See
 `docs/cli_commands.md` (observer.transport) and `ESPNOW_HEAD.md` on the
 espnow-head branch for the head side and the channel rule.
+
+With the ESP-NOW bridge running, the UDP station joins only an access point
+on `bridge.channel` and never moves ESP-NOW: joining uses an asynchronous
+scan of that one channel (the mesh loop is never held), failed attempts back
+off from 15 s to every 2 minutes, and if the router later changes channel
+the station is disconnected at once and UDP pauses. `get udp.status` then
+shows `ap-moved-off-espnow-channel` (or `ap-not-on-espnow-channel`,
+`join-timeout`, `no-credentials`). Pin the router to the ESP-NOW channel.

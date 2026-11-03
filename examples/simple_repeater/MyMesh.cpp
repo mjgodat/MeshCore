@@ -1399,8 +1399,11 @@ void MyMesh::getObserverRuntime(mesh::espnow::ObserverRuntime& runtime) {
   runtime.espnow_channel = _prefs.bridge_channel;
 #ifdef WITH_UDP_BRIDGE
   runtime.udp_available = true;
-  runtime.ap_channel = (WiFi.getMode() & WIFI_STA) && WiFi.status() == WL_CONNECTED
-      ? static_cast<uint8_t>(WiFi.channel()) : 0;
+  // Only query the driver while UDP actually uses the station.
+  if (isUDPBridgeNetworkEnabled()) {
+    runtime.ap_channel = (WiFi.getMode() & WIFI_STA) && WiFi.status() == WL_CONNECTED
+        ? static_cast<uint8_t>(WiFi.channel()) : udp_join.apChannel();
+  }
 #endif
   runtime.describe = describeObserverTransport;
   runtime.ctx = this;
@@ -15104,6 +15107,7 @@ bool MyMesh::isUDPBridgeNetworkEnabled() const {
 bool MyMesh::setUDPBridgeNetworkState(bool enabled) {
   udp_network_paused = !enabled;
   udp_station_retry_at = 0;
+  udp_join.reset(millis());
   if (!enabled) {
     if (udp_bridge) udp_bridge->serviceNetwork(false);
     mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::UdpBridge, false);
@@ -15131,6 +15135,7 @@ bool MyMesh::setUDPBridgePrefs(const mesh::bridge::udp::Prefs& value) {
   }
   udp_station_retry_at = 0;
   udp_network_paused = false;
+  udp_join.reset(millis());
   serviceUDPBridge();
   return true;
 }
@@ -15151,8 +15156,13 @@ void MyMesh::formatUDPBridgeStatus(char* reply, size_t capacity) {
       : !secret_length || secret_length >= sizeof(_prefs.bridge_secret) ? "no-secret"
       : !peers ? "no-peers"
       : (WiFi.getMode() & WIFI_AP) ? "ap-mode"
+      : udp_join.reason() == mesh::wifi::JoinReason::ApMoved
+          || udp_join.reason() == mesh::wifi::JoinReason::NotOnChannel
+          || udp_join.reason() == mesh::wifi::JoinReason::NoCredentials
+          || udp_join.reason() == mesh::wifi::JoinReason::JoinTimeout
+          ? mesh::wifi::joinReasonName(udp_join.reason())
       : WiFi.getMode() != WIFI_STA || WiFi.status() != WL_CONNECTED
-          || static_cast<uint32_t>(WiFi.localIP()) == 0 ? "disconnected"
+          || static_cast<uint32_t>(WiFi.localIP()) == 0 || !udp_join.connected() ? "disconnected"
       : !udp_bridge ? "no-memory" : nullptr;
   const auto ip = WiFi.localIP();
   const uint32_t address = static_cast<uint32_t>(ip);
@@ -15180,40 +15190,7 @@ bool MyMesh::resetUDPBridgeStats() {
   return true;
 }
 
-void MyMesh::serviceUDPBridge() {
-  const bool requested = isUDPBridgeNetworkEnabled()
-      && !_cli.getBoard()->isOTAUpdateRunning();
-  // MQTT's broker outage clock does not describe this independent LAN bridge.
-  // Publish a separate hold before asking its worker to resume a parked STA.
-  mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::UdpBridge, requested);
-  if (!requested) {
-    if (udp_bridge) udp_bridge->serviceNetwork(false);
-    return;
-  }
-  if (!ensureUDPBridge()) return;
-  wifi_mode_t sdk_mode = WIFI_MODE_NULL;
-  const bool station_ready = WiFi.getMode() == WIFI_STA
-      && esp_wifi_get_mode(&sdk_mode) == ESP_OK && sdk_mode == WIFI_MODE_STA
-      && WiFi.status() == WL_CONNECTED && static_cast<uint32_t>(WiFi.localIP()) != 0;
-  udp_bridge->serviceNetwork(station_ready, static_cast<uint32_t>(WiFi.localIP()),
-      static_cast<uint32_t>(WiFi.subnetMask()));
-  if (station_ready) {
-    udp_bridge->loop();
-    return;
-  }
-  // An AP, setup portal, OTA uploader or MQTT worker owns its WiFi lifecycle.
-  // UDP may share its connected station, but never reconnects underneath it.
-#ifdef WITH_MQTT_BRIDGE
-  if (mqtt_bridge && (mqtt_bridge->isRunning() || mqtt_bridge->isStopping())) return;
-#endif
-#ifdef WITH_WEBCONFIG
-  // A LAN/connecting listener follows this station owner. An explicit setup
-  // AP, active recovery browser or draining request retains its own link.
-  if (_webconfig && !_webconfig->prepareStationOwner()) return;
-#endif
-  if (!mesh::wifi::stationMutationAllowed()) return;
-  if (!millisHasNowPassed(udp_station_retry_at)) return;
-  udp_station_retry_at = millis() + 15000U;
+void MyMesh::loadUDPStationCredentials() {
   mesh::wifi::Credentials credentials;
 #ifdef WITH_MQTT_BRIDGE
   const auto* legacy = _cli.getObserverPrefs();
@@ -15223,17 +15200,63 @@ void MyMesh::serviceUDPBridge() {
 #else
   const auto state = mesh::wifi::resolveCredentials(credentials);
 #endif
+  memset(udp_station_password, 0, sizeof(udp_station_password));
+  udp_station_ssid[0] = 0;
   if (state != mesh::wifi::CredentialState::Ready) return;
-  WiFi.persistent(false);
-  if (!WiFi.mode(WIFI_STA) || mesh::wifi::applyProtocolMask(WIFI_IF_STA) != ESP_OK) return;
-  mesh::wifi::setStationAutoReconnect(true);
+  snprintf(udp_station_ssid, sizeof(udp_station_ssid), "%.*s",
+           (int)sizeof(credentials.ssid), credentials.ssid);
+  snprintf(udp_station_password, sizeof(udp_station_password), "%.*s",
+           (int)sizeof(credentials.password), credentials.password);
   const uint8_t power_save = mesh::wifi::effectivePowerSave(credentials.power_save, false,
       mesh::wifi::espNowChannelConstrained());
-  const wifi_ps_type_t mode = power_save == mesh::wifi::kPowerSaveNone ? WIFI_PS_NONE
+  udp_join_driver.power_save = power_save == mesh::wifi::kPowerSaveNone ? WIFI_PS_NONE
       : power_save == mesh::wifi::kPowerSaveMax ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM;
-  (void)WiFi.setSleep(mode);
-  mesh::wifi::applyStationPowerSave(mode);
-  mesh::wifi::beginStation(credentials.ssid, credentials.password);
+  memset(&credentials, 0, sizeof(credentials));
+}
+
+void MyMesh::serviceUDPBridge() {
+  const bool requested = isUDPBridgeNetworkEnabled()
+      && !_cli.getBoard()->isOTAUpdateRunning();
+  // MQTT's broker outage clock does not describe this independent LAN bridge.
+  // Publish a separate hold before asking its worker to resume a parked STA.
+  mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::UdpBridge, requested);
+  if (!requested) {
+    if (udp_bridge) udp_bridge->serviceNetwork(false);
+    udp_join.abandon(udp_join_driver);
+    return;
+  }
+  if (!ensureUDPBridge()) return;
+  wifi_mode_t sdk_mode = WIFI_MODE_NULL;
+  const bool linked = WiFi.getMode() == WIFI_STA
+      && esp_wifi_get_mode(&sdk_mode) == ESP_OK && sdk_mode == WIFI_MODE_STA
+      && WiFi.status() == WL_CONNECTED && static_cast<uint32_t>(WiFi.localIP()) != 0;
+  // A joined station is always channel-checked, whoever joined it. Joining
+  // is left to the owner: an AP, setup portal, OTA uploader or MQTT worker
+  // owns its WiFi lifecycle; UDP may share its connected station, but never
+  // reconnects underneath it.
+  bool may_join = linked;
+  if (!linked) {
+    may_join = true;
+#ifdef WITH_MQTT_BRIDGE
+    if (mqtt_bridge && (mqtt_bridge->isRunning() || mqtt_bridge->isStopping())) may_join = false;
+#endif
+#ifdef WITH_WEBCONFIG
+    // A LAN/connecting listener follows this station owner. An explicit setup
+    // AP, active recovery browser or draining request retains its own link.
+    if (may_join && _webconfig && !_webconfig->prepareStationOwner()) may_join = false;
+#endif
+  }
+  if (may_join) {
+    // Never blocks: async scan on the ESP-NOW channel only, back-off 15 s..2 min,
+    // and an association that left the ESP-NOW channel is dropped (F1).
+    const uint32_t now = millis();
+    if (udp_join.needsCredentials(now)) loadUDPStationCredentials();
+    udp_join.poll(udp_join_driver, now, udp_station_ssid, udp_station_password);
+  }
+  const bool station_ready = linked && udp_join.connected();
+  udp_bridge->serviceNetwork(station_ready, static_cast<uint32_t>(WiFi.localIP()),
+      static_cast<uint32_t>(WiFi.subnetMask()));
+  if (station_ready) udp_bridge->loop();
 }
 #endif
 

@@ -21,6 +21,7 @@ HARNESS = r'''
 #include <helpers/UDPBridgePrefs.h>
 #include <helpers/WiFiNetworkPowerPolicy.h>
 #include <helpers/WirelessControl.h>
+#include <helpers/StationJoin.h>
 uint32_t now_ms=1000;
 uint32_t millis(){return now_ms;}
 bool millisHasNowPassed(uint32_t value){return static_cast<int32_t>(now_ms-value)>=0;}
@@ -64,6 +65,25 @@ namespace mesh { namespace wifi {
  uint8_t effectivePowerSave(uint8_t value,bool,bool){return value;}
  bool espNowChannelConstrained(){return false;}
 }}
+// StationJoin driver over the fake WiFi: no ESP-NOW channel to protect here
+// (test_station_join.py covers the constrained, scanning path).
+struct FakeJoinDriver {
+ wifi_ps_type_t power_save=WIFI_PS_NONE;
+ uint8_t espNowChannel(){return 0;}
+ bool mutationAllowed(){return mesh::wifi::stationMutationAllowed();}
+ bool startScan(uint8_t,const char*){return false;}
+ int scanResult(){return -2;}
+ bool pick(const char*,uint8_t,uint8_t*,uint8_t&s){s=0;return false;}
+ void scanDelete(){}
+ bool begin(const char*ssid,const char*pw,uint8_t,const uint8_t*){
+   WiFi.persistent(false);WiFi.mode(WIFI_STA);mesh::wifi::setStationAutoReconnect(true);
+   (void)WiFi.setSleep(power_save);mesh::wifi::applyStationPowerSave(power_save);
+   mesh::wifi::beginStation(ssid,pw);return true;}
+ bool linkUp(){return WiFi.getMode()==WIFI_STA&&WiFi.status()==WL_CONNECTED&&WiFi.localIP()!=0;}
+ uint8_t linkChannel(){return 6;}
+ void disconnect(){}
+ void restoreChannel(){}
+};
 struct NodePrefs {char bridge_secret[16]="test-secret";};
 struct FakeSettings {
  mesh::bridge::udp::Prefs data;
@@ -94,6 +114,8 @@ struct UDPBridge {
 struct MyMesh {
  NodePrefs _prefs;void* _mgr=nullptr;CLI _cli;FakeSettings udp_bridge_settings;
  UDPBridge*udp_bridge=nullptr;uint32_t udp_station_retry_at=0;bool udp_network_paused=false;
+ mesh::wifi::StationJoin<FakeJoinDriver> udp_join;FakeJoinDriver udp_join_driver;
+ char udp_station_ssid[33]={};char udp_station_password[65]={};void loadUDPStationCredentials();
  MQTT* mqtt_bridge=nullptr;bool web_active=false,web_stopping=false;
  WebConfig* _webconfig=nullptr;
  ~MyMesh(){delete udp_bridge;}
@@ -105,6 +127,10 @@ struct MyMesh {
  bool setUDPBridgeNetworkState(bool);bool setUDPBridgePrefs(const mesh::bridge::udp::Prefs&);
  void serviceUDPBridge();void formatUDPBridgeStatus(char*,size_t);
 };
+static bool serviceUntilBegin(MyMesh& node,int start){
+ for(int i=0;i<300;++i){now_ms+=1000;node.serviceUDPBridge();if(WiFi.begins>start)return true;}
+ return false;
+}
 @METHODS@
 struct Backend:mesh::wireless::Backend {
  uint8_t available()const override{return mesh::wireless::WiFi;}
@@ -144,20 +170,26 @@ int main(){
  assert(node.setUDPBridgeNetworkState(true)&&node.udp_bridge->running);
  WiFi.state=WL_IDLE_STATUS;now_ms+=16000;const int before_owner=WiFi.begins;
 #ifdef WITH_WEBCONFIG
+ // A portal that keeps its own link: UDP never starts a join under it.
  WebConfig portal;node._webconfig=&portal;portal.allowed=false;
- node.serviceUDPBridge();assert(WiFi.begins==before_owner&&!node.udp_bridge->running);
- assert(portal.prepares==1);
- portal.allowed=true;node.serviceUDPBridge();assert(WiFi.begins==before_owner+1);
- node._webconfig=nullptr;now_ms+=16000;
+ for(int i=0;i<200;++i){now_ms+=1000;node.serviceUDPBridge();}
+ assert(WiFi.begins==before_owner&&!node.udp_bridge->running);
+ assert(portal.prepares>=1);
+ portal.allowed=true;assert(serviceUntilBegin(node,before_owner));
+ node._webconfig=nullptr;
 #endif
  const int before_mqtt=WiFi.begins;
 #ifdef WITH_MQTT_BRIDGE
- MQTT mqtt;node.mqtt_bridge=&mqtt;mqtt.running=true;node.serviceUDPBridge();
+ MQTT mqtt;node.mqtt_bridge=&mqtt;mqtt.running=true;
+ for(int i=0;i<200;++i){now_ms+=1000;node.serviceUDPBridge();}
  assert(WiFi.begins==before_mqtt&&!node.udp_bridge->running);
- mqtt.running=false;mqtt.stopping=true;node.serviceUDPBridge();assert(WiFi.begins==before_mqtt);
+ mqtt.running=false;mqtt.stopping=true;
+ for(int i=0;i<200;++i){now_ms+=1000;node.serviceUDPBridge();}
+ assert(WiFi.begins==before_mqtt);
  mqtt.stopping=false;
 #endif
- node.serviceUDPBridge();assert(WiFi.begins==before_mqtt+1);
+ // Join attempts resume, within the back-off (15 s .. 2 min).
+ assert(serviceUntilBegin(node,before_mqtt));
  WiFi.state=WL_CONNECTED;node.serviceUDPBridge();assert(node.udp_bridge->running);
  // A failed MQTT destination must not park a healthy independent LAN bridge.
  mesh::wifi::NetworkPowerPolicy policy;
@@ -351,7 +383,8 @@ int main(){
         methods='\n'.join(body(source,signature) for signature in (
             'bool MyMesh::ensureUDPBridge(', 'bool MyMesh::isUDPBridgeNetworkEnabled(',
             'bool MyMesh::setUDPBridgeNetworkState(', 'bool MyMesh::setUDPBridgePrefs(',
-            'void MyMesh::serviceUDPBridge(', 'void MyMesh::formatUDPBridgeStatus('))
+            'void MyMesh::serviceUDPBridge(', 'void MyMesh::formatUDPBridgeStatus(',
+            'void MyMesh::loadUDPStationCredentials('))
         for flags in ((),('WITH_MQTT_BRIDGE',),('WITH_WEBCONFIG',),('WITH_MQTT_BRIDGE','WITH_WEBCONFIG')):
             with self.subTest(flags=flags),tempfile.TemporaryDirectory() as tmp:
                 path=Path(tmp);(path/'test.cpp').write_text(HARNESS.replace('@METHODS@',methods)
