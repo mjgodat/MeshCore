@@ -34,11 +34,12 @@ the Freenove head run the same pages).
 
 ## Branches
 
-All branches are based on `keymindCascade` (`236d12610`). Pull in this order;
+All branches are based on `keymindCascade` (`236d12610`; espnow-head, observer-udp and transport-udp are merged up to `ec1d4891e`). Pull in this order;
 each one builds on the previous:
 
 ```text
 espnow/bridge-improvements -> espnow/observer-feed -> head/cyd -> head/freenove -> head/cyd-hmi
+espnow/observer-feed -> espnow/observer-udp;  head/cyd-hmi + espnow/observer-udp -> head/transport-udp
 m5/hold-actions   (independent)
 espnow-head       (everything above combined, plus this file)
 ```
@@ -51,6 +52,8 @@ espnow-head       (everything above combined, plus this file)
 | `head/cyd` | CYD ESP-NOW head (`variants/cyd_espnow_head`), ui-new head screens (compose, admin console, repeater picker, login, presets, settings, keyboard), head contact policy, BaseChatMesh hooks, NVS identity backup | observer-feed |
 | `head/freenove` | Freenove FNK0104N visual head (`variants/freenove_s3_35_head`, `ui-freenove/`), chats list/threads, relay-name store, UI test env, fonts with licences, screenshots | head/cyd |
 | `head/cyd-hmi` | The visual head's pages on the CYD: screen profile (`HMI_PROFILE_CYD`), strip renderer (320x40 bands, no PSRAM), CYD layouts, HEAD page in the HMI style, chats; keyboard with one mode key (abc / ABC / 123) where every touchable key is drawn; CYD uitest env; CYD screenshots | head/freenove |
+| `espnow/observer-udp` | `observer on\|off`, `observer.transport espnow\|udp\|both`: the observer feed over Cascade's UDP bridge too (Observer/Subscribe frame kinds, shared rate limiter, `obs` stats pages), opt-in `ThinkNode_M5_Repeater_bridge_espnow_udp` env | observer-feed (+ keymindCascade) |
+| `head/transport-udp` | Heads over ESP-NOW / UDP / both / auto: `HeadLinkRadio`, `transport` + `udp.*` settings, Link page, `docs/espnow-head/udp-transport.md` | head/cyd-hmi + observer-udp |
 | `espnow-head` | The combined line used on the owner's devices, plus this document | all |
 
 Each branch builds and passes its host tests on its own; the commit messages
@@ -135,11 +138,59 @@ On the bridge repeater (`docs/cli_commands.md` has the full text):
 | `set espnow.peer <MAC>\|broadcast` | broadcast | Fixed unicast destination |
 | `set espnow.repeat <1-4>` | `1` | Total copies of every outgoing ESP-NOW frame (edge-of-range links) |
 | `set espnow.repeat.gap <0-200>` | `30` ms | Spacing between copies |
-| `set espnow.observer on\|off` | `off` | Observer feed for visual heads; admin-only remotely |
+| `set espnow.observer on\|off` | `off` | Observer feed for visual heads; admin-only remotely (`set observer on\|off` is the same switch) |
+| `set observer.transport espnow\|udp\|both` | `espnow` | Where the feed goes ([transports](#transports-esp-now-default-and-udpip-optional)); `get espnow.stats obs`, `get udp.stats obs` |
 
+On the heads: `set transport espnow|udp|both|auto` and `udp.*` (see
+[transports](#transports-esp-now-default-and-udpip-optional)).
 On ESP-NOW-only nodes: `set espnow.channel <1-13>` (reboot),
 `espnow.repeat` / `espnow.repeat.gap` (companions: local clients only),
 `powersaving off` (the default on the heads and the DevKit relay).
+
+## Transports: ESP-NOW (default) and UDP/IP (optional)
+
+ESP-NOW is the default and needs nothing else: no WiFi login on the head,
+no router. A head and its repeater can additionally, or instead, talk over
+an existing WiFi network through Cascade's WiFi UDP bridge. Both sides opt
+in separately; nothing changes for an owner who never sets these.
+Full reference, wire format and owner test plan:
+[docs/espnow-head/udp-transport.md](docs/espnow-head/udp-transport.md).
+
+| Side | Setting | Values (default first) |
+|------|---------|------------------------|
+| Repeater | `observer on\|off` | `off`; the same switch as `espnow.observer` |
+| Repeater | `observer.transport` | `espnow`, `udp`, `both` (one shared rate limit; per-transport counters in `get espnow.stats obs` / `get udp.stats obs`) |
+| Head | `transport` (Link page or USB) | `espnow`, `udp`, `both`, `auto` |
+| Head | `transport.failover` | `30` s (auto: no ESP-NOW vitals this long -> UDP) |
+| Head | `udp.ssid`, `udp.password`, `udp.peer`, `udp.secret`, `udp.port` | WiFi network, repeater IP:port, its `bridge.secret`, head port `4404`; password and secret never shown |
+
+- **Mesh traffic follows the transport**: chat, login and the admin console
+  go over ESP-NOW, UDP, both, or (auto) ESP-NOW with fail-over to UDP when
+  the repeater's ESP-NOW vitals stop for `transport.failover` seconds, and
+  back after 3 vitals in a row and at least 30 s on UDP.
+- **Observer frames** are the same bytes on both transports (kind 6 inside
+  the UDP bridge framing, only to peers that subscribe). A head receiving
+  both shows each frame once (whole-frame hash), so no format change.
+- **Channel rule**: ESP-NOW keeps its channel; a station joins WiFi only on
+  that channel (Cascade's existing policy, on the repeater's bridge too). A
+  network on another channel is not joined and is reported
+  (`udp wrong-channel (AP on ch N)`, orange Link page); `both` / `auto`
+  (head) and `observer.transport both` (repeater) are refused while the
+  access point is known to be elsewhere, with the fix in the reply: move the
+  router to the ESP-NOW channel, or move every ESP-NOW node.
+- **Pairing is manual**: the repeater lists the head as `udp.peer.N`
+  (head IP from `get transport`), the head stores the repeater's IP:port and
+  `bridge.secret`; set `bridge.source tx` and `udp.enabled on` on the
+  repeater. Reserve both addresses on the router.
+- **Security**: UDP payloads are authenticated (HMAC-SHA256 with
+  `bridge.secret`, per-boot handshake, replay window), not encrypted.
+  Observer frames carry raw LoRa packets (already on air) plus the
+  repeater's vitals and position.
+- **Builds**: the heads' product envs include the UDP code
+  (`HEAD_UDP_TRANSPORT`; the link object is allocated only outside
+  `espnow` mode). The repeater needs a UDP-bridge build; for the M5 the
+  opt-in env `ThinkNode_M5_Repeater_bridge_espnow_udp` (the default bridge
+  env is unchanged).
 
 ## Safety and defaults
 
