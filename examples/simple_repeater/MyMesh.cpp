@@ -227,6 +227,7 @@ static_assert(mesh::HostCliBridge::REMOTE_REPLY_MAX
 #define FLOOD_PACKET_FILTER_FILE      "/flood_filter"
 #define FLOOD_PACKET_FILTER_TEMP_FILE "/flood_filter.tmp"
 #define FLOOD_PACKET_FILTER_BACKUP_FILE "/flood_filter.bak"
+#define FLOOD_WARDRIVING_DEFAULTS_FILE  "/flood_wd2"
 #define FLOOD_PACKET_FILTER_BLACKLIST_FILE "/flood_filter_bl"
 #define FLOOD_CHANNEL_SCOPE_FILE      "/flood_ch_scope"
 #define FLOOD_CHANNEL_SCOPE_TEMP_FILE "/flood_ch_scope.tmp"
@@ -253,7 +254,7 @@ static const char FLOOD_CHANNEL_SCOPE_USAGE[] =
     "Err - use: set flood.channel.scope[.n] <match> <region|scope=name> [...]";
 #endif
 #ifndef DEFAULT_WARDRIVING_MAX_HOPS
-  #define DEFAULT_WARDRIVING_MAX_HOPS 4
+  #define DEFAULT_WARDRIVING_MAX_HOPS 2
 #endif
 
 #ifndef REPEATERS_CHANNEL_KEY_HEX
@@ -4204,7 +4205,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if !defined(PORTABLE_MQTT_OBSERVER)
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
   bool flood_filters_loaded = loadFloodPacketFilters();
-  if (flood_filters_loaded) importLegacyFloodPolicySections();
+  if (flood_filters_loaded && importLegacyFloodPolicySections()) {
+    migrateDefaultWardrivingFilter();
+  }
 #else
   loadFloodPacketFilterBlacklist();
   bool flood_filters_loaded = loadFloodPacketFilters();
@@ -6749,6 +6752,28 @@ static void formatFloodModerationPath(
     char* dest, size_t dest_len, uint8_t hash_size, uint8_t path_hops,
     const uint8_t path[FLOOD_GROUP_MODERATION_PATH_BYTES_MAX]);
 
+#if MESH_ENABLE_FLOOD_RULE_ENGINE
+template<typename Entry>
+static void seedWardrivingFloodPacketFilter(Entry& entry, uint8_t min_hops) {
+  memset(&entry, 0, sizeof(entry));
+  entry.active = true;
+  entry.payload_type = FLOOD_PACKET_FILTER_ANY_TYPE;
+  entry.min_hops = min_hops;
+  entry.max_hops = FLOOD_PACKET_FILTER_MAX_HOPS;
+  entry.channel_key_len = CIPHER_KEY_SIZE;
+  mesh::Utils::sha256(
+      entry.channel_secret, CIPHER_KEY_SIZE,
+      (const uint8_t*)DEFAULT_WARDRIVING_CHANNEL,
+      strlen(DEFAULT_WARDRIVING_CHANNEL));
+  mesh::Utils::sha256(
+      &entry.channel_hash, sizeof(entry.channel_hash),
+      entry.channel_secret, entry.channel_key_len);
+  StrHelper::strncpy(entry.channel_name, DEFAULT_WARDRIVING_CHANNEL,
+                     sizeof(entry.channel_name));
+  entry.drop_on_match = true;
+}
+#endif
+
 void MyMesh::seedDefaultFloodPacketFilters() {
   // Slots 0, 1 and 2 carry the built-in defaults; without a table there is
   // nothing to seed and the node forwards unfiltered.
@@ -6767,22 +6792,7 @@ void MyMesh::seedDefaultFloodPacketFilters() {
   // authentication limits this any-type row to GRP_TXT and GRP_DATA packets.
   if (flood_packet_filter_slots < 2) return;
   auto& wardriving = flood_packet_filters[1];
-  memset(&wardriving, 0, sizeof(wardriving));
-  wardriving.active = true;
-  wardriving.payload_type = FLOOD_PACKET_FILTER_ANY_TYPE;
-  wardriving.min_hops = DEFAULT_WARDRIVING_MAX_HOPS + 1;
-  wardriving.max_hops = FLOOD_PACKET_FILTER_MAX_HOPS;
-  wardriving.channel_key_len = CIPHER_KEY_SIZE;
-  mesh::Utils::sha256(
-      wardriving.channel_secret, CIPHER_KEY_SIZE,
-      (const uint8_t*)DEFAULT_WARDRIVING_CHANNEL,
-      strlen(DEFAULT_WARDRIVING_CHANNEL));
-  mesh::Utils::sha256(
-      &wardriving.channel_hash, sizeof(wardriving.channel_hash),
-      wardriving.channel_secret, wardriving.channel_key_len);
-  StrHelper::strncpy(wardriving.channel_name, DEFAULT_WARDRIVING_CHANNEL,
-                     sizeof(wardriving.channel_name));
-  wardriving.drop_on_match = true;
+  seedWardrivingFloodPacketFilter(wardriving, DEFAULT_WARDRIVING_MAX_HOPS + 1);
 
   // Bridge admission is independent of the ordinary LoRa hop limit. Use the
   // same authenticated channel identity, including zero-hop/local messages.
@@ -6800,6 +6810,52 @@ static_assert(CIPHER_KEY_SIZE == FloodFilterPolicy::CHANNEL_KEY_128_LEN,
               "flood rule 128-bit key encoding changed");
 static_assert(PUB_KEY_SIZE == FloodFilterPolicy::CHANNEL_KEY_256_LEN,
               "flood rule 256-bit key encoding changed");
+
+bool MyMesh::migrateDefaultWardrivingFilter() {
+#if DEFAULT_WARDRIVING_MAX_HOPS == 2
+  // Wait until legacy policy sections have joined the authoritative image.
+  // Saving here before that import could hide an operator's older settings.
+  if (_fs == NULL || !flood_policy_has_embedded_sections
+      || flood_packet_filter_slots == 0) return true;
+  // This is an upgrade, not a permanent rewrite rule. An operator can choose
+  // the old 5+ limit again after this device has completed the migration.
+  if (_fs->exists(FLOOD_WARDRIVING_DEFAULTS_FILE)) return true;
+
+  FloodPacketFilterEntry previous_default;
+  seedWardrivingFloodPacketFilter(previous_default, 5);
+  uint64_t changed_slots = 0;
+  for (uint8_t i = 0; i < flood_packet_filter_slots; i++) {
+    auto& entry = flood_packet_filters[i];
+    // Include every configured field, including channel identity, extensions
+    // and transport. Runtime counters and struct padding are not settings.
+    if (FloodFilterPolicy::sameRuleConfiguration(entry, previous_default)) {
+      entry.min_hops = DEFAULT_WARDRIVING_MAX_HOPS + 1;
+      changed_slots |= uint64_t(1) << i;
+    }
+  }
+  if (changed_slots != 0 && !saveFloodPacketFilters()) {
+    for (uint8_t i = 0; i < flood_packet_filter_slots; i++) {
+      if (changed_slots & (uint64_t(1) << i)) {
+        flood_packet_filters[i].min_hops = previous_default.min_hops;
+      }
+    }
+    MESH_DEBUG_PRINTLN("default wardriving hop migration save failed");
+    return false;
+  }
+  // Only presence is recorded; an empty file is intentional. Create it after
+  // the policy commit, including when the table was already customized, so a
+  // later explicit 5+ choice survives reboot. A reset before this point is
+  // harmless: the next boot rechecks the committed policy before marking it.
+  File marker = openFloodSettingsWrite(_fs, FLOOD_WARDRIVING_DEFAULTS_FILE);
+  if (!marker) {
+    MESH_DEBUG_PRINTLN("default wardriving hop migration marker failed");
+    return false;
+  }
+  marker.close();
+  if (!_fs->exists(FLOOD_WARDRIVING_DEFAULTS_FILE)) return false;
+#endif
+  return true;
+}
 
 bool MyMesh::loadFloodPacketFilters() {
   if (flood_packet_filter_slots == 0) return false;
@@ -11203,17 +11259,26 @@ void MyMesh::checkGpsClockSyncOverride() {
   }
 }
 
+uint64_t MyMesh::nextClockSyncAttemptUptime() const {
+  return mesh::clockSyncEffectiveDeadline(clock_sync_next_attempt_uptime,
+      clock_sync_complete && clock_sync_last_source == CLOCK_SYNC_SOURCE_MESH
+          && clock_sync_mesh_enabled
+          && clock_sync_mesh_suppressed_by == CLOCK_SYNC_MESH_SUPPRESS_NONE,
+      _cli.emergencyActive());
+}
+
 bool MyMesh::isClockSyncCollectionActive() const {
   if (!clock_sync_mesh_enabled
       || clock_sync_mesh_suppressed_by != CLOCK_SYNC_MESH_SUPPRESS_NONE) return false;
   if (!clock_sync_complete) return true;
-  if (clock_sync_next_attempt_uptime == 0) return false;
-  if (uptime_millis >= clock_sync_next_attempt_uptime) return true;
+  const uint64_t next_attempt = nextClockSyncAttemptUptime();
+  if (next_attempt == 0) return false;
+  if (uptime_millis >= next_attempt) return true;
 
   // Keep only the evidence that could still be fresh at the next scheduled
   // evaluation. This opens a two-hour rolling collection window before each
-  // seven-day re-sync without decrypting Public traffic for the entire week.
-  return clock_sync_next_attempt_uptime - uptime_millis
+  // re-sync without decrypting Public traffic throughout the waiting period.
+  return next_attempt - uptime_millis
       <= (uint64_t)CLOCK_SYNC_SAMPLE_MAX_AGE_MILLIS;
 }
 
@@ -11433,7 +11498,7 @@ bool MyMesh::applyClockEstimate(uint32_t estimate, uint8_t source, uint8_t sampl
   clock_sync_last_estimate = estimate;
   clock_sync_last_abs_drift = magnitude > UINT32_MAX ? UINT32_MAX : (uint32_t)magnitude;
   clock_sync_complete = true;
-  clock_sync_next_attempt_uptime = uptime_millis + CLOCK_SYNC_RESYNC_INTERVAL_MILLIS;
+  clock_sync_next_attempt_uptime = uptime_millis + mesh::CLOCK_SYNC_NORMAL_RESYNC_MILLIS;
 
   if (magnitude <= clock_sync_drift_seconds) {
     clock_sync_last_result = CLOCK_SYNC_RESULT_WITHIN_DRIFT;
@@ -11482,16 +11547,21 @@ void MyMesh::checkClockSync() {
       && clock_sync_mesh_suppressed_by == CLOCK_SYNC_MESH_SUPPRESS_NONE;
   bool force_mesh = clock_sync_force_mesh_pending && mesh_available;
   if ((!mesh_available && !clock_sync_internet_enabled)
-      || (!force_mesh && uptime_millis < clock_sync_next_attempt_uptime)) return;
+      || (!force_mesh && uptime_millis < nextClockSyncAttemptUptime())) return;
 
   // A manual mesh request bypasses both the normal deadline and the optional
   // internet-first probe once. It never bypasses the source safety latch.
   if (force_mesh) clock_sync_force_mesh_pending = false;
 
-  // A successful estimate closes the current attempt but leaves a seven-day
-  // deadline behind. Reopen the attempt when that deadline arrives; failures
+  // A successful estimate closes the current attempt until the normal or
+  // emergency deadline. Reopen the attempt when it arrives; failures
   // below retain the existing 30-minute retry cadence until the next success.
-  if (clock_sync_complete) clock_sync_complete = false;
+  if (clock_sync_complete) {
+    clock_sync_complete = false;
+    // Internet estimates can finish on a later loop. Keep an early emergency
+    // attempt eligible after its successful-wait deadline stops being used.
+    clock_sync_next_attempt_uptime = uptime_millis;
+  }
 
   if (!force_mesh) {
 #ifdef WITH_MQTT_BRIDGE
@@ -11664,8 +11734,9 @@ void MyMesh::formatClockSyncStatus(const char* args, char* reply, size_t reply_l
   const char* mesh_mode = clock_sync_mesh_edge_enabled ? "edge" : "paths";
   const char* evidence_name = clock_sync_mesh_edge_enabled ? "sources" : "paths";
   bool collection_active = isClockSyncCollectionActive();
-  uint64_t remaining_ms = clock_sync_next_attempt_uptime > uptime_millis
-      ? clock_sync_next_attempt_uptime - uptime_millis : 0;
+  const uint64_t next_attempt = nextClockSyncAttemptUptime();
+  uint64_t remaining_ms = next_attempt > uptime_millis
+      ? next_attempt - uptime_millis : 0;
   unsigned long next_seconds = (unsigned long)((remaining_ms + 999ULL) / 1000ULL);
   if (!mesh_available && !clock_sync_internet_enabled) {
     const char* reason = clock_sync_mesh_enabled ? mesh_state : "mesh-off";
@@ -14018,7 +14089,7 @@ void MyMesh::sampleNoiseFloorHistory() {
                           rtc_clock.getCurrentTime(), millis());
 }
 
-void MyMesh::sampleTelemetryHistory() {
+void MyMesh::sampleTelemetryHistory(bool emergency_only) {
   const uint32_t now = rtc_clock.getCurrentTime();
   if (!telemetry_history.sampleDue(now)) return;
 
@@ -14026,7 +14097,7 @@ void MyMesh::sampleTelemetryHistory() {
   int32_t longitude_e7 = 0;
   bool gps_valid = false;
 #if ENV_INCLUDE_GPS == 1
-  LocationProvider* location = sensors.getLocationProvider();
+  LocationProvider* location = emergency_only ? NULL : sensors.getLocationProvider();
   if (location != NULL && location->isEnabled() && location->isValid()) {
     const long latitude_e6 = location->getLatitude();
     const long longitude_e6 = location->getLongitude();
@@ -14051,6 +14122,10 @@ void MyMesh::sampleTelemetryHistory() {
   telemetry_history.record(now, temperature_c, temperature_valid,
                            _cli.getBoard()->getBattMilliVolts(),
                            latitude_e7, longitude_e7, gps_valid);
+
+  // Do not start external I2C sensors during a low-battery wake. Their
+  // unsampled buckets remain missing in the separate voltage history.
+  if (emergency_only) return;
 
   SensorManager::VoltageSensorReading sensor_readings[
       mesh::ExternalVoltageHistory::MAX_CHANNELS];
