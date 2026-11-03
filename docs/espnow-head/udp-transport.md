@@ -6,6 +6,11 @@ use an existing WiFi network, through Cascade's WiFi UDP bridge
 (`docs/udp_bridge_setup.md`). Both sides opt in separately; an owner who
 never changes these settings sees no difference.
 
+> **Before pairing over UDP: give the repeater a `bridge.secret` that is
+> NOT its admin password.** The head stores the secret unencrypted in its
+> NVS (anyone holding the head can read it), and it authenticates every UDP
+> frame. See [Rotating bridge.secret](#rotating-bridgesecret).
+
 ## Settings
 
 Repeater (any build with the ESP-NOW bridge; `udp` and `both` need a build
@@ -64,8 +69,16 @@ ESP-NOW channel). The repeater's ESP-NOW bridge does the same, so the router
 must be on the ESP-NOW channel (the heads' and bridge's default is 6) for
 the repeater to join WiFi at all.
 
-- A head never moves its ESP-NOW channel to follow WiFi; ESP-NOW peers are
-  never lost behind the owner's back.
+- Neither side ever moves its ESP-NOW channel to follow WiFi; ESP-NOW
+  peers are never lost behind the owner's back.
+- Joining never blocks the mesh loop: an asynchronous scan of the ESP-NOW
+  channel only, then WiFi's asynchronous join to the BSSID found there.
+  Failed attempts back off 15 s, 30 s, 60 s, then every 2 minutes.
+- If the router changes channel while joined (auto-channel, channel-switch
+  announcement), the station is disconnected at once, the ESP-NOW channel
+  restored and UDP pauses (repeater `get udp.status`:
+  `ap-moved-off-espnow-channel`; head: `udp wrong-channel`). It rejoins only
+  when the router is back on the ESP-NOW channel. Pin the router's channel.
 - If the head's network is on another channel, the head does not join it.
   It runs one all-channel scan for that network (at most every 10 minutes;
   ESP-NOW receive pauses about 1.5 s while the radio visits the other
@@ -90,7 +103,7 @@ On the repeater (USB terminal, or the head's admin console over ESP-NOW):
 
 ```text
 set wifi.ssid <network>          (and set wifi.pwd <password>, once)
-set bridge.secret <secret>       (if not set yet; 1-15 characters)
+set bridge.secret <secret>       (1-15 characters, NOT the admin password)
 set udp.port 4404
 set udp.peer.1 <head IP>:4404
 set bridge.source tx             (the repeater's own replies reach the head)
@@ -118,6 +131,23 @@ and left out: anyone holding the secret could then add peers, which changes
 Cascade's explicit allowlist model. With a static lease this is a one-time
 step.
 
+## Rotating bridge.secret
+
+`bridge.secret` is shared by every node that uses it: the repeater's UDP
+peers (the heads in UDP mode) and, in `wrapped` ESP-NOW format only, other
+bridges. Heads on plain ESP-NOW (`raw`) do not use it. To change it:
+
+1. On the repeater: `set bridge.secret <new secret>` (1-15 characters, not
+   the admin password). UDP sessions restart at once; the heads lose UDP.
+2. On each head that uses UDP: `set udp.secret <new secret>` (USB terminal,
+   or the Link page; heads in `auto`/`both` keep working over ESP-NOW
+   meanwhile, a `udp`-only head needs USB or a temporary
+   `set transport espnow`).
+3. On any other bridge using `wrapped` format: `set bridge.secret` to the
+   same value.
+4. Check `get transport` on each head (`udp ready`) and `get udp.status` on
+   the repeater (`ready=` counts the heads).
+
 ## Security
 
 - UDP payloads are **authenticated, not encrypted** (HMAC-SHA256 with
@@ -127,8 +157,10 @@ step.
   public on air; DMs and channel messages stay MeshCore-encrypted), the
   repeater's vitals (noise floor, rates, battery) and its saved position.
 - Mesh frames carry ordinary MeshCore packets (same exposure as on LoRa).
-- The head keeps the WiFi password and the secret in its NVS; they are never
-  printed, logged or shown, and the keyboard entry is masked.
+- The head keeps the WiFi password and the secret in its NVS
+  **unencrypted**; they are never printed, logged or shown, and the keyboard
+  entry is masked, but anyone with the device can read flash. Hence a
+  `bridge.secret` distinct from the admin password.
 - Use a trusted WPA2/WPA3 network; no port forwarding or Internet exposure
   is needed (see the client-isolation notes in `docs/udp_bridge_setup.md`).
 
@@ -180,41 +212,43 @@ message); there is one format for both transports.
 
 ## Owner test plan (hardware)
 
-Needs the ThinkNode M5 flashed with `ThinkNode_M5_Repeater_bridge_espnow_udp`,
-a head (CYD or Freenove) with this firmware, and a 2.4 GHz network on the
-ESP-NOW channel (6 unless changed). Keep a USB terminal open on both.
+Needs the ThinkNode M5 flashed with `ThinkNode_M5_Repeater_bridge_espnow_udp`
+(keep the known-good image and USB access ready), a head (CYD or Freenove)
+with this firmware, and a 2.4 GHz network. Keep a USB terminal open on both.
 
-1. **ESP-NOW unchanged.** Before any UDP setting: `get transport` on the head
-   shows `> espnow; ch 6 vitals <n>s`; chat, login and the pages work as
-   before. `get observer.transport` on the repeater shows `> espnow ...`.
-2. **Repeater on WiFi.** Pair as above (`udp.enabled on`, `udp.peer.1 <head>`).
-   `get udp.status` reaches `ready` once the head is up; `get wifi.status`
-   shows the channel equals `bridge.channel`.
-3. **Head UDP only.** On the head `set transport udp`; within ~30 s
-   `get transport` shows `udp ready <ip>` and `vitals` counting. Repeater:
-   `set observer.transport udp`; `get udp.stats obs` shows `subs=1` and
-   `ok` rising. The head's HOME/TELEMETRY pages update; switch off the M5's
-   ESP-NOW (`set espnow.enabled off`) and they still update; log in and run
-   a command from the admin console; send a channel message. Switch ESP-NOW
-   back on.
-4. **Both.** Repeater `set observer.transport both`, head `set transport both`.
-   Pages update once per frame (packet counter does not double); `get
-   espnow.stats obs` and `get udp.stats obs` both rise; `rate` stays equal
-   on both under load.
-5. **Auto fail-over.** Head `set transport auto` (`get transport` -> `via
-   espnow`). On the repeater `set espnow.enabled off`: after ~30 s
-   (`transport.failover`) `get transport` shows `via udp`, chat and login
-   still work. `set espnow.enabled on`: after 3 vitals (~15 s) and at least
-   30 s on UDP, back to `via espnow`. Repeat with a shorter
-   `set transport.failover 10`.
-6. **Channel rule.** Move the router to another channel (or point
-   `udp.ssid` at a network on another channel): the head shows
-   `udp wrong-channel (AP on ch N)`, the Link page turns orange, ESP-NOW
-   keeps working, and `set transport both` / `auto` is refused with the
-   fix in the reply. On the repeater, `set observer.transport both` is
-   refused while its station is on another channel.
-7. **Back to default.** Head `set transport espnow`: WiFi disconnects,
-   `get transport` shows `> espnow`, everything works over ESP-NOW;
-   repeater `set observer.transport espnow`, `set udp.enabled off`.
-8. **Secrets.** `get udp` shows `password=set secret=set`; no terminal or
-   debug output contains them.
+1. **Boot the `_udp` image with UDP off.** Do not set `udp.enabled`. For at
+   least 10 minutes confirm LoRa RX/TX (`stats`, neighbours), the ESP-NOW
+   bridge, the head's pages, chat and admin login are as before.
+   `get observer.transport` shows `> espnow ...`; on the head
+   `get transport` shows `> espnow; ch 6 vitals <n>s`.
+2. **Pin the router to channel 6** (the ESP-NOW channel; fixed, not auto).
+   Set a `bridge.secret` that is not the admin password.
+3. **Enable UDP on the repeater.** `set wifi.ssid`, `set wifi.pwd`,
+   `set udp.peer.1 <head IP>:4404`, `set bridge.source tx`,
+   `set udp.enabled on`. Watch `get udp.status` (`ready` once the head is
+   up), heap, and the LoRa RX counters and neighbour list for 15 minutes.
+4. **Head UDP only.** Pair the head (`udp.ssid`, `udp.password`, `udp.peer`,
+   `udp.secret`), `set transport udp`; `get transport` shows `udp ready` and
+   `vitals` counting. Repeater `set observer.transport udp`;
+   `get udp.stats obs` shows `subs=1` and `ok` rising. Pages update; with
+   the M5's ESP-NOW off (`set espnow.enabled off`) they still update; log in,
+   run a command, send a channel message. `set espnow.enabled on` again.
+5. **Both.** Repeater `set observer.transport both`, head `set transport both`.
+   Pages update once per frame (packet counter does not double); both `obs`
+   pages rise.
+6. **Auto fail-over.** Head `set transport auto` (`via espnow`). Repeater
+   `set espnow.enabled off`: after ~30 s `via udp`, chat and login still
+   work. `set espnow.enabled on`: after 3 vitals and at least 30 s on UDP,
+   back to `via espnow`; it does not switch again for at least 30 s.
+7. **Channel safety (F1).** With everything joined, change the router's
+   channel to another one (e.g. 11). Within a second or two: the repeater's
+   `get udp.status` shows `ap-moved-off-espnow-channel`, the head shows
+   `udp wrong-channel`, ESP-NOW chat between head and repeater and the
+   head's pages keep working (ESP-NOW stayed on ch 6), LoRa is unaffected.
+   `set observer.transport both` (repeater) and `set transport auto` (head)
+   are refused with the fix in the reply. Put the router back on 6: both
+   rejoin within the back-off (at most 2 minutes).
+8. **Roll back.** Head `set transport espnow`; repeater
+   `set observer.transport espnow`, `set udp.enabled off`. Confirm the
+   step-1 baseline. `get udp` on the head shows `password=set secret=set`;
+   no output anywhere contains them.
