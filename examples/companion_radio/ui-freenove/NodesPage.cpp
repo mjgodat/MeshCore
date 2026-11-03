@@ -13,6 +13,7 @@
 #include <Packet.h>
 
 #include "StubPages.h"
+#include "../ui-new/GestureHints.h"
 
 namespace freenove_ui {
 
@@ -51,7 +52,7 @@ bool leftAligned(int c) { return c == widgets::kColName || c == widgets::kColTyp
 NodesPage::NodesPage()
     : _card(nullptr), _alloc(nullptr), _rows(nullptr), _order(nullptr), _count(0), _sort(widgets::kColHeard), _desc(false), _scroll(0), _drawn(false), _built(false),
       _drawnMs(0), _drawnGen(0), _builtMs(0), _builtGen(0), _press(false), _drag(false), _pressX(0), _pressY(0),
-      _scroll0(0) {
+      _scroll0(0), _hintMs(0) {
 }
 
 NodesPage::~NodesPage() {
@@ -117,8 +118,16 @@ void NodesPage::setSort(widgets::NodeColumn c, bool descending) {
   _scroll = 0;
 }
 
+bool NodesPage::hintRect(bool down, int& x, int& y, int& w, int& h) const {
+  gesture_hints::Rect up, dn;
+  gesture_hints::listTiles(kPanel.x + kPanel.w - kHintW - 2, kHintW, kRowsY, kRowsY + kRowsH, kHintH, up, dn);
+  const gesture_hints::Rect& r = down ? dn : up;
+  x = r.x; y = r.y; w = r.w; h = r.h;
+  return down ? _scroll < maxScroll() : _scroll > 0;
+}
+
 void NodesPage::onShow(uint32_t now_ms) {
-  (void)now_ms;
+  _hintMs = now_ms;
   _drawn = false;
   _built = false;
   _press = _drag = false;
@@ -194,7 +203,20 @@ bool NodesPage::touch(int x, int y, bool down) {
   const bool wasDrag = _drag;
   const bool pressed = _press;
   _press = _drag = false;
+  if (wasDrag && _ctx != nullptr) _hintMs = _ctx->now_ms;   // scrolled: chevrons bright again
   if (!pressed || wasDrag || abs(x - _pressX) >= kSlop || abs(y - _pressY) >= kSlop) return false;
+  // A chevron tile (as drawn): scroll a page that way.
+  for (int d = 0; d < 2; d++) {
+    int hx, hy, hw, hh;
+    if (!hintRect(d == 1, hx, hy, hw, hh) || x < hx || x >= hx + hw || y < hy || y >= hy + hh) continue;
+    const int page = kRowsH - kRowH;
+    int s = _scroll + (d == 1 ? page : -page);
+    if (s < 0) s = 0;
+    if (s > maxScroll()) s = maxScroll();
+    _scroll = s;
+    if (_ctx != nullptr) _hintMs = _ctx->now_ms;
+    return true;
+  }
   // Tap: a column header sorts, a row opens its card.
   if (y >= kHeadY && y < kHeadY + kHeadH + 2) {
     const int c = columnAt(x);
@@ -223,10 +245,10 @@ void NodesPage::drawRow(FrameBuffer565& fb, int pos, int y) const {
   const widgets::NodeRow& r = _rows[_order[pos]];
   const NodeInfo* n = findNode(m, r.key);
   if (n == nullptr) return;
-  if (pos % 2 == 1) fb.fillRect(kPanel.x + 4, y, kPanel.w - 14, kRowH, theme::kTileOffFill);
+  if (pos % 2 == 1) fb.fillRect(kPanel.x + 4, y, kPanel.w - kHintW - 10, kRowH, theme::kTileOffFill);   // clear of the chevron column
   const bool stale = r.age_ms >= kStaleMs;
   const uint16_t tc = stale ? kDimText : theme::kText;
-  const int ty = y + 2;
+  const int ty = y + (kRowH - 14) / 2 - 1;   // 14 px text centred in the row (Freenove: y + 2)
   char buf[40], name[40];
   widgets::nodeName(buf, sizeof(buf), *n);
   widgets::fitText(name, sizeof(name), buf, kFontSmall, kColEdge[1] - kColEdge[0] - 2 * kPad);
@@ -311,14 +333,28 @@ void NodesPage::draw(FrameBuffer565& fb, uint32_t now_ms) {
     drawRow(fb, pos, y);
   }
   fb.resetClip();
-  // Scroll bar when the list is longer than the panel.
+  // Scroll bar when the list is longer than the panel, between the up /
+  // down chevron tiles (shown only where there is more).
   if (maxScroll() > 0) {
-    const int trackX = kPanel.x + kPanel.w - 8, total = _count * kRowH;
-    int h = kRowsH * kRowsH / total;
-    if (h < 16) h = 16;
-    const int y = kRowsY + (kRowsH - h) * _scroll / maxScroll();
-    fb.fillRect(trackX, kRowsY, 3, kRowsH, theme::kGaugeTrack);
+    const int trackX = kPanel.x + kPanel.w - 2 - kHintW / 2 - 1, total = _count * kRowH;
+    const int trackY = kRowsY + kHintH + 2, trackH = kRowsH - 2 * (kHintH + 2);
+    int h = trackH * kRowsH / total;
+    if (h < 12) h = 12;
+    const int y = trackY + (trackH - h) * _scroll / maxScroll();
+    fb.fillRect(trackX, trackY, 3, trackH, theme::kGaugeTrack);
     fb.fillRect(trackX, y, 3, h, theme::kAccent);
+    const gesture_hints::Level lv = gesture_hints::level(true, now_ms, _hintMs);
+    for (int d = 0; d < 2; d++) {
+      int hx, hy, hw, hh;
+      if (!hintRect(d == 1, hx, hy, hw, hh)) continue;
+      fb.fillRoundRect(hx, hy, hw, hh, 3, theme::kTileOffFill);
+      fb.strokeRoundRect(hx, hy, hw, hh, 3, theme::kTileOffEdge);
+      const uint16_t c = lv == gesture_hints::kBright ? theme::kAccent : theme::kTextDim;
+      const float cx = (float)hx + (float)hw / 2.0f - 0.5f, cy = (float)hy + (float)hh / 2.0f - 0.5f;
+      const float s = d == 1 ? 2.5f : -2.5f;   // chevron points down / up
+      fb.aaLine(cx - 3.5f, cy - s * 0.6f, cx, cy + s * 0.6f, 1.5f, c);
+      fb.aaLine(cx, cy + s * 0.6f, cx + 3.5f, cy - s * 0.6f, 1.5f, c);
+    }
   }
 }
 

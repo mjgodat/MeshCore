@@ -37,6 +37,11 @@ static HeadClockFloor head_clock_floor(rtc_clock);
 // Messages as a conversation list + scrollable threads (Freenove head).
 #include "HeadChats.h"
 #endif
+#if UI_REPEATER_HEAD
+#include "GestureHints.h"
+#include "HeadScreenTimeout.h"
+#include <helpers/ui/DisplayPowerSettings.h>
+#endif
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
 #include "HeadRadio.h"   // ESP-NOW-only heads: radio screens (any UI)
 #endif
@@ -460,6 +465,7 @@ class HomeScreen : public UIScreen {
 #if UI_REPEATER_HEAD
     COMPOSE,
     REPEATER,
+    SCREEN,     // screen timeout (HeadScreenTimeout.h)
 #endif
 #if UI_POCKET_GUI
     MAP,
@@ -681,6 +687,9 @@ class HomeScreen : public UIScreen {
   }
 
   void movePage(int direction) {
+#if UI_REPEATER_HEAD && defined(HAS_TOUCH)
+    _hintMs = millis();   // the side chevrons brighten after a page turn
+#endif
 #if UI_POCKET_GUI
     flushPocketSettings();
     _pocket_editing = _pocket_browsing = _pocket_zooming = false;
@@ -1074,7 +1083,44 @@ public:
     }
   }
 
+#if UI_REPEATER_HEAD && defined(HAS_TOUCH) && !UI_POCKET_GUI
+  // Heads: the page, then the side chevron tiles (GestureHints.h). The tiles
+  // are the carousel's Previous / Next touch zones below the title bar,
+  // drawn: a ghost chevron, bright for a moment after a page turn or when
+  // the carousel appears.
+  uint32_t _hintMs = 0;
+  uint32_t _lastRenderMs = 0;
   int render(DisplayDriver& display) override {
+    const uint32_t now = millis();
+    if (_lastRenderMs == 0 || (uint32_t)(now - _lastRenderMs) > 6000) _hintMs = now;   // (re)appeared
+    _lastRenderMs = now;
+    const int next = renderPage(display);
+    display.setTextSize(1);
+    const int normal_line = !display.useSmallMessageFont()
+        && display.renderWidth() == display.width() ? display.textLineHeight() : 11;
+    const int row_height = normal_line > 11 ? normal_line : 11;
+    const int top = row_height + 1 + 8;   // body_top
+    gesture_hints::Rect zone[2];
+    gesture_hints::carouselZones(display.width(), display.height(), TOUCH_CENTER_ZONE_PERCENT, top, zone[0], zone[1]);
+    const gesture_hints::Level lv = gesture_hints::level(true, now, _hintMs);   // the carousel wraps: always more
+    static const char* const kChevron[2] = {"<", ">"};
+    for (int i = 0; i < 2; i++) {
+      const gesture_hints::Rect& r = zone[i];
+      display.setColor(UIColor::secondary_txt);
+      display.drawRect(r.x, r.y, r.w, r.h);
+      display.setColor(lv == gesture_hints::kBright ? UIColor::corp_blue : UIColor::secondary_txt);
+      display.setTextSize(2);
+      display.drawTextCentered(r.x + r.w / 2, r.y + r.h / 2 - 8, kChevron[i]);
+      display.setTextSize(1);
+    }
+    const uint32_t settle = gesture_hints::settleMs(now, _hintMs);
+    return settle > 0 && (int)settle < next ? (int)settle : next;
+  }
+
+  int renderPage(DisplayDriver& display) {
+#else
+  int render(DisplayDriver& display) override {
+#endif
     _pairing_pin_visible = false;
 #if UI_POCKET_GUI
     return renderPocket(display);
@@ -1546,6 +1592,17 @@ public:
       display.setTextSize(1);
       display.setColor(UIColor::secondary_txt);
       display.drawTextCentered(display.width() / 2, body_top + 33, "admin: " PRESS_LABEL);
+    } else if (_page == HomePage::SCREEN) {
+      char off[16], line[32];
+      head_screen::label(off, sizeof(off), head_screen::choiceOf(mesh::ui::displayPowerPrefs().usb));
+      snprintf(line, sizeof(line), "Screen off: %s", off);
+      display.setColor(UIColor::primary_txt);
+      display.setTextSize(2);
+      display.drawTextCentered(display.width() / 2, body_top + 4, "Screen");
+      display.setTextSize(1);
+      display.drawTextCentered(display.width() / 2, body_top + 22, line);
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextCentered(display.width() / 2, body_top + 33, "change: " PRESS_LABEL);
 #endif
     } else if (_page == HomePage::ADVERT) {
       display.setColor(UIColor::corp_blue);
@@ -1900,6 +1957,25 @@ public:
     }
     if (key == KEY_ENTER && _page == HomePage::REPEATER) {
       _task->showAdmin();
+      return true;
+    }
+    if (key == KEY_ENTER && _page == HomePage::SCREEN) {
+      // Next timeout for both power profiles, saved (display_prefs).
+      const int next = head_screen::nextChoice(head_screen::choiceOf(mesh::ui::displayPowerPrefs().usb));
+      bool ok = true;
+      for (int usb = 0; usb < 2; usb++) {
+        char cmds[2][40], reply[48];
+        const int n = head_screen::commands(next, usb != 0, cmds);
+        for (int i = 0; i < n; i++) {
+          reply[0] = 0;
+          mesh::ui::handleDisplayPowerCommand(cmds[i], reply, sizeof(reply));
+          ok = ok && strcmp(reply, "OK") == 0;
+        }
+      }
+      char off[16], msg[40];
+      head_screen::label(off, sizeof(off), next);
+      snprintf(msg, sizeof(msg), ok ? "Screen off: %s" : "Not saved: %s", off);
+      _task->showAlert(msg, 1000);
       return true;
     }
 #endif

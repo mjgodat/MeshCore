@@ -32,7 +32,7 @@ class NodesPage : public Page {
 #if HMI_CYD
   // CYD: NAME, AGE, SNR, HOP, PKT (TYPE and KM are left out: no room).
   static const int kHeadY = 56, kHeadH = 20;
-  static const int kRowsY = 78, kRowH = 20, kRowsH = 128;
+  static const int kRowsY = 78, kRowH = 24, kRowsH = 128;   // finger-sized rows
 #ifdef HMI_MODEL_NODES
   static const int kMaxRows = HMI_MODEL_NODES;
 #else
@@ -56,6 +56,10 @@ class NodesPage : public Page {
   void onHide() override;
 
   void setCard(NodeCard* card) { _card = card; }
+  // Up / down chevron tiles at the ends of the scroll column (drawn = hit;
+  // only where the list has more that way): a tap scrolls a page.
+  static const int kHintW = 12, kHintH = 18;
+  bool hintRect(bool down, int& x, int& y, int& w, int& h) const;   // false: not shown
   // Where the row table (kMaxRows rows, ~7 KB) is allocated, on first use:
   // PSRAM on the device; null = malloc.
   void setAllocator(const mesh::head::ModelAllocator* a) { _alloc = a; }
@@ -96,6 +100,7 @@ class NodesPage : public Page {
   uint32_t _drawnMs, _drawnGen, _builtMs, _builtGen;
   bool _press, _drag;
   int _pressX, _pressY, _scroll0;
+  uint32_t _hintMs;   // shown / scrolled: chevrons bright for a moment
 };
 
 }  // namespace freenove_ui
