@@ -12,8 +12,12 @@
 // buffer in internal RAM) and each band that changed is pushed over SPI.
 //   - Pages: the page task renders and pushes (renderPage()).
 //   - HEAD: the companion UI draws its usual RGB332 sprite (160 x 105
-//     logical, 2x zoom); endFrame() composes the zoomed sprite and the page
-//     tab bar below it (the overlay) and pushes the bands that changed.
+//     logical, 2x zoom), but its text and its fills / rects are recorded
+//     (CompanionText / CompanionSkin, as on the Freenove): endFrame()
+//     composes the HMI backdrop, the skin's panels / tiles / keys, the
+//     sprite's own pixels (icons, QR), the D-DIN text and the page tab bar
+//     below, band by band, and pushes the bands that changed. The night
+//     palette keeps the plain look (sprite + AA text).
 // PanelOwner says whose frames reach the glass; owner changes, renders and
 // pushes happen under one lock (both run on core 1, the lock also orders
 // LovyanGFX's SPI use). The page task reads the touch controller and relays
@@ -31,6 +35,8 @@
   #include <atomic>
   #include <freertos/FreeRTOS.h>
   #include <freertos/semphr.h>
+  #include "CompanionSkin.h"
+  #include "CompanionText.h"
   #include "FrameBuffer565.h"
   #include "PageNav.h"
   #include "StripRenderer.h"
@@ -168,6 +174,15 @@ public:
   }
 #else
   bool begin();
+  // Companion text in D-DIN (CompanionText) and the HMI skin (CompanionSkin).
+  void setTextSize(int sz) override;
+  void setCursor(int x, int y) override;
+  void print(const char* str) override;
+  uint16_t getTextWidth(const char* str) override;
+  void fillRect(int x, int y, int w, int h) override;
+  void setColor(ColorVal c) override;
+  void drawRect(int x, int y, int w, int h) override;
+  int textLineHeight() override { return freenove_ui::CompanionText::lineHeight(_aaSize); }
   // The band buffer was allocated: the visual head can run.
   bool hmiReady() const { return _pages != nullptr; }
   void startFrame(ColorVal bkg = UIColor::window_bkg) override;
@@ -250,5 +265,17 @@ private:
   int _lastPushed = 0;
   uint32_t _lastPushUs = 0;
   uint32_t _pushUs = 0;                   // accumulates during one render
+  // The frame being drawn (UI loop). Composed right after endFrame(), so
+  // it is also the frame on the glass until the next startFrame().
+  static freenove_ui::CompanionPalette skinPalette();
+  freenove_ui::CompanionText _text;
+  freenove_ui::CompanionSkin _skin;
+  int _aaSize = 1;
+  int _cursorX = 0, _cursorY = 0;
+  ColorVal _semantic = 0;
+  bool _skinOn = false;
+  uint8_t _skinKey = 0;                   // the sprite's background (RGB332 raw)
+  uint32_t _shownHash = 0;                // sprite + text + skin of the frame composed last
+  bool _shownValid = false;
 #endif
 };

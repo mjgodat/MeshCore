@@ -34,9 +34,16 @@
 #include <stdint.h>
 
 #include "FrameBuffer565.h"
+#include "HmiProfile.h"
 #include "Theme.h"
 
 namespace freenove_ui {
+
+#if HMI_CYD
+struct PanelRect;
+// StubPages.cpp: the page backdrop (the CYD keeps no backdrop buffer).
+void drawBackdrop(FrameBuffer565& fb, int x, int y, int w, int h, const PanelRect* panels, int n);
+#endif
 
 // The companion palette's semantic slots (UIColor values, day palette).
 struct CompanionPalette {
@@ -321,6 +328,17 @@ class CompanionSkin {
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + w > W ? W : x + w, y1 = y + h > max_y ? max_y : y + h;
     if (y1 > fb.height()) y1 = fb.height();
+#if HMI_CYD
+    if (backdrop == nullptr) {
+      // No backdrop buffer: the gradient itself, then the body panel's fill.
+      drawBackdrop(fb, x0, y0, x1 - x0, y1 - y0, nullptr, 0);
+      if (body.on)
+        for (int yy = y0; yy < y1; yy++)
+          for (int xx = x0; xx < x1; xx++)
+            if (body.inside(xx, yy)) fb.pixel(xx, yy, theme::kPanelFill);
+      return;
+    }
+#endif
     if (backdrop == nullptr && !body.on) {
       fb.fillRect(x0, y0, x1 - x0, y1 - y0, theme::kBg);
       return;

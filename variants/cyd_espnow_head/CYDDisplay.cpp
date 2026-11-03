@@ -9,6 +9,7 @@
 #include <helpers/ui/DisplayTouchCoordinates.h>
 
 #include "FrameBuffer332.h"   // buildLut565
+#include "StubPages.h"        // drawBackdrop
 
 namespace {
 
@@ -72,6 +73,13 @@ void CYDDisplay::startFrame(ColorVal bkg) {
     _head->invalidate();
   }
   if (locked) unlockPanel();
+  _text.clear();
+  _skin.clear();
+  _skinOn = _strip != nullptr && !mesh::ui::displayNightActive();
+  // The sprite was just cleared to the background: its raw value is the
+  // key for "nothing drawn here" when the frame is composed.
+  const uint8_t* raw = (const uint8_t*)buffer.getBuffer();
+  if (raw != nullptr) _skinKey = raw[0];
 }
 
 void CYDDisplay::endFrame() {
@@ -79,11 +87,83 @@ void CYDDisplay::endFrame() {
     LGFXDisplay::endFrame();
     return;
   }
-  const uint32_t hash = frameHash();
-  const bool changed = !_hasLastFrame || hash != _lastFrameHash;
-  _lastFrameHash = hash;
+  const uint32_t hash = frameHash() ^ (_text.hash() * 31u) ^ (_skinOn ? _skin.hash() * 17u : 0x5A5Au);
+  const bool changed = !_shownValid || hash != _shownHash;
+  _shownHash = hash;
+  _shownValid = true;
   _hasLastFrame = true;
   if (changed || _companionRepaint.load()) composeCompanion(false);
+}
+
+freenove_ui::CompanionPalette CYDDisplay::skinPalette() {
+  return freenove_ui::CompanionPalette{UIColor::window_bkg, UIColor::title_bkg, UIColor::popup_bkg,
+                                       UIColor::corp_blue, UIColor::title_txt, UIColor::primary_txt,
+                                       UIColor::secondary_txt, UIColor::warning_txt, UIColor::popup_txt};
+}
+
+void CYDDisplay::setTextSize(int sz) {
+  LGFXDisplay::setTextSize(sz);
+  _aaSize = sz < 1 ? 1 : sz;
+}
+
+void CYDDisplay::setCursor(int x, int y) {
+  LGFXDisplay::setCursor(x, y);
+  _cursorX = x;
+  _cursorY = y;
+}
+
+void CYDDisplay::setColor(ColorVal c) {
+  _semantic = c;
+  LGFXDisplay::setColor(c);
+}
+
+// Recorded, not drawn into the sprite: drawn in D-DIN over the composed frame.
+void CYDDisplay::print(const char* str) {
+  if (_strip == nullptr) {
+    LGFXDisplay::print(str);
+    return;
+  }
+  char ascii[256];
+  translateUTF8ToBlocks(ascii, str != nullptr ? str : "", sizeof(ascii));
+  if (_skinOn) {
+    const freenove_ui::CompanionPalette pal = skinPalette();
+    _cursorX = _text.add(_cursorX, _cursorY, _aaSize, freenove_ui::skinTextColour(_semantic, pal), ascii,
+                         _skin.textPad(_cursorX, _cursorY, pal));
+    return;
+  }
+  _cursorX = _text.add(_cursorX, _cursorY, _aaSize, (uint16_t)_color, ascii);
+}
+
+uint16_t CYDDisplay::getTextWidth(const char* str) {
+  if (_strip == nullptr) return LGFXDisplay::getTextWidth(str);
+  char ascii[256];
+  translateUTF8ToBlocks(ascii, str != nullptr ? str : "", sizeof(ascii));
+  return (uint16_t)freenove_ui::CompanionText::logicalWidth(ascii, _aaSize);
+}
+
+// A fill over earlier text (a popup, a highlight) hides that text.
+void CYDDisplay::fillRect(int x, int y, int w, int h) {
+  if (_strip != nullptr && _skinOn) {
+    // An HMI shape; in the sprite it clears to the background, so icons
+    // drawn under it earlier stay hidden as before.
+    _skin.fill(x, y, w, h, _semantic);
+    const int saved = _color;
+    _color = renderColor(UIColor::window_bkg);
+    LGFXDisplay::fillRect(x, y, w, h);
+    _color = saved;
+    _text.occlude(x, y, w, h);
+    return;
+  }
+  LGFXDisplay::fillRect(x, y, w, h);
+  _text.occlude(x, y, w, h);
+}
+
+void CYDDisplay::drawRect(int x, int y, int w, int h) {
+  if (_strip != nullptr && _skinOn) {
+    _skin.rect(x, y, w, h, _semantic);
+    return;
+  }
+  LGFXDisplay::drawRect(x, y, w, h);
 }
 
 // UI loop: the HEAD page = the zoomed companion sprite + the tab bar.
@@ -97,28 +177,41 @@ void CYDDisplay::composeCompanion(bool force) {
   unlockPanel();
 }
 
+// The HEAD frame, one band: (skin) HMI backdrop and shapes, the sprite's
+// own pixels (all of them without the skin), the D-DIN text, the tab bar.
 void CYDDisplay::drawHeadBand(FrameBuffer565& fb, int band, void* ctx) {
   (void)band;
   CYDDisplay* self = static_cast<CYDDisplay*>(ctx);
   const uint8_t* src = static_cast<const uint8_t*>(self->buffer.getBuffer());
   const int sw = self->buffer.width(), sh = self->buffer.height();
   const int zoom = 2;
+  const bool skin = self->_skinOn;
+  if (skin) {
+    freenove_ui::drawBackdrop(fb, 0, 0, fb.width(), cyd::kCompanionH, nullptr, 0);
+    self->_skin.draw(fb, cyd::kCompanionH, nullptr, skinPalette());
+  }
   int y0 = fb.clipY0(), y1 = fb.clipY1() + 1;
   if (y1 > cyd::kCompanionH) y1 = cyd::kCompanionH;
   uint16_t* px = fb.rawPixels();
+  const uint8_t key = self->_skinKey;
   for (int y = y0; y < y1; y++) {
     uint16_t* row = px + (long)y * fb.width();
     const int sy = y / zoom;
     if (src == nullptr || sy >= sh) {
-      for (int x = 0; x < fb.width(); x++) row[x] = 0;
+      if (!skin) for (int x = 0; x < fb.width(); x++) row[x] = 0;
       continue;
     }
     const uint8_t* s = src + (long)sy * sw;
     for (int x = 0; x < fb.width(); x++) {
       const int sx = x / zoom;
-      row[x] = sx < sw ? self->_lut565[s[sx]] : 0;
+      if (sx >= sw) continue;
+      const uint8_t v = s[sx];
+      if (!skin) row[x] = self->_lut565[v];
+      else if (v != key) row[x] = self->_lut565[v];   // icons, QR: over the skin
     }
   }
+  fb.resetClip();
+  self->_text.draw(fb, cyd::kCompanionH);
   if (self->_overlay != nullptr) {
     fb.resetClip();
     self->_overlay(fb, self->_overlayCtx);

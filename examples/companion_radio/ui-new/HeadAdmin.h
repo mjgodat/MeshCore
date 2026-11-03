@@ -224,7 +224,13 @@ class HeadAdminScreen : public UIScreen {
   static constexpr int kKeyH = 22;
   static constexpr int kMaxPick = MAX_CONTACTS < 255 ? MAX_CONTACTS : 255;  // the whole table
   static constexpr size_t kPasswordMax = 15;  // the terminal's limit
-  static constexpr int kSettingRows = 7;
+  // Rows of the settings list and the repeater picker (plus a button row).
+  // The CYD visual head's HEAD page (105 logical rows) shows 5, so each row
+  // stays a finger-sized 28 px.
+#ifndef UI_HEAD_LIST_ROWS
+#define UI_HEAD_LIST_ROWS 7
+#endif
+  static constexpr int kSettingRows = UI_HEAD_LIST_ROWS;
   static constexpr int kConsoleCols = 3;
   static constexpr int kConsoleRows = 3;
   static constexpr int kPresetSlots = 5;
