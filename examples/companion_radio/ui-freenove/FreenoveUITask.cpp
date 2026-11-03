@@ -10,6 +10,9 @@
 #include <Preferences.h>
 #include <helpers/UsbLogging.h>
 #include <helpers/esp32/ESPNOWRadio.h>
+#if defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT
+#include <helpers/esp32/HeadLinkRadio.h>
+#endif
 
 #if HMI_CYD
 #include "CYDDisplay.h"
@@ -278,7 +281,12 @@ bool FreenoveUITask::begin(const uint8_t* self_pub_key) {
     return false;
   }
   // Frames queue up (bounded) until the task drains them.
+#if defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT
+  // Both transports feed the pages; HeadLinkRadio passes each frame once.
+  HeadLinkRadio::setUiObserverHandler(onObserverFrame, this);
+#else
   ESPNOWRadio::setObserverHandler(onObserverFrame, this);
+#endif
   s_head.store(this, std::memory_order_release);
   logf("freenove: visual head up (pages, model %u nodes / %u feed in %s); "
                 "free internal %u B, free PSRAM %u B\n",

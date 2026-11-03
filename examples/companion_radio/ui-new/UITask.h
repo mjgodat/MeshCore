@@ -112,7 +112,9 @@ class UITask : public AbstractUITask {
 #if UI_REPEATER_HEAD
   UIScreen* compose = nullptr;
   UIScreen* admin = nullptr;
+  UIScreen* link = nullptr;      // HeadLinkScreen (HEAD_UDP_TRANSPORT builds)
   bool _raw_touch_hold = false;  // swallow the rest of a press that closed compose/admin
+  static void onLinkClosed(void* ctx);
   static void onComposeClosed(void* ctx, const char* result);
   static void onAdminClosed(void* ctx);
   // Compose/admin closed: a message preview held back while it was open,
@@ -177,6 +179,8 @@ public:
   // settings list at the bridge keys.
   void showAdminPresets();
   void showAdminSettings();
+  // This head's link settings: ESP-NOW / UDP / both / auto (HeadLink.h).
+  void showLink();
   // One line for test consoles: the companion screen and the admin
   // console's state (never a password).
   void describeHead(char* out, size_t size) const;

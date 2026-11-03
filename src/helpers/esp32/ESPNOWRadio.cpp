@@ -60,6 +60,19 @@ void ESPNOWRadio::setObserverHandler(mesh::observer::FrameHandler handler,
   observer_handler.store(handler, std::memory_order_release);
 }
 
+bool ESPNOWRadio::forceLongRangeRate() {
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 2, 0)
+  esp_now_rate_config_t rate_config = {};
+  rate_config.phymode = WIFI_PHY_MODE_LR;
+  rate_config.rate = WIFI_PHY_RATE_LORA_250K;
+  rate_config.ersu = false;
+  rate_config.dcm = false;
+  return esp_now_set_peer_rate_config(broadcastAddress, &rate_config) == ESP_OK;
+#else
+  return esp_wifi_config_espnow_rate(WIFI_IF_STA, WIFI_PHY_RATE_LORA_250K) == ESP_OK;
+#endif
+}
+
 // callback when data is sent
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
 static void OnDataSent(const esp_now_send_info_t *info,

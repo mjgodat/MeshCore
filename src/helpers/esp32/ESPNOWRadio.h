@@ -39,6 +39,10 @@ public:
   // Null (the default) leaves them on the normal path. Register once, before
   // or after init(); to change it, clear it first.
   static void setObserverHandler(mesh::observer::FrameHandler handler, void* ctx);
+  // Keeps ESP-NOW broadcasts at the LR 250 kbit/s rate after the station
+  // interface gains B/G/N (a visual head joining WiFi for UDP). Returns false
+  // when the SDK refused (ESP-NOW not running).
+  static bool forceLongRangeRate();
   bool isEnabled() const { return initialized_; }
   int recvRaw(uint8_t* bytes, int sz) override;
   uint32_t getEstAirtimeFor(int len_bytes) override;

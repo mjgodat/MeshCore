@@ -40,6 +40,7 @@ static HeadClockFloor head_clock_floor(rtc_clock);
 #if UI_REPEATER_HEAD
 #include "GestureHints.h"
 #include "HeadScreenTimeout.h"
+#include "HeadLink.h"   // HEAD_UDP_TRANSPORT only
 #include <helpers/ui/DisplayPowerSettings.h>
 #endif
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
@@ -466,6 +467,9 @@ class HomeScreen : public UIScreen {
     COMPOSE,
     REPEATER,
     SCREEN,     // screen timeout (HeadScreenTimeout.h)
+#endif
+#if UI_REPEATER_HEAD && defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT
+    LINK,       // ESP-NOW / UDP / both / auto (HeadLink.h)
 #endif
 #if UI_POCKET_GUI
     MAP,
@@ -1604,6 +1608,24 @@ public:
       display.setColor(UIColor::secondary_txt);
       display.drawTextCentered(display.width() / 2, body_top + 33, "change: " PRESS_LABEL);
 #endif
+#if UI_REPEATER_HEAD && defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT
+    } else if (_page == HomePage::LINK) {
+      mesh::headlink::Status st;
+      HeadLinkRadio::instance()->status(st);
+      const auto& cfg = HeadLinkRadio::instance()->config();
+      char line[40];
+      if (cfg.mode == mesh::headlink::Mode::EspNow) snprintf(line, sizeof(line), "ESP-NOW ch %u", (unsigned)st.espnow_channel);
+      else snprintf(line, sizeof(line), "%s via %s, UDP %s", mesh::headlink::modeName(cfg.mode),
+                    mesh::headlink::activeName(cfg, st), mesh::headlink::linkStateName(st.udp));
+      display.setColor(UIColor::primary_txt);
+      display.setTextSize(2);
+      display.drawTextCentered(display.width() / 2, body_top + 4, "Link");
+      display.setTextSize(1);
+      display.setColor(st.udp == mesh::headlink::LinkState::WrongChannel ? UIColor::warning_txt : UIColor::primary_txt);
+      display.drawTextCentered(display.width() / 2, body_top + 22, line);
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextCentered(display.width() / 2, body_top + 33, "settings: " PRESS_LABEL);
+#endif
     } else if (_page == HomePage::ADVERT) {
       display.setColor(UIColor::corp_blue);
       display.drawXbm((display.width() - 32) / 2, body_top - 2, advert_icon, 32, 32);
@@ -1953,6 +1975,12 @@ public:
       _task->showAdmin();
       return true;
     }
+#if UI_REPEATER_HEAD && defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT
+    if (key == KEY_ENTER && _page == HomePage::LINK) {
+      _task->showLink();
+      return true;
+    }
+#endif
     if (key == KEY_ENTER && _page == HomePage::SCREEN) {
       // Next timeout for both power profiles, saved (display_prefs).
       const int next = head_screen::nextChoice(head_screen::choiceOf(mesh::ui::displayPowerPrefs().usb));
@@ -2793,6 +2821,23 @@ void UITask::showAdmin() {
   setCurrScreen(admin);
 }
 
+#if UI_REPEATER_HEAD && defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT
+void UITask::onLinkClosed(void* ctx) {
+  static_cast<UITask*>(ctx)->closeHeadScreen();
+}
+
+void UITask::showLink() {
+  if (!_display) return;
+  if (!link) link = new (std::nothrow) HeadLinkScreen(&UITask::onLinkClosed, this);
+  if (!link) { showAlert("Link: no memory", 1500); return; }
+  static_cast<HeadLinkScreen*>(link)->open();
+  setCurrScreen(link);
+}
+#else
+void UITask::showLink() {}
+void UITask::onLinkClosed(void*) {}
+#endif
+
 void UITask::showAdminLogin() {
   showAdmin();
   if (admin && curr == admin) static_cast<HeadAdminScreen*>(admin)->loginSaved();
@@ -2976,7 +3021,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
   }
 #endif
 #if UI_REPEATER_HEAD
-  else if ((compose && curr == compose) || (admin && curr == admin)) {
+  else if ((compose && curr == compose) || (admin && curr == admin) || (link && curr == link)) {
     // A busy channel must not throw away a half-typed message or an admin
     // session: the preview is shown when the screen is closed.
     _deferred_msg_preview = true;
@@ -3335,8 +3380,9 @@ void UITask::loop() {
 #else
     const bool chat_screen = false;
 #endif
+    const bool link_screen = link && curr == link;
     const bool raw_touch_screen = _display->isOn()
-        && ((compose && curr == compose) || (admin && curr == admin) || chat_screen);
+        && ((compose && curr == compose) || (admin && curr == admin) || link_screen || chat_screen);
     if (raw_touch_screen) {
       bool changed = false;
 #if UI_HEAD_CHAT_LIST
@@ -3346,6 +3392,11 @@ void UITask::loop() {
         changed = action != static_cast<int>(MsgPreviewScreen::ChatView::Action::None);
         chatAction(action);
       } else
+#endif
+#if UI_REPEATER_HEAD && defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT
+      if (link_screen) changed = static_cast<HeadLinkScreen*>(link)->handleTouch(
+                touched, touch_x, touch_y, _display->width());
+      else
 #endif
       changed = curr == compose
           ? static_cast<HeadComposeScreen*>(compose)->handleTouch(
@@ -3358,7 +3409,8 @@ void UITask::loop() {
       }
       // A press that closed the screen (compose X / Send, admin Back) is
       // not also a tap on the home page underneath (it would re-open it).
-      if (touched && !((compose && curr == compose) || (admin && curr == admin) || chat_screen)) {
+      if (touched && !((compose && curr == compose) || (admin && curr == admin)
+                       || (link && curr == link) || chat_screen)) {
         _raw_touch_hold = true;
       }
     } else {
