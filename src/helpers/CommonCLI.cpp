@@ -28,6 +28,7 @@
 #if defined(WITH_ESPNOW_BRIDGE)
 #include "ESPNowPeerSettings.h"
 #endif
+#include "ESPNowRepeatSettings.h"
 #include "RadioDirectionSettings.h"
 #if defined(ESP32_PLATFORM)
 #include "BootSlot.h"
@@ -1084,6 +1085,9 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #endif
 #if defined(WITH_ESPNOW_BRIDGE)
   mesh::bridge::loadEspNowPeerSettings(fs);
+#endif
+#if defined(MESH_ESPNOW_REPEAT_SETTINGS)
+  mesh::espnow::loadEspNowRepeatSettings(fs);
 #endif
 #if MESH_ENABLE_RADIO_DIRECTION
   mesh::radioDirection::loadDirectionSettings(fs);
@@ -3724,6 +3728,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #endif
 #if defined(WITH_RS232_BRIDGE)
     if (handleRs232DiagnosticCommand(sender_timestamp, command, reply)) return;
+#endif
+#if defined(MESH_ESPNOW_REPEAT_SETTINGS)
+    if (mesh::espnow::handleEspNowRepeatCommand(command, reply, 157)) return;
 #endif
 #if defined(WITH_ESPNOW_BRIDGE)
     if (handleEspNowPeerCommand(command, reply)) return;

@@ -22,6 +22,7 @@ struct TxStats {
   uint32_t requested = 0, filtered = 0, duplicate = 0, oversize = 0;
   uint32_t queued = 0, start_ok = 0, start_fail = 0;
   uint32_t callback_ok = 0, callback_fail = 0, callback_timeout = 0, drops = 0;
+  uint32_t repeats = 0;  // espnow.repeat copies started (not in the counters above)
 };
 
 struct ProbeStats {

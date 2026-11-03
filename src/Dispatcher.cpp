@@ -495,6 +495,7 @@ bool Dispatcher::checkForeignRadioSend() {
     return false;
   }
   if (!millisHasNowPassed(next_tx_time)) return false;
+  if (_radio->holdTransmitStart()) return false;
   const auto prepared = _radio->prepareTransmitProfile(foreign_radio_profile);
   if (prepared == RadioParamApplyResult::BUSY) {
     if (!foreign_radio_prepare_deadline) {
@@ -859,6 +860,7 @@ void Dispatcher::loop() {
                            getLogDateTime(), (uint32_t)outbound->getPayloadType());
         failOutboundTransmit();
       } else {
+        if (_radio->holdTransmitStart()) return;
         uint32_t retry_delay;
         if (!isTransmitChannelReady(outbound, retry_delay)) {
           outbound_radio_retry_at = futureMillis(retry_delay);
@@ -1390,6 +1392,7 @@ void Dispatcher::checkSend() {
   }
   
   if (!millisHasNowPassed(next_tx_time)) return;
+  if (_radio->holdTransmitStart()) return;
 
   // Waiting for airtime credit must leave the receive scanner free to run.
   // Only retune once this queue entry is actually eligible to transmit.

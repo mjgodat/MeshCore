@@ -7,6 +7,8 @@
 #include <vector>
 #include <helpers/WirelessControl.h>
 #include <helpers/ESPNowRawFragmentation.h>
+#include <helpers/esp32/EspNowRepeatScheduler.h>
+#include <helpers/RadioDirectionPolicy.h>
 #include <helpers/bridges/ESPNowBridgeFormat.h>
 #define ESP_IDF_VERSION_VAL(a,b,c) ((a)*10000+(b)*100+(c))
 #define ESPNOW_DEBUG_PRINTLN(...) ((void)0)

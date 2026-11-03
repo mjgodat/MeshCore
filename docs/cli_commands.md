@@ -6660,6 +6660,44 @@ retries after an explicit failed send, with unchanged bridge packet bytes.
 `set espnow.peer broadcast` restores the default broadcast destination.
 Successful MAC delivery does not confirm subsequent LoRa forwarding.
 
+#### Repeat outgoing ESP-NOW frames (`espnow.repeat`)
+
+```text
+get espnow.repeat
+set espnow.repeat <1-4>
+get espnow.repeat.gap
+set espnow.repeat.gap <0-200>
+```
+
+`espnow.repeat` is the total number of copies of every outgoing ESP-NOW frame;
+the default `1` sends each frame once, exactly as before. `espnow.repeat.gap` is
+the time in milliseconds from the start of one copy to the start of the next
+(default `30`). Copies are byte-identical, including both fragments of a
+251-255-byte raw packet, and spacing them lets each copy meet an independent
+fade or collision. Receivers already discard duplicates, so copies are harmless
+to them. Settings are saved immediately, survive reboot, and apply to the next
+outgoing frame without a restart.
+
+Extra copies are sent from the main loop only when the radio is idle and never
+block it. A newer outgoing frame cancels the copies still owed for the previous
+one; at most it waits for a copy already on air to finish (its send callback, a
+few milliseconds), so traffic never queues up behind copies. OTA firmware frames
+are never repeated, and no copies are sent while transmit is disabled by
+`radio.mode`. Each frame uses
+N times the ESP-NOW airtime, so raise the setting only for links at the edge of
+range. A good starting point is `set espnow.repeat 2` and
+`set espnow.repeat.gap 40`. With acknowledged unicast (`espnow.peer` set to a
+MAC) every copy also gets MAC-level retries, so `espnow.repeat` above `1` is
+usually unnecessary; failed copies are not retried by the bridge.
+
+This applies to the ESP-NOW bridge and to primary ESP-NOW nodes (for example
+`Generic_ESPNOW` repeaters, room servers and companions). On a companion the
+command is accepted only from an attached local client, never over LoRa. The
+bridge reports copies sent as `rep` on `get espnow.stats tx`; a primary ESP-NOW
+node without the bridge answers `get espnow.stats` with `> repeat=<copies>`.
+A missing setting means `1`; an unreadable saved setting also falls back to `1`
+and `get espnow.repeat` reports an error until the setting is saved again.
+
 Status reports local state (`off`, `teardown-error`, `driver-error`,
 `channel-mismatch` or `ready`), then these compact fields:
 
@@ -6679,7 +6717,7 @@ peer is reachable. The statistics pages use these keys:
 | --- | --- |
 | Default | `rx`: received callback frames; `mesh`: inbound MeshCore packets queued; `tx`: outbound MeshCore packets queued; `sent`: successful frame callbacks. |
 | `rx` | `frames`: received callback frames; `decoded`: parsed MeshCore packets; `mesh`: queued for mesh processing; `crc`: checksum failures; `bad`: malformed frames; `parse`: packet parse failures. |
-| `tx` | `req`: mesh TX requests; `queued`: mesh packets queued; `start`: SDK-accepted frames; `ok`: successful frame callbacks; `err`: SDK start failures; `cbfail`: failed frame callbacks; `timeout`: callback timeouts. |
+| `tx` | `req`: mesh TX requests; `queued`: mesh packets queued; `start`: SDK-accepted frames; `ok`: successful frame callbacks; `err`: SDK start failures; `cbfail`: failed frame callbacks; `timeout`: callback timeouts; `rep`: `espnow.repeat` copies started (not counted in the other keys). |
 | `drops` | `rxq`: RX queue drops; `foreign`: foreign-group packets; `filter`/`dupe`: inbound filter/duplicate drops; `txq`: recorded local mesh TX rejection/final-failure decisions; `txfilter`/`txdupe`: outbound filter/duplicate drops; `big`: oversize TX drops. |
 | `test` | `queued`, `start`, `ok`, `fail`, `timeout`: probe TX stages; `rx`, `bad`: valid/invalid probes received; `txid`, `rxid`: last queued/received IDs in hexadecimal. |
 

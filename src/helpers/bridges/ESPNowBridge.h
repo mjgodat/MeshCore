@@ -5,6 +5,7 @@
 #include "esp_idf_version.h"
 #include <freertos/FreeRTOS.h>
 #include "helpers/ESPNowRawFragmentation.h"
+#include "helpers/esp32/EspNowRepeatScheduler.h"
 #include "helpers/bridges/BridgeBase.h"
 #include "helpers/bridges/ESPNowBridgeFormat.h"
 #include "helpers/bridges/ESPNowBridgeDiagnostics.h"
@@ -110,6 +111,10 @@ private:
     bool started;
     uint8_t start_retries;
     bool diagnostic;
+    // espnow.repeat: the delivered entry stays at the head, unchanged, while
+    // it owes copies and nothing newer is queued. Copies are never retried.
+    bool repeat_copy;
+    bool repeatable;  // false for OTA firmware frames and diagnostics
   };
   static_assert(sizeof(QueuedTransmit) <= sizeof(mesh::espnow::ESPNowRawFrames) +
                     sizeof(SimpleMeshTables::SeenKey) + 8,
@@ -131,6 +136,9 @@ private:
   static constexpr uint32_t TX_CALLBACK_TIMEOUT_MS = 1000;
   static constexpr uint32_t TX_RETRY_DELAY_MS = 20;
   static constexpr uint8_t TX_MAX_START_RETRIES = 3;
+
+  /** Owed espnow.repeat copies of the head entry; loop() context only. */
+  mesh::espnow::EspNowRepeatScheduler _repeat;
 
   /** Raw-mode fragment assemblies, keyed by source MAC. */
   mesh::espnow::ESPNowRawReassembler _raw_reassembler;

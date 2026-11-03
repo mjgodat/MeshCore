@@ -23,6 +23,7 @@ public:
  mesh::bridge::diag::Stats _stats;
  std::atomic<bool> _debug_dirty{false};
  mesh::espnow::ESPNowRawReassembler _raw_reassembler;
+ mesh::espnow::EspNowRepeatScheduler _repeat;
  struct QueuedTransmit {bool started=false,diagnostic=false;int seen_key=0;};
  static constexpr int TX_QUEUE_DEPTH=2;
  QueuedTransmit _tx_queue[TX_QUEUE_DEPTH];

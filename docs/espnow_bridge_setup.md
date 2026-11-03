@@ -100,6 +100,25 @@ compatible with older receivers. A failed unicast send is retried up to three
 times; MAC success confirms radio reception, not subsequent LoRa forwarding.
 The setting persists across reboot. `set espnow.peer broadcast` restores the
 default, which lets multiple bridges receive each packet without acknowledgements.
+
+For a broadcast link at the edge of range, the bridge can send every outgoing
+ESP-NOW frame more than once, with the copies spaced apart so they meet
+independent fades and collisions:
+
+```text
+set espnow.repeat 2
+set espnow.repeat.gap 40
+```
+
+`espnow.repeat` is the total number of copies (1-4, default `1` = off) and
+`espnow.repeat.gap` the milliseconds between copy starts (0-200, default `30`).
+Each frame then costs that many times the airtime. Copies are byte-identical and
+receivers discard duplicates. Copies are sent only while the bridge is idle, and
+any newer outgoing packet cancels the copies still owed; it waits at most for a
+copy already on air to finish (its send callback, a few milliseconds). OTA
+firmware frames are never repeated. With acknowledged unicast each copy already gets MAC-level
+retries, so a repeat above `1` is usually unnecessary there. `get espnow.stats tx`
+reports copies sent as `rep`. Both settings persist and apply without a restart.
 Dedicated ESP-NOW keeps the WiFi receiver awake to avoid missing bridge packets,
 using more power than modem sleep. When a WiFi service shares the driver, that
 service retains control of its sleep policy.
@@ -110,6 +129,8 @@ service retains control of its sleep policy.
 | --- | --- |
 | `espnow.enabled` | `on` starts ESP-NOW; `off` stops it and keeps its saved settings. Independent of MQTT or RS-232. |
 | `espnow.peer` | `broadcast` by default, or a single destination station MAC for acknowledged unicast. Changing it restarts a running bridge. |
+| `espnow.repeat` | Total copies of each outgoing ESP-NOW frame, 1-4. Default `1` sends once. Try `2` on an edge-of-range broadcast link. |
+| `espnow.repeat.gap` | Milliseconds between copy starts, 0-200. Default `30`; `40` is a good start with `espnow.repeat 2`. |
 | `rs232.enabled` | On combined UART images, starts or stops RS-232 independently of MQTT and ESP-NOW. Use `get rs232.running` to check the live UART. |
 | `bridge.channel` | The 2.4 GHz channel, 1-13. Match it on both boards. This is separate from the LoRa frequency in `set radio`. |
 | `bridge.format` | `wrapped` is the default for this two-repeater setup and uses the shared secret. `raw` connects to primary-ESP-NOW nodes such as `Generic_ESPNOW` or `SenseCapIndicator-ESPNow`; it ignores the secret. Both peers must use compatible formats. |

@@ -40,6 +40,12 @@ public:
   bool isSendComplete() override;
   void onSendFinished() override;
   bool isInRecvMode() const override;
+  // Sends any owed espnow.repeat copy once the radio is idle. Never blocks.
+  void loop() override;
+  // True while an espnow.repeat copy is on air; also cancels its later copies.
+  bool holdTransmitStart() override;
+  // Releases any espnow.repeat copy state; ESP-NOW has no transceiver to reset.
+  bool recoverRadio(bool hard) override;
 
   uint32_t getCADBusyCount() const { return 0; }  // ESP-NOW has no LoRa CAD
 

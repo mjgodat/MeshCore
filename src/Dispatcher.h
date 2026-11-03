@@ -349,6 +349,16 @@ public:
   virtual bool isReceiving() { return false; }
 
   /**
+   * \brief Called just before Dispatcher would start a frame. A transport that
+   * still owns an earlier frame it sent itself (an ESP-NOW espnow.repeat copy
+   * awaiting its send callback) returns true; Dispatcher then retries on its
+   * next loop without starting a send deadline or consuming a CAD/retry
+   * allowance. Returning true also tells the transport that fresh traffic is
+   * waiting. Default: never hold.
+   */
+  virtual bool holdTransmitStart() { return false; }
+
+  /**
    * \brief Non-invasive channel check for a queued retry.
    *
    * Implementations should avoid CAD or any operation that restarts RX, because

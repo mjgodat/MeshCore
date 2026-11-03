@@ -4,6 +4,8 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <helpers/ESPNowRawFragmentation.h>
+#include <helpers/esp32/EspNowRepeatScheduler.h>
+#include <helpers/RadioDirectionPolicy.h>
 #include <helpers/esp32/WiFiRadioPolicy.h>
 #include <helpers/WirelessControl.h>
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -19,6 +21,18 @@ static volatile esp_now_send_status_t last_send_status =
 static bool tx_second_pending = false;
 static uint16_t tx_second_length = 0;
 static uint8_t tx_second_frame[mesh::espnow::ESPNOW_RAW_MAX_FRAME_SIZE];
+// espnow.repeat: one retained logical packet, re-encoded for each copy.
+// Encoding is deterministic, so every copy (and fragment) is byte-identical.
+// A new packet replaces it and cancels any copies still owed.
+static mesh::espnow::EspNowRepeatScheduler tx_repeat;
+static uint8_t tx_repeat_packet[mesh::espnow::ESPNOW_RAW_MAX_PACKET_SIZE];
+static uint16_t tx_repeat_length = 0;
+static bool tx_repeat_in_flight = false;  // a copy's frame awaits its callback
+static uint32_t tx_repeat_frame_at = 0;   // when that copy frame was submitted
+#ifdef PAYLOAD_TYPE_OTA
+static_assert(PAYLOAD_TYPE_OTA == mesh::espnow::kRepeatOtaPayloadType,
+              "espnow.repeat must recognise OTA payloads");
+#endif
 static constexpr uint16_t RX_FRAME_MAX =
     mesh::espnow::ESPNOW_RAW_MAX_FRAME_SIZE;
 static constexpr uint8_t RX_QUEUE_DEPTH = 4;
@@ -97,6 +111,8 @@ void ESPNOWRadio::init() {
   rx_reassembler.reset();
   tx_second_pending = false;
   tx_second_length = 0;
+  tx_repeat.cancel();
+  tx_repeat_in_flight = false;
   last_send_status = ESP_NOW_SEND_SUCCESS;
 
   // Set device as a Wi-Fi Station
@@ -238,6 +254,8 @@ void ESPNOWRadio::end() {
   rx_reassembler.reset();
   tx_second_pending = false;
   tx_second_length = 0;
+  tx_repeat.cancel();
+  tx_repeat_in_flight = false;
   // A cancelled transmission must time out, never become a false TX success.
   is_send_complete = false;
 }
@@ -263,6 +281,27 @@ uint32_t ESPNOWRadio::intID() {
   return n + m;
 }
 
+// Stage and submit the retained packet's first frame for an espnow.repeat
+// copy. Its second fragment, if any, follows its callback from loop().
+static bool submitRetainedPacket() {
+  mesh::espnow::ESPNowRawFrames frames;
+  if (!mesh::espnow::encodeEspNowRawFrames(tx_repeat_packet, tx_repeat_length, frames)) {
+    return false;
+  }
+  tx_second_pending = frames.count == 2;
+  tx_second_length = tx_second_pending ? frames.lengths[1] : 0;
+  if (tx_second_pending) memcpy(tx_second_frame, frames.data[1], tx_second_length);
+  last_send_status = ESP_NOW_SEND_SUCCESS;
+  is_send_complete = false;
+  const esp_err_t result = esp_now_send(
+      broadcastAddress, frames.data[0], frames.lengths[0]);
+  if (result == ESP_OK) return true;
+  last_send_result = result;
+  tx_second_pending = false;
+  tx_second_length = 0;
+  return false;
+}
+
 bool ESPNOWRadio::startSendRaw(const uint8_t* bytes, int len) {
   if (!initialized_ || send_cancelled_) return false;
   mesh::espnow::ESPNowRawFrames frames;
@@ -271,6 +310,21 @@ bool ESPNOWRadio::startSendRaw(const uint8_t* bytes, int len) {
           bytes, static_cast<size_t>(len), frames)) {
     ESPNOW_DEBUG_PRINTLN("Invalid TX length: %d", len);
     return false;
+  }
+
+  // ESP-NOW completions carry no frame identity, so never start while an
+  // espnow.repeat copy is on air. Dispatcher asks holdTransmitStart() first;
+  // this only guards other callers, which then use their normal retry path.
+  if (tx_repeat_in_flight) return false;
+  // Fresh traffic wins over copies still owed for the previous packet. With
+  // repeat=1 nothing is retained and the send below is unchanged.
+  const mesh::espnow::EspNowRepeatConfig& repeat = mesh::espnow::espNowRepeatConfig();
+  const uint8_t copies = mesh::espnow::isRepeatablePacket(bytes, static_cast<size_t>(len))
+      ? repeat.count : 1;
+  tx_repeat.cancel();
+  if (copies > 1) {
+    memcpy(tx_repeat_packet, bytes, static_cast<size_t>(len));
+    tx_repeat_length = static_cast<uint16_t>(len);
   }
 
   tx_second_pending = frames.count == 2;
@@ -290,6 +344,7 @@ bool ESPNOWRadio::startSendRaw(const uint8_t* bytes, int len) {
   if (result == ESP_OK) {
     send_active_ = true;
     n_sent++;
+    tx_repeat.begin(millis(), copies, repeat.gap_ms);
     ESPNOW_DEBUG_PRINTLN("Send started: frames=%u raw_len=%d",
                          (unsigned)frames.count, len);
     return true;
@@ -334,9 +389,12 @@ bool ESPNOWRadio::isSendComplete() {
     ESPNOW_DEBUG_PRINTLN("Second fragment started");
     return false;
   }
+  tx_repeat.finished();
   return is_send_complete;
 }
 void ESPNOWRadio::onSendFinished() {
+  // Copies follow only a packet whose send completed successfully.
+  tx_repeat.abortIfUnfinished();
   send_active_ = false;
   send_cancelled_ = false;
   tx_second_pending = false;
@@ -347,6 +405,83 @@ void ESPNOWRadio::onSendFinished() {
 
 bool ESPNOWRadio::isInRecvMode() const {
   return initialized_ && !send_cancelled_ && is_send_complete && !tx_second_pending;
+}
+
+// Forget an in-flight copy (lost callback or radio recovery). Owed copies are
+// cancelled; the radio is idle again for Dispatcher.
+static void abandonRepeatCopy() {
+  tx_repeat.cancel();
+  if (!tx_repeat_in_flight) return;
+  tx_repeat_in_flight = false;
+  tx_second_pending = false;
+  tx_second_length = 0;
+  last_send_status = ESP_NOW_SEND_SUCCESS;
+  is_send_complete = true;
+}
+
+static bool repeatCopyTimedOut() {
+  if (!tx_repeat_in_flight || is_send_complete
+      || static_cast<uint32_t>(millis() - tx_repeat_frame_at)
+          < mesh::espnow::kRepeatCopyCallbackTimeoutMs) {
+    return false;
+  }
+  mesh::espnow::espNowRepeatConfig().radio_copy_timeouts++;
+  ESPNOW_DEBUG_PRINTLN("Repeat copy callback timed out");
+  abandonRepeatCopy();
+  return true;
+}
+
+bool ESPNOWRadio::holdTransmitStart() {
+  if (!tx_repeat_in_flight || repeatCopyTimedOut()) return false;
+  tx_repeat.cancel();  // fresh traffic is waiting: owe no further copies
+  return true;
+}
+
+bool ESPNOWRadio::recoverRadio(bool hard) {
+  (void)hard;
+  abandonRepeatCopy();
+  return true;
+}
+
+void ESPNOWRadio::loop() {
+  // Dispatcher owns the radio while its own packet is being sent.
+  if (!initialized_ || send_cancelled_ || send_active_) return;
+  if (tx_repeat_in_flight) {
+    if (repeatCopyTimedOut() || !is_send_complete) return;
+    if (tx_second_pending && last_send_status == ESP_NOW_SEND_SUCCESS) {
+      tx_second_pending = false;
+      is_send_complete = false;
+      if (esp_now_send(broadcastAddress, tx_second_frame, tx_second_length) == ESP_OK) {
+        tx_second_length = 0;
+        tx_repeat_frame_at = millis();
+        return;
+      }
+      is_send_complete = true;  // abandon this copy; the next one is whole
+    }
+    tx_second_pending = false;
+    tx_second_length = 0;
+    last_send_status = ESP_NOW_SEND_SUCCESS;
+    tx_repeat_in_flight = false;
+    tx_repeat.finished();
+    return;
+  }
+  // Copies follow Dispatcher's TX policy: none while transmit is disabled.
+  if (tx_repeat.pending() && !mesh::radioDirection::radioTransmitAllowed()) {
+    tx_repeat.cancel();
+    return;
+  }
+  const uint32_t now = millis();
+  if (!tx_repeat.due(now, is_send_complete && !tx_second_pending)) return;
+  if (!submitRetainedPacket()) {
+    tx_repeat.cancel();
+    is_send_complete = true;
+    ESPNOW_DEBUG_PRINTLN("Repeat copy failed to start: %d", last_send_result);
+    return;
+  }
+  tx_repeat.copyStarted(now);
+  tx_repeat_in_flight = true;
+  tx_repeat_frame_at = now;
+  mesh::espnow::espNowRepeatConfig().radio_copies++;
 }
 
 float ESPNOWRadio::getLastRSSI() const { return 0; }

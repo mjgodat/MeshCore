@@ -143,6 +143,7 @@ static bool isCompanionReaderRequest(const char* command) {
 
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
 #include <helpers/esp32/WiFiRadioPolicy.h>
+#include <helpers/ESPNowRepeatSettings.h>
 #endif
 
 #include <helpers/CLICommandUtils.h>
@@ -3101,6 +3102,9 @@ void MyMesh::begin(bool has_display, bool radio_available,
   BaseChatMesh::begin();
   _radio_profiles.begin(_store->getPrimaryFS(), _radio, getRTCClock());
   mesh::loadMorseSettings(_store->getPrimaryFS());
+#if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
+  mesh::espnow::loadEspNowRepeatSettings(_store->getPrimaryFS());
+#endif
 #if defined(ENABLE_OTA)
   mesh::ota::beginSpeedConfig(_store->getPrimaryFS());
 #endif
@@ -11435,6 +11439,11 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
     return true;
   }
   if (sender_timestamp == 0 && handleDirectCommand(command, reply, reply_capacity)) return true;
+#if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
+  // espnow.repeat / espnow.repeat.gap: attached (local) clients only.
+  if (sender_timestamp == 0
+      && mesh::espnow::handleEspNowRepeatCommand(command, reply, reply_capacity)) return true;
+#endif
   if (handleNotificationCommand(command, reply, reply_capacity)) return true;
 
   if (mesh::companion::handleRetryCommand(

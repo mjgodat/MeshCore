@@ -137,6 +137,7 @@ void ESPNowBridge::begin() {
   portEXIT_CRITICAL(&_tx_mux);
   _tx_dropped_reported = 0;
   _tx_started_at = _tx_retry_at = 0;
+  _repeat.cancel();
 
   if (!mesh::bridge::isValidEspNowBridgeChannel(
           _prefs->bridge_channel, _active_format)) {
@@ -365,6 +366,7 @@ void ESPNowBridge::end() {
   _tx_waiting = false;
   _tx_callback_done = false;
   portEXIT_CRITICAL(&_tx_mux);
+  _repeat.cancel();
 
   // Update bridge state
   _initialized = false;
@@ -450,6 +452,8 @@ bool ESPNowBridge::queueTransmitFrames(
     queued_tx.started = false;
     queued_tx.start_retries = 0;
     queued_tx.diagnostic = diagnostic;
+    queued_tx.repeat_copy = false;
+    queued_tx.repeatable = !diagnostic && packet.getPayloadType() != PAYLOAD_TYPE_OTA;
     if (diagnostic) mesh::bridge::diag::increment(_stats.probe.tx_queued);
     else mesh::bridge::diag::increment(_stats.tx.queued);
     _debug_dirty.store(true, std::memory_order_relaxed);
@@ -476,6 +480,7 @@ void ESPNowBridge::pumpTransmitQueue() {
   uint32_t dropped = 0;
   const uint32_t now = millis();
   bool timed_out = false;
+  bool original_start = false, copy_start = false;
 
   portENTER_CRITICAL(&_tx_mux);
   timed_out = _tx_waiting && !_tx_callback_done
@@ -509,13 +514,34 @@ void ESPNowBridge::pumpTransmitQueue() {
 
     if (_tx_count > 0) {
       QueuedTransmit& queued_tx = _tx_queue[_tx_tail];
-      if (completed_status == ESP_NOW_SEND_SUCCESS) {
+      if (queued_tx.repeat_copy) {
+        // A copy is never retried; its second fragment follows only success.
+        if (completed_status == ESP_NOW_SEND_SUCCESS) queued_tx.next_frame++;
+        if (completed_status != ESP_NOW_SEND_SUCCESS
+            || queued_tx.next_frame >= queued_tx.frames.count) {
+          queued_tx.next_frame = 0;
+          _repeat.finished();
+          if (!_repeat.pending() || _tx_count > 1) {
+            _repeat.cancel();
+            _tx_tail = static_cast<uint8_t>((_tx_tail + 1) % TX_QUEUE_DEPTH);
+            _tx_count--;
+          }
+        }
+      } else if (completed_status == ESP_NOW_SEND_SUCCESS) {
         queued_tx.next_frame++;
         queued_tx.start_retries = 0;
         if (queued_tx.next_frame >= queued_tx.frames.count) {
-          _tx_tail = static_cast<uint8_t>(
-              (_tx_tail + 1) % TX_QUEUE_DEPTH);
-          _tx_count--;
+          if (!queued_tx.diagnostic) _repeat.finished();
+          if (!queued_tx.diagnostic && _repeat.pending() && _tx_count == 1) {
+            // Hold the delivered frames for owed copies, never with newer traffic.
+            queued_tx.next_frame = 0;
+            queued_tx.repeat_copy = true;
+          } else {
+            _repeat.cancel();
+            _tx_tail = static_cast<uint8_t>(
+                (_tx_tail + 1) % TX_QUEUE_DEPTH);
+            _tx_count--;
+          }
         }
       } else if (!queued_tx.diagnostic && queued_tx.start_retries < TX_MAX_START_RETRIES) {
         // This completion is definite, unlike a missing callback. Retry the
@@ -530,10 +556,22 @@ void ESPNowBridge::pumpTransmitQueue() {
       }
     }
   }
+  if (!_tx_waiting && _tx_count > 1 && _tx_queue[_tx_tail].repeat_copy
+      && _tx_queue[_tx_tail].next_frame == 0) {
+    // Fresh traffic wins: drop copies still owed for the delivered head.
+    _repeat.cancel();
+    _tx_tail = static_cast<uint8_t>((_tx_tail + 1) % TX_QUEUE_DEPTH);
+    _tx_count--;
+  }
   if (!_tx_waiting && _tx_count > 0
       && (_tx_queue[_tx_tail].start_retries == 0
-          || static_cast<int32_t>(now - _tx_retry_at) >= 0)) {
+          || static_cast<int32_t>(now - _tx_retry_at) >= 0)
+      && (!_tx_queue[_tx_tail].repeat_copy || _tx_queue[_tx_tail].next_frame != 0
+          || _repeat.due(now, true))) {
     QueuedTransmit& queued_tx = _tx_queue[_tx_tail];
+    copy_start = queued_tx.repeat_copy && queued_tx.next_frame == 0;
+    original_start = !queued_tx.repeat_copy && !queued_tx.diagnostic
+        && queued_tx.next_frame == 0;
     if (queued_tx.next_frame < queued_tx.frames.count) {
       frame_len = queued_tx.frames.lengths[queued_tx.next_frame];
       if (frame_len > 0 && frame_len <= sizeof(frame)
@@ -571,7 +609,13 @@ void ESPNowBridge::pumpTransmitQueue() {
     portENTER_CRITICAL(&_tx_mux);
     _tx_waiting = false;
     _tx_callback_done = false;
-    if (_tx_count > 0) {
+    if (_tx_count > 0 && _tx_queue[_tx_tail].repeat_copy) {
+      // An already delivered packet: abandon its remaining copies.
+      _repeat.cancel();
+      _tx_tail = static_cast<uint8_t>((_tx_tail + 1) % TX_QUEUE_DEPTH);
+      _tx_count--;
+      _tx_retry_at = 0;
+    } else if (_tx_count > 0) {
       QueuedTransmit& queued_tx = _tx_queue[_tx_tail];
       if (queued_tx.diagnostic) mesh::bridge::diag::increment(_stats.probe.tx_fail);
       else mesh::bridge::diag::increment(_stats.tx.start_fail);
@@ -599,8 +643,20 @@ void ESPNowBridge::pumpTransmitQueue() {
     portENTER_CRITICAL(&_tx_mux);
     if (_tx_count > 0) {
       _tx_queue[_tx_tail].started = true;
-      if (_tx_queue[_tx_tail].diagnostic) mesh::bridge::diag::increment(_stats.probe.tx_start);
-      else mesh::bridge::diag::increment(_stats.tx.start_ok);
+      if (_tx_queue[_tx_tail].repeat_copy) {
+        if (copy_start) {
+          _repeat.copyStarted(now);
+          mesh::bridge::diag::increment(_stats.tx.repeats);
+        }
+      } else if (_tx_queue[_tx_tail].diagnostic) mesh::bridge::diag::increment(_stats.probe.tx_start);
+      else {
+        mesh::bridge::diag::increment(_stats.tx.start_ok);
+        // espnow.repeat is read per packet, so CLI changes apply without a restart.
+        if (original_start) {
+          const mesh::espnow::EspNowRepeatConfig& repeat = mesh::espnow::espNowRepeatConfig();
+          _repeat.begin(now, _tx_queue[_tx_tail].repeatable ? repeat.count : 1, repeat.gap_ms);
+        }
+      }
     }
     portEXIT_CRITICAL(&_tx_mux);
   }
@@ -755,7 +811,9 @@ void ESPNowBridge::onDataSent(const uint8_t *mac_addr, esp_now_send_status_t sta
   if (_tx_waiting && !_tx_callback_done) {
     _tx_callback_status = static_cast<int>(status);
     _tx_callback_done = true;
-    if (_tx_count > 0 && _tx_queue[_tx_tail].diagnostic) {
+    if (_tx_count > 0 && _tx_queue[_tx_tail].repeat_copy) {
+      // Copies are reported by tx.repeats only; logical counters stay exact.
+    } else if (_tx_count > 0 && _tx_queue[_tx_tail].diagnostic) {
       if (status == ESP_NOW_SEND_SUCCESS) mesh::bridge::diag::increment(_stats.probe.tx_ok);
       else mesh::bridge::diag::increment(_stats.probe.tx_fail);
     } else {
@@ -999,11 +1057,11 @@ void ESPNowBridge::formatStats(const char* page, char* reply, size_t reply_size)
         (unsigned long)s.rx.delivered, (unsigned long)s.rx.checksum_bad,
         (unsigned long)s.rx.badframe, (unsigned long)s.rx.packet_bad);
   } else if (strcmp(page, "tx") == 0) {
-    snprintf(reply, reply_size, "> req=%lu queued=%lu start=%lu ok=%lu err=%lu cbfail=%lu timeout=%lu",
+    snprintf(reply, reply_size, "> req=%lu queued=%lu start=%lu ok=%lu err=%lu cbfail=%lu timeout=%lu rep=%lu",
         (unsigned long)s.tx.requested, (unsigned long)s.tx.queued,
         (unsigned long)s.tx.start_ok, (unsigned long)s.tx.callback_ok,
         (unsigned long)s.tx.start_fail, (unsigned long)s.tx.callback_fail,
-        (unsigned long)s.tx.callback_timeout);
+        (unsigned long)s.tx.callback_timeout, (unsigned long)s.tx.repeats);
   } else if (strcmp(page, "drops") == 0) {
     snprintf(reply, reply_size, "> rxq=%lu foreign=%lu filter=%lu dupe=%lu txq=%lu txfilter=%lu txdupe=%lu big=%lu",
         (unsigned long)s.rx.queue_drop, (unsigned long)s.rx.foreign,

@@ -14,6 +14,8 @@ STUBS = r'''
 #include <cstring>
 #include <helpers/WirelessControl.h>
 #include <helpers/ESPNowRawFragmentation.h>
+#include <helpers/esp32/EspNowRepeatScheduler.h>
+#include <helpers/RadioDirectionPolicy.h>
 #include <helpers/bridges/ESPNowBridgeDiagnostics.h>
 #define ESP_IDF_VERSION_VAL(a,b,c) ((a)*10000+(b)*100+(c))
 #define ESPNOW_DEBUG_PRINTLN(...) ((void)0)
@@ -247,6 +249,7 @@ public:
  uint32_t _tx_started_at=0,_tx_retry_at=0;bool _sdk_teardown_failed=false;
  uint8_t _previous_wifi_sleep=0;bool _wifi_sleep_preference_owned=false;
  mesh::espnow::ESPNowRawReassembler _raw_reassembler;
+ mesh::espnow::EspNowRepeatScheduler _repeat;
  struct QueuedTransmit {bool started=false,diagnostic=false;int seen_key=0;};
  static constexpr int TX_QUEUE_DEPTH=2;
  QueuedTransmit _tx_queue[TX_QUEUE_DEPTH];

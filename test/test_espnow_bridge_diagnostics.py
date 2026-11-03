@@ -72,7 +72,7 @@ class ESPNowBridgeDiagnosticsTests(unittest.TestCase):
         self.run_case("legacy")
 
     def test_fixed_counters_saturate_and_unknown_error_is_safe(self):
-        self.assertIn("counter_bytes=132", self.run_case("counters"))
+        self.assertIn("counter_bytes=136", self.run_case("counters"))
 
     def test_helper_has_no_allocator_sdk_clock_or_output_dependencies(self):
         source = self.work / "pure.cpp"
