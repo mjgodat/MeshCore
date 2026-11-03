@@ -43,10 +43,10 @@ glass).
   it.
 - Faint chevron tiles show where the screen swipes or scrolls: left / right
   on the companion home carousel (they are its Previous / Next touch zones),
-  up / down at the ends of the NODES list (only where it has more). Each is
-  a real tap target and brightens for 1.5 s when the screen appears or
-  moves. The chats thread, settings list and repeater picker keep their
-  Up / Down buttons; the chats list scrolls by drag with its scroll mark.
+  up / down at the ends of the NODES list and of the chats conversation
+  list (only where there is more). Each is a real tap target (a page per
+  tap) and brightens for 1.5 s when the screen appears or moves. The chats
+  thread, settings list and repeater picker keep their Up / Down buttons.
 
 ## CYD screens (320x240)
 
