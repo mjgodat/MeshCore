@@ -5,7 +5,7 @@
 
 CYDHeadBoard board;
 
-ESPNOWRadio radio_driver;
+HeadRadioDriver radio_driver;
 
 ESP32RTCClock rtc_clock;
 SensorManager sensors;

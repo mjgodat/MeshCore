@@ -2,6 +2,12 @@
 
 #include <helpers/ESP32Board.h>
 #include <helpers/esp32/ESPNOWRadio.h>
+#if defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT
+  #include <helpers/esp32/HeadLinkRadio.h>
+  using HeadRadioDriver = HeadLinkRadio;   // ESP-NOW, plus UDP when selected
+#else
+  using HeadRadioDriver = ESPNOWRadio;
+#endif
 #include <helpers/SensorManager.h>
 #include "BootBeacon.h"
 #ifdef DISPLAY_CLASS
@@ -19,7 +25,7 @@ class FreenoveHeadBoard : public ESP32Board {
 };
 
 extern FreenoveHeadBoard board;
-extern ESPNOWRadio radio_driver;
+extern HeadRadioDriver radio_driver;
 extern ESP32RTCClock rtc_clock;
 extern SensorManager sensors;
 

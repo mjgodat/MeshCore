@@ -30,7 +30,11 @@ static constexpr bool kKeepEspNowRadioRunning = false;
 static constexpr uint8_t kDefaultEspNowChannel = 1;
 #endif
 
-#if (defined(MESH_ESPNOW_RADIO) && MESH_ESPNOW_RADIO) || defined(WITH_ESPNOW_BRIDGE)
+// HEAD_UDP_TRANSPORT: a visual head joins ordinary WiFi only in its udp /
+// both / auto modes; ESPNOWRadio::init() still starts ESP-NOW LR-only, and
+// HeadLinkRadio pins the ESP-NOW rate to LR after the station joins.
+#if (defined(MESH_ESPNOW_RADIO) && MESH_ESPNOW_RADIO) || defined(WITH_ESPNOW_BRIDGE) \
+    || (defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT)
 static constexpr uint8_t kProtocolMask = WIFI_PROTOCOL_11B
     | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_LR;
 #elif defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW

@@ -1,4 +1,7 @@
 #include <helpers/CLIReplyText.h>
+#if defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT
+#include <helpers/esp32/HeadLinkRadio.h>
+#endif
 #include <helpers/HardwareCommand.h>
 #include <helpers/ConfigCapabilities.h>
 #include <helpers/RegulatorSettings.h>
@@ -5209,6 +5212,10 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     return true;
   }
 
+#if defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT
+  // get/set transport, transport.failover, udp.* (helpers/HeadTransport.h).
+  if (HeadLinkRadio::handleCommand(command, reply, reply_size)) return true;
+#endif
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
   if (strcmp(command, "get espnow.channel") == 0) {
     formatEspNowChannel(reply, reply_size);
