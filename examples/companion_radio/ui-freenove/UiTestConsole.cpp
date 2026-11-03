@@ -51,6 +51,8 @@
 #if HMI_CYD
 #include "StubPages.h"
 #endif
+#include <Preferences.h>
+#include <helpers/ui/DisplayPowerPolicy.h>
 #include "../MyMesh.h"
 #include "../HeadTerminalLog.h"
 #include "../HeadContactPolicy.h"
@@ -147,6 +149,26 @@ bool takeShotRequest(ShotSink& sink, void*& ctx) {
 }
 void shotDone() { s_shotBusy.store(false); }
 bool shotPending() { return s_shotBusy.load(); }
+
+std::atomic<uint32_t> s_stressUntil{0};
+std::atomic<int32_t> s_minIdle{-1};
+std::atomic<unsigned> s_stackPages{0}, s_stackLoop{0};
+bool stressActive() {
+  const uint32_t until = s_stressUntil.load();
+  return until != 0 && (int32_t)(until - millis()) > 0;
+}
+uint32_t minIdleOverride(uint32_t builtin) {
+  const int32_t v = s_minIdle.load();
+  return v >= 0 ? (uint32_t)v : builtin;
+}
+void noteStacks(unsigned pages, unsigned loop) {
+  s_stackPages.store(pages);
+  s_stackLoop.store(loop);
+}
+// Companion loop responsiveness: calls of freenoveUiTestLoop() (one per
+// loop() pass) and the longest gap between two, since the last "stats".
+std::atomic<uint32_t> s_loopCount{0}, s_loopMaxGapUs{0};
+uint32_t s_loopLastUs = 0, s_loopWindowMs = 0;
 
 std::atomic<uint32_t> s_realPresses{0};
 std::atomic<int> s_realX{-1}, s_realY{-1};
@@ -330,13 +352,20 @@ void cmdBench() {
 }
 
 void cmdStats() {
+  // Loop responsiveness since the last "stats" (then reset).
+  const uint32_t nowMs = millis();
+  const uint32_t window = nowMs - freenove_uitest::s_loopWindowMs;
+  const double loopHz = window ? freenove_uitest::s_loopCount.exchange(0) * 1000.0 / window : 0.0;
+  const double loopGapMs = freenove_uitest::s_loopMaxGapUs.exchange(0) / 1000.0;
+  freenove_uitest::s_loopWindowMs = nowMs;
   uint32_t s[8];
   portENTER_CRITICAL(&freenove_uitest::s_statsMux);
   memcpy(s, freenove_uitest::s_stats, sizeof(s));
   portEXIT_CRITICAL(&freenove_uitest::s_statsMux);
   const double f = s[0] ? (double)s[0] : 1.0;
   reply("STATS frames=%lu window_ms=%lu fps=%.1f render_ms=%.1f chrome_ms=%.1f page_ms=%.1f header_ms=%.1f "
-        "push_ms=%.1f frame_ms=%.1f bands=%.1f heap=%u min_heap=%u largest=%u cpu=%u real_presses=%lu last=%d,%d",
+        "push_ms=%.1f frame_ms=%.1f bands=%.1f heap=%u min_heap=%u largest=%u cpu=%u real_presses=%lu last=%d,%d "
+        "stack_free_pages=%u stack_free_loop=%u loop_hz=%.0f loop_max_gap_ms=%.1f",
         (unsigned long)s[0], (unsigned long)s[1], s[1] ? s[0] * 1000.0 / s[1] : 0.0, s[2] / 1000.0 / f,
         s[5] / 1000.0 / f, s[6] / 1000.0 / f, s[7] / 1000.0 / f,
         s[3] / 1000.0 / f, (s[2] + s[3]) / 1000.0 / f, s[4] / f,
@@ -344,7 +373,8 @@ void cmdStats() {
         (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)getCpuFrequencyMhz(),
         (unsigned long)freenove_uitest::s_realPresses.load(), freenove_uitest::s_realX.load(),
-        freenove_uitest::s_realY.load());
+        freenove_uitest::s_realY.load(), freenove_uitest::s_stackPages.load(), freenove_uitest::s_stackLoop.load(),
+        loopHz, loopGapMs);
 }
 #else
 void cmdShot(int first, int last) {
@@ -523,12 +553,34 @@ void run(char* line) {
 #if HMI_CYD
   } else if (strcmp(cmd, "stats") == 0) {
     cmdStats();
+  } else if (strcmp(cmd, "stress") == 0 && argc == 2) {
+    freenove_uitest::s_stressUntil.store(millis() + (uint32_t)atoi(argv[1]));
+    reply("OK stress");
+  } else if (strcmp(cmd, "idle") == 0 && argc == 2) {
+    freenove_uitest::s_minIdle.store(atoi(argv[1]));
+    reply("OK idle");
   } else if (strcmp(cmd, "bench") == 0) {
     cmdBench();
   } else if (strcmp(cmd, "bars") == 0) {
     display.showColourBars();
     reply("OK bars");
 #endif
+  } else if (strcmp(cmd, "display") == 0) {
+    // The screen power profiles (display_prefs) and the one-time migration flag.
+    const mesh::ui::DisplayPowerPrefs& d = mesh::ui::displayPowerPrefs();
+    Preferences p;
+    bool mig = false;
+    unsigned from = 0, fromMode = 0;
+    if (p.begin("hdisp", true)) {
+      mig = p.getBool("mig1", false);
+      from = p.getUShort("from", 0);
+      fromMode = p.getUChar("frommode", 0);
+      p.end();
+    }
+    reply("DISPLAY battery=%s/%u usb=%s/%u migrated=%d (was usb %s/%u) on=%d",
+          mesh::ui::displayModeName(d.battery.mode), (unsigned)d.battery.seconds, mesh::ui::displayModeName(d.usb.mode),
+          (unsigned)d.usb.seconds, mig ? 1 : 0, mesh::ui::displayModeName((mesh::ui::DisplayMode)fromMode), from,
+          display.isOn() ? 1 : 0);
   } else if (strcmp(cmd, "ping") == 0) {
     reply("OK ping");
   } else {
@@ -540,6 +592,17 @@ void run(char* line) {
 
 // Companion loop (main.cpp loop()).
 void freenoveUiTestLoop() {
+#if HMI_CYD
+  {
+    const uint32_t us = (uint32_t)esp_timer_get_time();
+    if (freenove_uitest::s_loopLastUs != 0) {
+      const uint32_t gap = us - freenove_uitest::s_loopLastUs;
+      if (gap > freenove_uitest::s_loopMaxGapUs.load()) freenove_uitest::s_loopMaxGapUs.store(gap);
+    }
+    freenove_uitest::s_loopLastUs = us;
+    freenove_uitest::s_loopCount.fetch_add(1);
+  }
+#endif
   static bool started = false;
   if (!started) {
     started = true;

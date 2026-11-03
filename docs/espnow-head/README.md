@@ -29,7 +29,24 @@ until cycled. 123 is the phone layout: `1234567890`, `-/:;()$&@`,
 `.,?!'"#`. The bottom row is space, X (cancel) and the action key. Not
 typeable on screen: `% ^ * + = _ ~ { } [ ] < > \ |` and the backtick (use
 the USB terminal for those). Every key that can be touched is drawn; on the
-CYD's HEAD page the rows shrink (32 / 36 px) so all four fit.
+CYD's HEAD page the rows shrink (32 / 36 px) so all four fit. On the Freenove
+the new keyboard is checked by host previews only so far (not yet on the
+glass).
+
+## Screen timeout and gesture hints (both heads)
+
+- The screen turns off 2 minutes after the last touch (fresh installs; a
+  head that still had the old 15 s default moves to 2 min once). The
+  companion home carousel's "Screen" page changes it: tap the centre to
+  cycle 30 s, 1 min, 2 min, 5 min, Never. Saved with the display settings
+  (`display.timeout` / `display.mode`). A touch on a dark screen only wakes
+  it.
+- Faint chevron tiles show where the screen swipes or scrolls: left / right
+  on the companion home carousel (they are its Previous / Next touch zones),
+  up / down at the ends of the NODES list (only where it has more). Each is
+  a real tap target and brightens for 1.5 s when the screen appears or
+  moves. The chats thread, settings list and repeater picker keep their
+  Up / Down buttons; the chats list scrolls by drag with its scroll mark.
 
 ## CYD screens (320x240)
 
@@ -39,7 +56,9 @@ messages, the login field holds four masked test digits, node names and
 positions are public adverts. The CYD has no animations (the route is
 highlighted, gauges and counters just update) and shows fewer panels:
 TELEMETRY leaves out the SNR waterfall and ACTIVE NODES, HOME has four quick
-tiles (ADVERT, PRESET, BRIDGE, ADMIN), NODES has no TYPE and KM columns.
+tiles (ADVERT, PRESET, BRIDGE, ADMIN; OBSERVER and TRACE are left out, the
+BRIDGE and ADMIN tiles open the same screens), NODES has no TYPE and KM
+columns.
 
 | | |
 |-|-|
@@ -66,5 +85,5 @@ from a device.
 | ![MAP](images/map.png) MAP: node positions from adverts | ![NODES](images/nodes.png) NODES: sortable, SNR and the relay it came through |
 | ![Node card](images/node_card.png) Node detail card | ![Chats](images/chats.png) Chats list |
 | ![Thread](images/chat_thread.png) Chat thread | ![Picker](images/repeater_picker.png) Repeater picker, home repeater first |
-| ![Login](images/login.png) Login (password masked) | ![Presets](images/presets.png) Radio presets |
+| ![Login](images/login.png) Login (password masked; outdated keyboard: before the single mode key) | ![Presets](images/presets.png) Radio presets |
 | ![Keyboard](images/keyboard_123.png) Keyboard (outdated: the layout before the single mode key, see above) | |

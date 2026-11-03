@@ -82,10 +82,19 @@ class FreenoveUITask {
 
 #if HMI_CYD
   static constexpr uint32_t kFramePeriodMs = 25;   // touch poll
-  static constexpr uint32_t kMinFrameGapMs = 66;   // <= 15 fps
+  static constexpr uint32_t kMinFrameGapMs = 66;   // <= 15 fps (frame start to frame start)
+  // After every frame the page task (priority 2) sleeps as long as the frame
+  // took, and at least this long, counted from the END of the frame: the
+  // companion loop (priority 1, same core) always gets at least half of
+  // the core, however long frames take.
+  static constexpr uint32_t kMinIdleMs = 30;
+  // Resistive touch: 2 samples (50 ms) to press, 2 to release.
+  static constexpr int kTouchPressSamples = 2, kTouchReleaseSamples = 2;
 #else
   static constexpr uint32_t kFramePeriodMs = 17;   // <= 60 fps
   static constexpr uint32_t kMinFrameGapMs = 0;
+  static constexpr uint32_t kMinIdleMs = 0;
+  static constexpr int kTouchPressSamples = 1, kTouchReleaseSamples = 1;
 #endif
   static constexpr size_t kRingDepth = 16;          // observer frames (~4 KB)
   static constexpr size_t kBridgedDepth = 8;        // received packets (~2 KB)
@@ -96,6 +105,9 @@ class FreenoveUITask {
   static void drawHeadOverlay(FrameBuffer565& fb, void* ctx);
 #if HMI_CYD
   static void drawBand(FrameBuffer565& fb, int band, void* ctx);
+  static unsigned loopStackFree();
+  static uint32_t minIdleMs();
+  uint32_t idleAfterFrameMs() const;   // max(minIdleMs(), the last frame's duration)
 #endif
   friend void freenoveHeadReceived(const uint8_t* raw, int len);
 
@@ -103,7 +115,7 @@ class FreenoveUITask {
   void drainObserver(uint32_t now_ms);
   void pollTouch(uint32_t now_ms);
   void showPage(int index, uint32_t now_ms);
-  void renderFrame(uint32_t now_ms);
+  void renderFrame(uint32_t now_ms, bool headerOnly = false);
   void updateRadio(uint32_t now_ms);
   void updateClock(uint32_t now_ms);
   void handleRequest(freenove_ui::PageRequest req, uint32_t now_ms);
@@ -123,8 +135,21 @@ class FreenoveUITask {
   freenove_ui::PageSet _pages;
   freenove_ui::PageNav _nav;
 
+  freenove_ui::TouchDebounce _debounce{kTouchPressSamples, kTouchReleaseSamples};
+  // Header items changed (clock, link, radio, name): on the CYD only the
+  // header band is redrawn when nothing else asks for a frame.
+  bool _headerFrame = false;
+  void headerChanged() {
 #if HMI_CYD
-  uint32_t _lastFrameMs = 0;
+    _headerFrame = true;
+#else
+    _forceFrame = true;
+#endif
+  }
+#if HMI_CYD
+  uint32_t _lastFrameMs = 0;       // start of the last frame (its clock)
+  uint32_t _lastFrameEndMs = 0;    // end of the last frame
+  uint32_t _lastFrameDurMs = 0;    // its duration (render + push)
   uint32_t _pushUs = 0;            // time pushing bands since the last stats line
   uint32_t _bandsPushed = 0;
   uint32_t _chromeUs = 0, _pageUs = 0, _headerUs = 0;   // render split (drawBand)

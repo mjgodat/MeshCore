@@ -23,7 +23,9 @@
 
 #include "../MyMesh.h"
 #include "HeadPresets.h"
+#include "HeadScreenTimeout.h"
 #include "UITask.h"
+#include <helpers/ui/DisplayPowerSettings.h>
 #if defined(FREENOVE_UITEST) && FREENOVE_UITEST
 #include "UiTest.h"
 #endif
@@ -167,6 +169,32 @@ mesh::head::RelayNameStore* loadRelayNames() {
   return store;
 }
 
+// Once per head (NVS "hdisp"/"mig1"): a screen timeout shorter than the
+// heads' 2 min default (the old 15 s companion default) becomes 2 min. Runs
+// at begin(), after the display settings were loaded; later choices (the
+// carousel's Screen page, the CLI) are the owner's and are never touched.
+void migrateScreenTimeout() {
+  Preferences prefs;
+  if (!prefs.begin("hdisp", false)) return;
+  const bool done = prefs.getBool("mig1", false);
+  if (!done) {
+    const mesh::ui::DisplayPowerPrefs& d = mesh::ui::displayPowerPrefs();
+    prefs.putUShort("from", d.usb.seconds);   // what was there (diagnostics)
+    prefs.putUChar("frommode", (uint8_t)d.usb.mode);
+    bool ok = true;
+    for (int usb = 0; usb < 2; usb++) {
+      if (!head_screen::needsMigration(usb ? d.usb : d.battery)) continue;
+      char cmd[40], reply[48] = "";
+      snprintf(cmd, sizeof(cmd), "set %s.timeout %u", usb ? "display.usb" : "display",
+               (unsigned)head_screen::kDefaultSeconds);
+      mesh::ui::handleDisplayPowerCommand(cmd, reply, sizeof(reply));
+      ok = ok && strcmp(reply, "OK") == 0;
+    }
+    if (ok) prefs.putBool("mig1", true);
+  }
+  prefs.end();
+}
+
 bool companionRepeaterRadio(mesh::ui::RepeaterRadio& out) {
   portENTER_CRITICAL(&s_radioMux);
   const bool known = s_radioKnown;
@@ -221,6 +249,7 @@ bool FreenoveUITask::begin(const uint8_t* self_pub_key) {
   for (int i = 0; i < 2; i++) _fb[i] = FrameBuffer565(_buf[i], kW, kH);
 #endif
   updateClock(millis());
+  migrateScreenTimeout();
   _model->setHeadKey(self_pub_key);
   _names = loadRelayNames();   // before the first advert: "via" names at boot
   _model->setNameStore(_names);
@@ -295,7 +324,7 @@ void FreenoveUITask::updateRadio(uint32_t now_ms) {
   if (state != _radioState || strcmp(label, _radioLabel) != 0) {
     memcpy(_radioLabel, label, sizeof(_radioLabel));
     _radioState = state;
-    _forceFrame = true;
+    headerChanged();
   }
   portENTER_CRITICAL(&s_radioMux);
   s_radioKnown = known;
@@ -318,7 +347,7 @@ void FreenoveUITask::updateClock(uint32_t now_ms) {
   if (strcmp(hm, _ctx.clock_hm) != 0 || strcmp(date, _ctx.clock_date) != 0) {
     memcpy(_ctx.clock_hm, hm, sizeof(hm));
     memcpy(_ctx.clock_date, date, sizeof(date));
-    _forceFrame = true;
+    headerChanged();
   }
 }
 
@@ -384,6 +413,31 @@ void FreenoveUITask::serviceUiLoop() {
 
 void FreenoveUITask::taskEntry(void* arg) { static_cast<FreenoveUITask*>(arg)->run(); }
 
+#if HMI_CYD
+// Least free stack the Arduino loop task has had (bytes; ESP-IDF counts the
+// high-water mark in bytes).
+unsigned FreenoveUITask::loopStackFree() {
+  static TaskHandle_t loop = nullptr;
+  if (loop == nullptr) loop = xTaskGetHandle("loopTask");
+  return loop != nullptr ? (unsigned)uxTaskGetStackHighWaterMark(loop) : 0u;
+}
+
+uint32_t FreenoveUITask::idleAfterFrameMs() const {
+  const uint32_t floor = minIdleMs();
+  // "idle 0" (test console) restores the old behaviour: one tick.
+  if (floor == 0) return 0;
+  return _lastFrameDurMs > floor ? _lastFrameDurMs : floor;
+}
+
+uint32_t FreenoveUITask::minIdleMs() {
+#if defined(FREENOVE_UITEST) && FREENOVE_UITEST
+  return freenove_uitest::minIdleOverride(kMinIdleMs);
+#else
+  return kMinIdleMs;
+#endif
+}
+#endif
+
 void FreenoveUITask::drainObserver(uint32_t now_ms) {
   uint8_t frame[mesh::observer::FrameRing<kRingDepth>::MAX_FRAME];
   for (size_t i = 0; i < kRingDepth; i++) {
@@ -426,12 +480,15 @@ void FreenoveUITask::drainObserver(uint32_t now_ms) {
 void FreenoveUITask::pollTouch(uint32_t now_ms) {
   int x = -1, y = -1;
 #if defined(FREENOVE_UITEST) && FREENOVE_UITEST
-  bool down = _display.touch().read(x, y);
-  if (!freenove_uitest::overrideTouch(now_ms, down, x, y))   // an injected gesture wins
-    freenove_uitest::noteRealTouch(down, x, y);
+  bool raw = _display.touch().read(x, y);
+  if (!freenove_uitest::overrideTouch(now_ms, raw, x, y))   // an injected gesture wins
+    freenove_uitest::noteRealTouch(raw, x, y);
 #else
-  const bool down = _display.touch().read(x, y);
+  const bool raw = _display.touch().read(x, y);
 #endif
+  // Debounced (resistive panel: 2 samples to press / release on the CYD;
+  // the raw state on the Freenove).
+  const bool down = _debounce.update(raw, x, y);
   const bool pressed = down && !_touchDown;
   _touchDown = down;
   freenove_ui::Page* page = current();
@@ -515,7 +572,7 @@ void FreenoveUITask::updateRepeaterName() {
   if (s_nameGen != _nameGen) {
     _nameGen = s_nameGen;
     memcpy(_ctx.repeater_name, s_learnedName[0] ? s_learnedName : s_homeName, sizeof(_ctx.repeater_name));
-    _forceFrame = true;
+    headerChanged();
   }
   portEXIT_CRITICAL(&s_nameMux);
   if (save) {
@@ -549,7 +606,8 @@ void FreenoveUITask::showPage(int index, uint32_t now_ms) {
 }
 
 #if !HMI_CYD
-void FreenoveUITask::renderFrame(uint32_t now_ms) {
+void FreenoveUITask::renderFrame(uint32_t now_ms, bool headerOnly) {
+  (void)headerOnly;   // the Freenove pushes only what changed anyway
   const int64_t t0 = esp_timer_get_time();
   freenove_ui::Page* page = current();
   if (_bgDirty) {
@@ -603,13 +661,19 @@ void FreenoveUITask::drawBand(FrameBuffer565& fb, int band, void* ctx) {
   self->_ctx.band = 0;
 }
 
-void FreenoveUITask::renderFrame(uint32_t now_ms) {
+void FreenoveUITask::renderFrame(uint32_t now_ms, bool headerOnly) {
   const int64_t t0 = esp_timer_get_time();
+  const uint32_t startMs = millis();
   _ctx.now_ms = now_ms;
   _bgDirty = false;
-  const bool drawn = _display.renderPage(drawBand, this);
-  _forceFrame = false;
+  // Header-only: the bands holding the header (the page draws there too, in
+  // the same state, so those bands come out as in a full frame).
+  const bool drawn = _display.renderPage(drawBand, this, headerOnly ? freenove_ui::kHeaderH : 0);
+  if (!headerOnly) _forceFrame = false;
+  _headerFrame = false;
   _lastFrameMs = now_ms;
+  _lastFrameEndMs = millis();
+  _lastFrameDurMs = _lastFrameEndMs - startMs;
   const uint32_t pushUs = _display.lastPushUs();
   _renderUs += (uint32_t)(esp_timer_get_time() - t0) - pushUs;
   _pushUs += pushUs;
@@ -641,7 +705,7 @@ void FreenoveUITask::run() {
     const int link = freenove_ui::hmi::linkLevel(_ctx.obs_seen, now - _ctx.obs_last_ms);
     if (link != _linkLevel) {
       _linkLevel = link;
-      _forceFrame = true;
+      headerChanged();
     }
     _ctx.now_ms = now;
     portENTER_CRITICAL(&s_presetMux);
@@ -664,6 +728,7 @@ void FreenoveUITask::run() {
 #endif
     pollTouch(now);
 #if HMI_CYD && defined(FREENOVE_UITEST) && FREENOVE_UITEST
+    if (freenove_uitest::stressActive()) _forceFrame = true;   // test: frames back to back
     {
       freenove_uitest::ShotSink sink = nullptr;
       void* sinkCtx = nullptr;
@@ -686,18 +751,25 @@ void FreenoveUITask::run() {
     if (on && !_wasOn) _forceFrame = true;   // frames were skipped while dark
     _wasOn = on;
 #if HMI_CYD
-    const bool due = _bgDirty || (uint32_t)(now - _lastFrameMs) >= kMinFrameGapMs;
+    const bool due = _bgDirty || ((uint32_t)(now - _lastFrameMs) >= kMinFrameGapMs &&
+                                  (uint32_t)(millis() - _lastFrameEndMs) >= idleAfterFrameMs());
+    const bool full = _forceFrame || _bgDirty || page->wantsFrame(now);
+    bool rendered = false;
+    if (on && !page->external() && due && (full || _headerFrame)) {
+      renderFrame(now, !full);
+      rendered = true;
+    }
 #else
-    const bool due = true;
-#endif
-    if (on && !page->external() && due && (_forceFrame || _bgDirty || page->wantsFrame(now))) {
+    if (on && !page->external() && (_forceFrame || _bgDirty || page->wantsFrame(now))) {
       renderFrame(now);
     }
+#endif
 
     if ((uint32_t)(now - lastStats) >= kStatsMs) {
 #if HMI_CYD
       logf("cyd: pages page=%s frames=%lu (%.1f fps) render_ms=%.1f (chrome %.1f page %.1f header %.1f) "
-           "push_ms=%.1f bands=%.1f obs=%lu dropped=%lu bad=%lu nodes=%u heap=%u min=%u largest=%u\n",
+           "push_ms=%.1f bands=%.1f obs=%lu dropped=%lu bad=%lu nodes=%u heap=%u min=%u largest=%u "
+           "stack_free pages=%u loop=%u\n",
            page->title(), (unsigned long)_framesRendered, _framesRendered * 1000.0f / (float)(now - lastStats),
            _framesRendered ? (double)_renderUs / 1000.0 / _framesRendered : 0.0,
            _framesRendered ? (double)_chromeUs / 1000.0 / _framesRendered : 0.0,
@@ -708,8 +780,10 @@ void FreenoveUITask::run() {
            (unsigned long)_ctx.obs_dropped, (unsigned long)_ctx.obs_bad, (unsigned)_model->nodeCount(),
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)uxTaskGetStackHighWaterMark(nullptr),
+           (unsigned)loopStackFree());
 #if defined(FREENOVE_UITEST) && FREENOVE_UITEST
+      freenove_uitest::noteStacks(uxTaskGetStackHighWaterMark(nullptr), loopStackFree());
       freenove_uitest::noteStats(_framesRendered, now - lastStats, _renderUs, _pushUs, _bandsPushed, _chromeUs,
                                  _pageUs, _headerUs);
 #endif
@@ -735,6 +809,17 @@ void FreenoveUITask::run() {
 #endif
     }
 
+#if HMI_CYD
+    if (rendered) {
+      // A frame took the CPU from the companion loop (lower priority, same
+      // core): give it at least as long again (>= minIdleMs()) before the
+      // next poll, so the pages never take more than half of core 1.
+      const TickType_t idle = pdMS_TO_TICKS(idleAfterFrameMs());
+      vTaskDelay(idle > 0 ? idle : 1);
+      wake = xTaskGetTickCount();
+      continue;
+    }
+#endif
     // Fixed frame budget: never faster than kFramePeriodMs, always yield.
     if (xTaskDelayUntil(&wake, pdMS_TO_TICKS(kFramePeriodMs)) == pdFALSE) {
       wake = xTaskGetTickCount();

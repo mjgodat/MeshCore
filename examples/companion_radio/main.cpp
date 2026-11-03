@@ -3860,6 +3860,8 @@ void setup() {
       true
 #if defined(WIO_L1_DISPLAY_UNIFIED) && WIO_L1_DISPLAY_UNIFIED
       , display.defaultTimeoutSeconds()
+#elif defined(HEAD_DISPLAY_TIMEOUT_S)
+      , HEAD_DISPLAY_TIMEOUT_S   // repeater heads: 2 min (HeadScreenTimeout.h)
 #endif
       );
   mesh::ui::StartupScreen startup_screen;

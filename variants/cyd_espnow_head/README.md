@@ -33,6 +33,12 @@ and swipes between pages. Fed by the repeater's observer feed
   the companion UI.
 - HEAD page: the companion UI at 160x105 logical (2x), keyboards sized so all
   four rows fit, settings / picker lists of 5 rows.
+- Touch is debounced (2 samples of 25 ms to press and to release): a sample
+  the resistive panel drops mid-press is not a second tap.
+- The page task (priority 2) sleeps after every frame at least as long as
+  the frame took (and >= 30 ms): the companion loop always keeps at least
+  half of the core; sustained frames run at about 7-14 fps by page.
+- Screen off after 2 min (carousel "Screen" page: 30 s .. Never).
 
 ## Repeater settings
 

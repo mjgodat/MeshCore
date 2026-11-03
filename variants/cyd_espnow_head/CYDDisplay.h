@@ -208,7 +208,8 @@ public:
   // Page task: compose one page frame band by band (draw is called once per
   // band, FrameBuffer565 in band mode) and push the bands that changed.
   // False when the pages do not own the panel (nothing drawn).
-  bool renderPage(StripRenderer::DrawFn draw, void* ctx);
+  // maxY > 0: only the bands starting above that row (header-only frames).
+  bool renderPage(StripRenderer::DrawFn draw, void* ctx, int maxY = 0);
   // Bands pushed by the last renderPage(), and the frame's push time.
   int lastBandsPushed() const { return _lastPushed; }
   uint32_t lastPushUs() const { return _lastPushUs; }

@@ -319,6 +319,96 @@ static void hit_targets_drawn() {
   if (!failures) std::printf("PASS hit_targets_drawn\n");
 }
 
+// Resistive touch: a press needs 2 down samples, a release 2 up samples; a
+// dropped sample inside a press is bridged, so one press is one tap.
+static int taps(int press, int release, const char* samples) {
+  TouchDebounce db(press, release);
+  PageNav nav(PageSet::kCount);
+  int n = 0;
+  uint32_t t = 0;
+  for (const char* p = samples; *p; p++, t += 25) {
+    int x = 100, y = 100;
+    const bool d = db.update(*p == 'D', x, y);
+    if (d) CHECK(x == 100 && y == 100);
+    else CHECK(x == -1 && y == -1);
+    if (nav.update(d, x, y, t, false).kind == NavEvent::Tap) n++;
+  }
+  return n;
+}
+
+static void touch_debounce() {
+  TouchDebounce db(2, 2);
+  int x = 5, y = 6;
+  CHECK(!db.update(true, x, y));            // one down sample: not yet
+  x = 7; y = 8;
+  CHECK(db.update(true, x, y) && x == 7 && y == 8);
+  x = -1; y = -1;
+  CHECK(db.update(false, x, y) && x == 7 && y == 8);   // a dropped sample: still down, last position
+  x = 9; y = 9;
+  CHECK(db.update(true, x, y) && x == 9);
+  x = y = -1;
+  CHECK(db.update(false, x, y));
+  CHECK(!db.update(false, x, y) && x == -1);           // two up samples: released
+  // Noise that never holds for two samples never presses.
+  TouchDebounce n2(2, 2);
+  const char* noise = "DUDUDUDU";
+  for (const char* p = noise; *p; p++) { int a = 1, b = 1; CHECK(!n2.update(*p == 'D', a, b)); }
+  // One press with a dropped sample: one tap on the CYD settings, two raw.
+  CHECK(taps(2, 2, "DDDDUDDDUUU") == 1);
+  CHECK(taps(1, 1, "DDDDUDDDUUU") == 2);
+  CHECK(taps(2, 2, "DUUUUU") == 0);         // a single bounce sample is not a tap
+  CHECK(taps(1, 1, "DUUUUU") == 1);
+  if (!failures) std::printf("PASS touch_debounce\n");
+}
+
+// NODES up / down chevron tiles: shown only where the list has more, drawn
+// where they are hit, a tap scrolls a page.
+static void nodes_hints() {
+  Stack s(true);
+  std::vector<uint16_t> full((size_t)W * H);
+  FrameBuffer565 fb(full.data(), W, H);
+  NodesPage& np = *static_cast<NodesPage*>(s.set.page(PageSet::kNodes));
+  uint32_t now = s.t;
+  s.ctx.now_ms = now;
+  np.onShow(now);
+  drawFrame(fb, np, s.ctx, PageSet::kNodes, PageSet::kCount, now);
+  CHECK(np.maxScroll() > 0);
+  auto px = [&](int x, int y) { return full[(size_t)y * W + x]; };
+  int x, y, w, h;
+  // Start: no up tile, a down tile (drawn where it is).
+  CHECK(!np.hintRect(false, x, y, w, h));
+  CHECK(np.hintRect(true, x, y, w, h));
+  CHECK(x + w <= NodesPage::kPanel.x + NodesPage::kPanel.w && y + h <= NodesPage::kRowsY + NodesPage::kRowsH);
+  CHECK(px(x + 2, y + 3) == theme::kTileOffFill);
+  // Tap it: a page down (middle: both shown).
+  const int before = np.scroll();
+  now += 100; s.ctx.now_ms = now;
+  np.touch(x + w / 2, y + h / 2, true); np.touch(x + w / 2, y + h / 2, false);
+  CHECK(np.scroll() > before);
+  drawFrame(fb, np, s.ctx, PageSet::kNodes, PageSet::kCount, now);
+  int ux, uy, uw, uh;
+  if (np.scroll() < np.maxScroll()) CHECK(np.hintRect(true, x, y, w, h));
+  CHECK(np.hintRect(false, ux, uy, uw, uh));
+  CHECK(px(ux + 2, uy + 3) == theme::kTileOffFill);
+  // To the end: the down tile goes.
+  for (int i = 0; i < 20 && np.hintRect(true, x, y, w, h); i++) {
+    np.touch(x + w / 2, y + h / 2, true); np.touch(x + w / 2, y + h / 2, false);
+  }
+  CHECK(np.scroll() == np.maxScroll() && !np.hintRect(true, x, y, w, h));
+  drawFrame(fb, np, s.ctx, PageSet::kNodes, PageSet::kCount, now);
+  CHECK(px(x + 2, y + h / 2) != theme::kTileOffFill || x + 2 < NodesPage::columnX1(widgets::kColPackets));
+  // Bright after the scroll, ghost later.
+  np.hintRect(false, ux, uy, uw, uh);
+  drawFrame(fb, np, s.ctx, PageSet::kNodes, PageSet::kCount, now + 100);
+  int bright = 0;
+  for (int yy = uy; yy < uy + uh; yy++) for (int xx = ux; xx < ux + uw; xx++) bright += px(xx, yy) == theme::kAccent;
+  drawFrame(fb, np, s.ctx, PageSet::kNodes, PageSet::kCount, now + 5000);
+  int ghost = 0;
+  for (int yy = uy; yy < uy + uh; yy++) for (int xx = ux; xx < ux + uw; xx++) ghost += px(xx, yy) == theme::kAccent;
+  CHECK(bright > 0 && ghost == 0);
+  if (!failures) std::printf("PASS nodes_hints\n");
+}
+
 // ------------------------------------------------------------ previews
 
 static bool save(const std::vector<uint16_t>& px, const std::string& path) {
@@ -394,6 +484,8 @@ int main(int argc, char** argv) {
   else if (name == "pages_strip_equals_full") pages_strip_equals_full();
   else if (name == "cyd_layout") cyd_layout();
   else if (name == "hit_targets_drawn") hit_targets_drawn();
+  else if (name == "touch_debounce") touch_debounce();
+  else if (name == "nodes_hints") nodes_hints();
   else { std::printf("unknown scenario %s\n", name.c_str()); return 2; }
   return failures ? 1 : 0;
 }
@@ -401,7 +493,7 @@ int main(int argc, char** argv) {
 
 SOURCES = test_widgets.SOURCES
 SCENARIOS = ('band_primitives', 'strip_renderer_pushes', 'pages_strip_equals_full', 'cyd_layout',
-             'hit_targets_drawn')
+             'hit_targets_drawn', 'touch_debounce', 'nodes_hints')
 
 
 def build(work, cyd):

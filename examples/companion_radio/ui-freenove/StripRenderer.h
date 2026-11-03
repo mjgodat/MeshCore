@@ -30,7 +30,8 @@ class StripRenderer {
   typedef void (*PushFn)(const uint16_t* px, int w, int y0, int rows, void* ctx);
 
   StripRenderer(uint16_t* buf, int w, int h, int bandRows)
-      : _buf(buf), _w(w), _h(h), _bandRows(bandRows > 0 ? bandRows : 1), _valid(false), _pushed(0) {
+      : _buf(buf), _w(w), _h(h), _bandRows(bandRows > 0 ? bandRows : 1), _valid(false), _pushed(0),
+        _fb(buf, w, h, 0, bandRows > 0 ? bandRows : 1) {
     _bands = _h > 0 ? (_h + _bandRows - 1) / _bandRows : 0;
     for (int i = 0; i < kMaxBands; i++) _hash[i] = 0;
   }
@@ -43,26 +44,35 @@ class StripRenderer {
   void invalidate() { _valid = false; }
   int lastPushed() const { return _pushed; }
 
-  // Renders one frame; returns the number of bands pushed (force: every
-  // band, e.g. for a screenshot).
-  int render(DrawFn draw, void* dctx, PushFn push, void* pctx, bool force = false) {
+  // Renders one frame; returns the number of bands pushed.
+  //   force   push every band (whatever the hashes say)
+  //   track   keep the band hashes (false: a screenshot; the glass is not
+  //           touched, so what the hashes describe stays true)
+  //   maxY    only the bands starting above this row (0 = all), e.g. the
+  //           header band when only the clock changed
+  // The band FrameBuffer565 (2.5 KB of change tracking) is a member: it is
+  // never on the caller's stack.
+  int render(DrawFn draw, void* dctx, PushFn push, void* pctx, bool force = false, bool track = true,
+             int maxY = 0) {
     _pushed = 0;
     if (_buf == nullptr || draw == nullptr) return 0;
-    FrameBuffer565 fb(_buf, _w, _h, 0, _bandRows);
     for (int b = 0; b < _bands; b++) {
       const int y0 = b * _bandRows;
+      if (maxY > 0 && y0 >= maxY) break;
       const int rows = y0 + _bandRows <= _h ? _bandRows : _h - y0;
-      fb.setBand(y0, rows);
-      draw(fb, b, dctx);
+      _fb.setBand(y0, rows);
+      draw(_fb, b, dctx);
       if (b < kMaxBands) {
         const uint32_t h = hashPixels(_buf, (long)_w * rows);
-        if (_valid && !force && h == _hash[b]) continue;
-        _hash[b] = h;
+        if (track) {
+          if (_valid && !force && h == _hash[b]) continue;
+          _hash[b] = h;
+        }
       }
       if (push != nullptr) push(_buf, _w, y0, rows, pctx);
       _pushed++;
     }
-    _valid = true;
+    if (track && maxY <= 0) _valid = true;
     return _pushed;
   }
 
@@ -82,4 +92,5 @@ class StripRenderer {
   bool _valid;
   int _pushed;
   uint32_t _hash[kMaxBands];
+  FrameBuffer565 _fb;   // band view of _buf
 };
