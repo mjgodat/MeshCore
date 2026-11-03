@@ -20,6 +20,13 @@
 //
 // Everything clips to the buffer and to the clip rectangle (setClip):
 // any coordinates are safe.
+//
+// Band mode (the CYD's strip renderer, no full-screen buffer): a buffer of
+// `rows` rows holds rows y0..y0+rows-1 of a w x h frame. Coordinates stay
+// those of the whole frame; the clip never leaves the band, so a page draws
+// exactly as on a full frame and only the band's pixels are written.
+// setBand() moves the same buffer to another band. A full frame is the band
+// y0 = 0, rows = h (the plain constructor), so nothing changes for it.
 
 #include <stdint.h>
 
@@ -39,11 +46,22 @@ public:
 
   // Starts with every row in the push spans (contents unknown).
   FrameBuffer565(uint16_t* pixels /*w*h*/, int w = 480, int h = 320);
+  // Band mode: `strip` holds w * rows pixels, rows y0.. of a w x h frame.
+  FrameBuffer565(uint16_t* strip, int w, int h, int y0, int rows);
+  // Band mode: the buffer now holds rows y0..y0+rows-1 (rows <= the
+  // buffer's rows); resets the clip to the band and the object spans.
+  void setBand(int y0, int rows);
+  int bandY0() const { return _y0; }
+  int bandRows() const { return _rows; }
+  // The band's own pixels (row 0 = frame row bandY0()).
+  const uint16_t* bandPixels() const { return _buf; }
 
   int width() const { return _w; }
   int height() const { return _h; }
   const uint16_t* pixels() const { return _px; }
   // Writable pixels behind the primitives' back: marks the whole frame.
+  // Indexed with frame coordinates (y * width() + x); in band mode only the
+  // band's rows (clipY0()..clipY1() after resetClip()) may be written.
   uint16_t* rawPixels() {
     markAll();
     return _px;
@@ -60,9 +78,12 @@ public:
   // smooth gradients without banding.
   static uint16_t dither(float r, float g, float b, int x, int y);
 
-  // Clip rectangle (inclusive x0..x0+w-1); resetClip() = whole buffer.
+  // Clip rectangle (inclusive x0..x0+w-1); resetClip() = whole buffer
+  // (in band mode: the band). The clip never leaves the band.
   void setClip(int x, int y, int w, int h);
   void resetClip();
+  int clipY0() const { return _cy0; }
+  int clipY1() const { return _cy1; }   // inclusive; < clipY0() when empty
 
   void clear(uint16_t c);
   void copyFrom(const uint16_t* src);   // whole w*h frame
@@ -120,9 +141,11 @@ private:
   void cornerFill(int cx, int cy, int dx, int dy, int r, uint16_t c, unsigned alpha, bool stroke);
   int drawText(int x, int yTop, const char* s, uint16_t c, const AAFont& f, int spacing);
 
-  uint16_t* _px;
+  uint16_t* _px;    // frame row 0 (band mode: _buf - _y0 * _w; only band rows are addressed)
+  uint16_t* _buf;   // the buffer as allocated
   int _w;
   int _h;
+  int _y0, _rows;   // band held by _buf (full frame: 0, _h)
   int _cx0, _cy0, _cx1, _cy1;   // clip, inclusive
   RowSpans _push;
   RowSpans _obj;

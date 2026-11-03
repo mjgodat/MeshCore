@@ -24,6 +24,7 @@ constexpr uint16_t kBg = rgb565(6, 20, 32);           // flat fallback
 // Panel glow: the edge colour blurred (sigma 4 px) and added to the backdrop.
 constexpr Rgb8 kGlow = {20, 120, 140};
 constexpr int kGlowPercent = 30;                       // peak, % of kGlow
+constexpr uint16_t kGlow565 = rgb565(20, 120, 140);    // kGlow in RGB565 (the CYD's faint edge rings)
 
 // Panels.
 constexpr uint16_t kPanelFill = rgb565(8, 24, 36);

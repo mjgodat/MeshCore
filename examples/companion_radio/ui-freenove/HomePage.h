@@ -28,6 +28,13 @@
 //               console, ADMIN the console with a saved-password login.
 //   tab bar     y 296..319: framework (never drawn here).
 //
+// CYD (HMI_CYD, 320x240, header y 0..31, tab bar y 210..239): the same
+// panels, smaller: MESH TOPOLOGY (4,34 190x132), NOISE FLOOR (198,34
+// 118x64), PACKETS (198,102 118x64) and four quick tiles (ADVERT, PRESET,
+// BRIDGE, ADMIN; y 170..207). No animations there: a packet's route is
+// highlighted for kPathAnimMs (no blip), no ping rings, no GEO sweep, the
+// layout settles at once, the needle and the odometer just show the value.
+//
 // Motion is event driven: a new packet with a path draws its route in cyan
 // with a white blip travelling sender -> ... -> M5 over kPathAnimMs, then
 // the route rests dim; the contact a packet came from gets one expanding
@@ -66,6 +73,18 @@ class HomePage : public Page {
   // Panels (screen coordinates; the header is rows 0..39). Every text is
   // >= 14 px (StubPages.h fonts).
   static const PanelRect kTopoPanel, kNoisePanel, kPacketsPanel;
+#if HMI_CYD
+  static const int kAreaX = 6, kAreaY = 56, kAreaW = 186, kAreaH = 108;
+  static const int kGraphRightMargin = 40;
+  static const int kToggleX = 124, kToggleY = 34, kToggleW = 70, kToggleH = 22;
+  static const int kCaptionH = 18;
+  static const int kGaugeX = 290, kGaugeY = 78, kGaugeR = 17, kGaugeThick = 4;
+  static const int kOdoX = 206, kOdoPitch = 17, kOdoY = 126, kOdoW = 15, kOdoH = 22, kOdoDigits = 6;
+  static const int kTileX = 4, kTilePitch = 79, kTileY = 170, kTileW = 75, kTileH = 38;
+  // Tiles shown on the CYD, left to right (hmi::QuickTile indices):
+  // OBSERVER and TRACE open the same screens as BRIDGE and ADMIN.
+  static const int kTilesShown = 4;
+#else
   // Topology area inside its panel (under the panel header).
   static const int kAreaX = 8, kAreaY = 68, kAreaW = 284, kAreaH = 168;
   // The force layout keeps nodes out of the right kGraphRightMargin px of
@@ -82,6 +101,10 @@ class HomePage : public Page {
   static const int kOdoX = 312, kOdoPitch = 25, kOdoY = 172, kOdoW = 22, kOdoH = 30, kOdoDigits = 6;
   // Quick-control tiles (a row of their own, no panel).
   static const int kTileX = 6, kTilePitch = 78, kTileY = 244, kTileW = 76, kTileH = 46;
+  static const int kTilesShown = 6;
+#endif
+  // The hmi::QuickTile shown at position i (0..kTilesShown-1).
+  static int tileId(int i);
 
   static const int kLabelMaxChars = 31; // contact names on the map: whole
   static const int kLabelGap = 4;       // label to its own ring (px)

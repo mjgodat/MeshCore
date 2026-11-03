@@ -1,5 +1,11 @@
 #include "TelemetryPage.h"
 
+// CYD: these loops run once per band on a 240 MHz ESP32 without PSRAM;
+// the default -Os costs about 2x here.
+#if HMI_CYD
+#pragma GCC optimize("O2")
+#endif
+
 #include <stdio.h>
 #include <string.h>
 

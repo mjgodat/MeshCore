@@ -31,8 +31,21 @@ void notePage(int index, const char* title);
 // The relay-name store the page task loaded at boot (console "relays").
 void noteRelayNames(const mesh::head::RelayNameStore* store);
 
+// CYD screenshots (no framebuffer to read): the console asks the page task
+// to render the current page once more into `sink`; the page task answers
+// with shotDone(). takeShotRequest() is true once per request.
+typedef void (*ShotSink)(int y, const uint16_t* row, void* ctx);
+void requestShot(ShotSink sink, void* ctx);
+bool takeShotRequest(ShotSink& sink, void*& ctx);
+void shotDone();
+bool shotPending();
+
 // Either side.
 int currentPage();
 const char* currentPageTitle();
+// Page task: the last stats window (frames rendered over window_ms, time
+// rendering / pushing, bands pushed), for the console's "stats".
+void noteStats(uint32_t frames, uint32_t window_ms, uint32_t render_us, uint32_t push_us, uint32_t bands,
+               uint32_t chrome_us, uint32_t page_us, uint32_t header_us);
 
 }  // namespace freenove_uitest

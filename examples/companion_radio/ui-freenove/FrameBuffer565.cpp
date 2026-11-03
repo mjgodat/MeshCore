@@ -5,9 +5,17 @@
 // maths only, rows written left to right, and AA shapes evaluate only the
 // pixels within a pixel of an edge (interiors are plain spans).
 
+#include "HmiProfile.h"
+// CYD: these loops run once per band on a 240 MHz ESP32 without PSRAM;
+// the default -Os costs about 2x here.
+#if HMI_CYD
+#pragma GCC optimize("O2")
+#endif
+
 #include "FrameBuffer565.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 namespace {
@@ -58,23 +66,54 @@ const uint8_t kBayer4[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15
 // ---------------------------------------------------------------------------
 
 FrameBuffer565::FrameBuffer565(uint16_t* pixels, int w, int h)
-  : _px(pixels), _w(w > 0 ? w : 0), _h(h > 0 ? h : 0) {
+  : _px(pixels), _buf(pixels), _w(w > 0 ? w : 0), _h(h > 0 ? h : 0) {
   if (_px == nullptr) _w = _h = 0;
   if (_w > 0x7FFF) _w = 0x7FFF;
   if (_h > kMaxFbRows) _h = kMaxFbRows;
+  _y0 = 0;
+  _rows = _h;
   resetClip();
   _push.setAll(_w, _h);
   _obj.reset();
 }
 
+FrameBuffer565::FrameBuffer565(uint16_t* strip, int w, int h, int y0, int rows)
+  : _px(strip), _buf(strip), _w(w > 0 ? w : 0), _h(h > 0 ? h : 0), _y0(0), _rows(0) {
+  if (_buf == nullptr || rows <= 0) _w = _h = 0;
+  if (_w > 0x7FFF) _w = 0x7FFF;
+  if (_h > kMaxFbRows) _h = kMaxFbRows;
+  setBand(y0, rows);
+  _push.setAll(_w, _h);
+}
+
+void FrameBuffer565::setBand(int y0, int rows) {
+  _y0 = clampI(y0, 0, _h);
+  _rows = clampI(rows, 0, _h - _y0);
+  // Frame coordinates index the band through _px: only rows _y0.._y0+_rows-1
+  // are ever addressed (the clip never leaves them). Integer arithmetic:
+  // the pointer itself would point before the buffer.
+  _px = (uint16_t*)((uintptr_t)_buf - (uintptr_t)((long)_y0 * _w) * sizeof(uint16_t));
+  resetClip();
+  _obj.reset();
+}
+
 uint16_t FrameBuffer565::get(int x, int y) const {
-  if (x < 0 || y < 0 || x >= _w || y >= _h) return 0;
+  if (x < 0 || y < _y0 || x >= _w || y >= _y0 + _rows) return 0;
   return _px[y * _w + x];
 }
 
 uint16_t FrameBuffer565::mix(uint16_t d, uint16_t s, unsigned a) {
   if (a >= 255) return s;
   if (a == 0) return d;
+#if HMI_CYD
+  // CYD: 5-bit alpha on the spread 0x07E0F81F form, two multiplies and no
+  // divides (the exact form below costs three divisions per pixel).
+  const uint32_t a5 = (a * 33u) >> 8;
+  const uint32_t fg = ((uint32_t)s | ((uint32_t)s << 16)) & 0x07E0F81Fu;
+  const uint32_t bg = ((uint32_t)d | ((uint32_t)d << 16)) & 0x07E0F81Fu;
+  const uint32_t m = ((fg * a5 + bg * (32u - a5)) >> 5) & 0x07E0F81Fu;
+  return (uint16_t)(m | (m >> 16));
+#endif
   const int ia = (int)a;
   const int dr = (d >> 11) & 31, dg = (d >> 5) & 63, db = d & 31;
   const int sr = (s >> 11) & 31, sg = (s >> 5) & 63, sb = s & 31;
@@ -93,17 +132,18 @@ uint16_t FrameBuffer565::dither(float r, float g, float b, int x, int y) {
 }
 
 void FrameBuffer565::setClip(int x, int y, int w, int h) {
+  const int top = _y0, bottom = _y0 + _rows - 1;   // the band (full frame: 0.._h-1)
   _cx0 = clampI(x, 0, _w);
-  _cy0 = clampI(y, 0, _h);
+  _cy0 = clampI(y, top, bottom + 1);
   _cx1 = clampI((int)((long)x + w - 1), -1, _w - 1);
-  _cy1 = clampI((int)((long)y + h - 1), -1, _h - 1);
+  _cy1 = clampI((int)((long)y + h - 1), top - 1, bottom);
 }
 
 void FrameBuffer565::resetClip() {
   _cx0 = 0;
-  _cy0 = 0;
+  _cy0 = _y0;
   _cx1 = _w - 1;
-  _cy1 = _h - 1;
+  _cy1 = _y0 + _rows - 1;
 }
 
 bool FrameBuffer565::clipRow(int y, int& a, int& b) const {
@@ -121,14 +161,14 @@ void FrameBuffer565::takePushSpans(RowSpans& into) {
 void FrameBuffer565::markAll() { _push.setAll(_w, _h); }
 
 void FrameBuffer565::clear(uint16_t c) {
-  for (long i = 0, n = (long)_w * _h; i < n; i++) _px[i] = c;
+  for (long i = 0, n = (long)_w * _rows; i < n; i++) _buf[i] = c;
   _push.setAll(_w, _h);
   _obj.reset();
 }
 
 void FrameBuffer565::copyFrom(const uint16_t* src) {
-  if (_w <= 0 || _h <= 0 || src == nullptr) return;
-  memcpy(_px, src, (size_t)_w * (size_t)_h * 2);
+  if (_w <= 0 || _rows <= 0 || src == nullptr) return;
+  memcpy(_buf, src + (long)_y0 * _w, (size_t)_w * (size_t)_rows * 2);
   _push.setAll(_w, _h);
   _obj.reset();
 }
