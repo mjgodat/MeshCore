@@ -10,6 +10,21 @@ on:
   workflow_dispatch:
 
 jobs:
+  compact-ota-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verify real browser OTA uploads and checksums
+        env:
+          MESHCORE_REQUIRE_OTA_BROWSER: '1'
+        run: python3 -B test/test_compact_elegant_ota.py -v
+
   wifi-diagnostics:
     runs-on: ubuntu-latest
     steps:
@@ -52,12 +67,12 @@ jobs:
           --firmware-version v1.18.0.1-halo-keymind-cascade-dev
           --radio-preset usa-cascade-fixed --profile cascade --require-ota
 
-      - name: Verify linked Companion crypto, retained Reader and ARM stack use
+      - name: Verify linked Companion crypto, Reader exclusion and ARM stack use
         run: |
           python3 -m pip install unicorn==2.1.4
           python3 -B test/test_cc310_shared_scratch.py -v
           python3 -B scripts/check_nrf52_companion_crypto.py .pio/build/RAK_4631_companion_radio_full/firmware.elf
-          python3 -B scripts/check_nrf52_companion_reader.py .pio/build/RAK_4631_companion_radio_full/firmware.elf
+          python3 -B scripts/check_nrf52_companion_reader.py --expect-disabled .pio/build/RAK_4631_companion_radio_full/firmware.elf
           python3 -B scripts/check_nrf52_companion_ota_workspace.py .pio/build/RAK_4631_companion_radio_full/firmware.elf
 
       - name: Qualify XIAO Full Companion with Meshtext and direct OTA
@@ -293,6 +308,14 @@ jobs:
         run: pio run -e muzi_base_repeater -e muzi_base_room_server -e muzi_base_companion_radio_usb -e muzi_base_companion_radio_ble
       - name: Qualify Muzi Full Companion
         run: bash build.sh build-firmware muzi_base_companion_radio_full --firmware-version v1.18.0.2-halo-keymind-cascade-dev --radio-preset usa-cascade-fixed --profile cascade
+      - name: Upload universal build failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: universal-lora-build-logs
+          path: out/build-logs/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   headless-kiss-smoke:
     runs-on: ubuntu-latest
@@ -707,9 +730,11 @@ jobs:
           python3 -B test/test_regulator_settings.py -v
           python3 -B test/test_battery_forwarding.py -v
           python3 -B test/test_emergency_power.py -v
+          python3 -B test/test_emergency_clock_sync.py -v
           python3 -B test/test_solar_daylight.py -v
           python3 -B test/test_power_schedule.py -v
           python3 -B test/test_emergency_power_runtime.py -v
+          python3 -B test/test_emergency_telemetry_sampling.py -v
           python3 -B test/test_emergency_power_ota.py -v
           python3 -B test/test_emergency_power_bench.py -v
           python3 -B test/test_emergency_sleep_backends.py -v
@@ -803,6 +828,7 @@ jobs:
           python3 -B test/test_common_cli_retry_tail.py -v
           python3 -B test/test_common_prefs_legacy_rxgain.py -v
           python3 -B test/test_flood_policy_capacity.py -v
+          python3 -B test/test_wardriving_default_migration.py -v
           python3 -B test/test_flood_rule_layout.py -v
           python3 -B test/test_mqtt_prefs_commit.py -v
           python3 -B test/test_identity_and_settings_recovery.py -v
@@ -1049,6 +1075,8 @@ jobs:
           python3 -B test/test_service_start_retry.py -v
           python3 -B test/test_webconfig_recovery_auth.py -v
           python3 -B test/test_webconfig_password_sessions.py -v
+          python3 -B test/test_webconfig_password_persistence.py -v
+          python3 -B test/test_webconfig_password_reveal.py -v
           python3 -B test/test_webconfig_login_throttle.py -v
           python3 -B test/test_esp32_wifi_scan_fix.py -v
           python3 -B test/test_esp32_wifi_scan_recipes.py -v
@@ -1165,6 +1193,8 @@ jobs:
       - name: Verify WiFi, ESP-NOW and combined wireless controls
         run: |
           python3 -B test/test_wireless_control.py -v
+          python3 -B test/test_stm32_wireless_specialization.py -v
+          python3 -B test/test_companion_no_wireless.py -v
           python3 -B test/test_serial_wifi_sessions.py -v
           python3 -B test/test_companion_wifi_listener.py -v
           python3 -B test/test_wifi_compatibility.py -v
