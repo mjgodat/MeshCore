@@ -202,7 +202,7 @@ keyboard is verified by host previews only (not yet on the glass).
 Both heads: the screen turns off 2 minutes after the last touch; the
 companion carousel's "Screen" page cycles 30 s / 1 / 2 / 5 min / Never.
 Faint chevron tiles mark the carousel's side taps and a scrollable NODES
-list. On the CYD the pages never take more than half of the CPU core the
+list or chats conversation list. On the CYD the pages never take more than half of the CPU core the
 companion loop runs on, and touch is debounced for the resistive panel.
 
 ### Freenove head, 480x320
