@@ -44,6 +44,13 @@ bool shotPending();
 // injected); press edges are counted with the last press position.
 void noteRealTouch(bool down, int x, int y);
 
+// Test knobs (console "stress MS", "idle MS"): frames back to back for MS
+// ms; the page task's minimum idle after a frame (-1 = the built-in value).
+bool stressActive();
+uint32_t minIdleOverride(uint32_t builtin);
+// Page task: least free stack (bytes) of the page task and the loop task.
+void noteStacks(unsigned pages, unsigned loop);
+
 // Either side.
 int currentPage();
 const char* currentPageTitle();

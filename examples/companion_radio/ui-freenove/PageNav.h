@@ -177,6 +177,39 @@ class PageNav {
   uint32_t _t0, _tMove;
 };
 
+// Resistive touch (the CYD's XPT2046) drops samples mid-press and bounces
+// on contact. TouchDebounce turns raw samples into a stable state: a press
+// counts after `press` consecutive down samples, a release after `release`
+// consecutive up samples; a dropped sample inside a press is bridged (the
+// press stays down at its last position). press = release = 1 is the raw
+// state (the Freenove's capacitive panel).
+class TouchDebounce {
+ public:
+  explicit TouchDebounce(int press = 1, int release = 1)
+      : _press(press < 1 ? 1 : press), _release(release < 1 ? 1 : release), _down(false), _run(0), _x(-1), _y(-1) {}
+  // One raw sample; returns the debounced state and its position in x, y
+  // (the last down sample while down; -1, -1 when up).
+  bool update(bool raw, int& x, int& y) {
+    if (raw == _down) {
+      _run = 0;
+    } else if (++_run >= (raw ? _press : _release)) {
+      _down = raw;
+      _run = 0;
+    }
+    if (raw && _down) { _x = x; _y = y; }
+    if (_down) { x = _x; y = _y; }
+    else { x = y = -1; }
+    return _down;
+  }
+  bool down() const { return _down; }
+
+ private:
+  int _press, _release;
+  bool _down;
+  int _run;
+  int _x, _y;
+};
+
 class TouchRelay {
  public:
   TouchRelay() : _down(false), _seen(true), _x(-1), _y(-1) {}

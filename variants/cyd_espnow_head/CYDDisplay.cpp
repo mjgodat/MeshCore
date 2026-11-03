@@ -63,10 +63,13 @@ void CYDDisplay::unlockPanel() {
 }
 
 void CYDDisplay::startFrame(ColorVal bkg) {
-  // A day/night switch fills the panel (LovyanGFX): ordered with the pushes,
-  // and every band is resent afterwards.
+  // A day/night switch fills the panel (LovyanGFX): only then is the panel
+  // lock needed (waiting out a page frame), and every band is resent after.
+  // Ordinary frames draw into the sprite only and never wait for the pages.
   const bool night = _nightFrame;
-  const bool locked = lockPanel();
+  const bool switching = mesh::ui::displayNightActive() != _nightFrame;
+  const bool locked = switching && _panelLock != nullptr &&
+                      xSemaphoreTakeRecursive(_panelLock, portMAX_DELAY) == pdTRUE;
   LGFXDisplay::startFrame(bkg);
   if (night != _nightFrame && _pages != nullptr) {
     _pages->invalidate();
@@ -225,12 +228,12 @@ void CYDDisplay::pushBand(const uint16_t* px, int w, int y0, int rows, void* ctx
   self->_pushUs += (uint32_t)(esp_timer_get_time() - t0);
 }
 
-bool CYDDisplay::renderPage(StripRenderer::DrawFn draw, void* ctx) {
+bool CYDDisplay::renderPage(StripRenderer::DrawFn draw, void* ctx, int maxY) {
   if (_pages == nullptr || !lockPanel()) return false;
   bool drawn = false;
   if (panelOwner() == PanelOwner::Pages) {
     _pushUs = 0;
-    _lastPushed = _pages->render(draw, ctx, pushBand, this);
+    _lastPushed = _pages->render(draw, ctx, pushBand, this, false, true, maxY);
     _lastPushUs = _pushUs;
     drawn = true;
   }
@@ -293,23 +296,20 @@ void CYDDisplay::dumpBand(const uint16_t* px, int w, int y0, int rows, void* ctx
 }
 
 bool CYDDisplay::dumpPage(StripRenderer::DrawFn draw, void* drawCtx, RowSink sink, void* sinkCtx) {
-  if (_strip == nullptr || sink == nullptr || !lockPanel()) return false;
-  StripRenderer once(_strip, cyd::kScreenW, cyd::kScreenH, cyd::kBandRows);   // no hashes kept
+  if (_pages == nullptr || sink == nullptr || !lockPanel()) return false;
   _dumpSink = sink;
   _dumpCtx = sinkCtx;
-  once.render(draw, drawCtx, dumpBand, this, true);
+  _pages->render(draw, drawCtx, dumpBand, this, true, false);   // hashes untouched (the glass is)
   _dumpSink = nullptr;
-  if (_pages != nullptr) _pages->invalidate();   // the strip held other pixels meanwhile: harmless, but resend
   unlockPanel();
   return true;
 }
 
 bool CYDDisplay::dumpCompanion(RowSink sink, void* sinkCtx) {
-  if (_strip == nullptr || sink == nullptr || !lockPanel()) return false;
-  StripRenderer once(_strip, cyd::kScreenW, cyd::kScreenH, cyd::kBandRows);
+  if (_head == nullptr || sink == nullptr || !lockPanel()) return false;
   _dumpSink = sink;
   _dumpCtx = sinkCtx;
-  once.render(drawHeadBand, this, dumpBand, this, true);
+  _head->render(drawHeadBand, this, dumpBand, this, true, false);
   _dumpSink = nullptr;
   unlockPanel();
   return true;

@@ -3439,6 +3439,8 @@ void MyMesh::begin(bool has_display, bool radio_available,
       true  // All Companion transports show startup unless the saved mode forbids it.
 #if defined(WIO_L1_DISPLAY_UNIFIED) && WIO_L1_DISPLAY_UNIFIED
       , display.defaultTimeoutSeconds()
+#elif defined(HEAD_DISPLAY_TIMEOUT_S)
+      , HEAD_DISPLAY_TIMEOUT_S   // repeater heads: 2 min (HeadScreenTimeout.h)
 #endif
   );
 #ifdef MESHCORE_HAS_REAL_DISPLAY
