@@ -1,5 +1,11 @@
 #include "NodesPage.h"
 
+// CYD: these loops run once per band on a 240 MHz ESP32 without PSRAM;
+// the default -Os costs about 2x here.
+#if HMI_CYD
+#pragma GCC optimize("O2")
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,17 +19,30 @@ namespace freenove_ui {
 using mesh::head::MeshModel;
 using mesh::head::NodeInfo;
 
+#if HMI_CYD
+const PanelRect NodesPage::kPanel = {4, kHeaderH + 2, 312, 174};
+#else
 const PanelRect NodesPage::kPanel = {6, kHeaderH + 2, 468, 250};
+#endif
 
 namespace {
 
 const uint32_t kStaleMs = 30u * 60u * 1000u;
 // Column edges (screen px): NAME, TYPE, HEARD, SNR, HOPS, KM, PKTS.
 // SNR is the wide one: "-12.5 via <relay name>".
+#if HMI_CYD
+// TYPE and KM have no width (not shown); shorter labels.
+const int kColEdge[widgets::kColCount + 1] = {6, 98, 98, 142, 222, 262, 262, 302};
+const int kSnrSlotW = 32;
+const char* const kColLabel[widgets::kColCount] = {"NAME", "TYPE", "AGE", "SNR", "HOP", "KM", "PKT"};
+const int kPad = 4;
+#else
 const int kColEdge[widgets::kColCount + 1] = {8, 122, 160, 222, 346, 386, 418, 462};
 const int kSnrSlotW = 34;   // SNR value width inside the SNR column
 const char* const kColLabel[widgets::kColCount] = {"NAME", "TYPE", "HEARD", "SNR", "HOPS", "KM", "PKTS"};
 const int kPad = 6;
+#endif
+bool shown(int c) { return kColEdge[c + 1] > kColEdge[c]; }
 
 bool leftAligned(int c) { return c == widgets::kColName || c == widgets::kColType || c == widgets::kColSnr; }
 
@@ -196,7 +215,7 @@ bool NodesPage::touch(int x, int y, bool down) {
 
 void NodesPage::drawBackground(FrameBuffer565& fb) {
   drawPanel(fb, kPanel, "NODES", nullptr);
-  fb.hline(kPanel.x + 8, kHeadY + kHeadH - 1, kPanel.w - 16, theme::kDivider);
+  fb.hline(kPanel.x + (HMI_CYD ? 6 : 8), kHeadY + kHeadH - 1, kPanel.w - (HMI_CYD ? 12 : 16), theme::kDivider);
 }
 
 void NodesPage::drawRow(FrameBuffer565& fb, int pos, int y) const {
@@ -212,7 +231,7 @@ void NodesPage::drawRow(FrameBuffer565& fb, int pos, int y) const {
   widgets::nodeName(buf, sizeof(buf), *n);
   widgets::fitText(name, sizeof(name), buf, kFontSmall, kColEdge[1] - kColEdge[0] - 2 * kPad);
   fb.text(kColEdge[0] + kPad, ty, name, tc, kFontSmall);
-  fb.text(kColEdge[1] + kPad, ty, widgets::typeShort(r.type), theme::kTextDim, kFontSmall);
+  if (shown(widgets::kColType)) fb.text(kColEdge[1] + kPad, ty, widgets::typeShort(r.type), theme::kTextDim, kFontSmall);
   widgets::formatAge(buf, sizeof(buf), r.age_ms);
   fb.text(kColEdge[3] - kPad, ty, buf, tc, kFontSmall, FrameBuffer565::kRightTop);
   // SNR: own for a node heard directly; "-4.2 via Downtown" for a relayed
@@ -239,9 +258,11 @@ void NodesPage::drawRow(FrameBuffer565& fb, int pos, int y) const {
   }
   snprintf(buf, sizeof(buf), "%u", (unsigned)r.hops);
   fb.text(kColEdge[5] - kPad, ty, buf, tc, kFontSmall, FrameBuffer565::kRightTop);
-  if (r.has_km) widgets::formatKm(buf, sizeof(buf), r.km, false);
-  else snprintf(buf, sizeof(buf), "--");
-  fb.text(kColEdge[6] - kPad, ty, buf, r.has_km ? tc : kDimText, kFontSmall, FrameBuffer565::kRightTop);
+  if (shown(widgets::kColKm)) {
+    if (r.has_km) widgets::formatKm(buf, sizeof(buf), r.km, false);
+    else snprintf(buf, sizeof(buf), "--");
+    fb.text(kColEdge[6] - kPad, ty, buf, r.has_km ? tc : kDimText, kFontSmall, FrameBuffer565::kRightTop);
+  }
   snprintf(buf, sizeof(buf), "%lu", (unsigned long)r.packets);
   fb.text(kColEdge[7] - kPad, ty, buf, tc, kFontSmall, FrameBuffer565::kRightTop);
 }
@@ -252,7 +273,7 @@ void NodesPage::draw(FrameBuffer565& fb, uint32_t now_ms) {
   _drawnGen = _ctx != nullptr ? _ctx->data_gen : 0;
   const MeshModel* m = _ctx != nullptr ? _ctx->model : nullptr;
   if (m == nullptr || !m->ok()) {
-    fb.text(240, 150, "MODEL UNAVAILABLE", theme::kBad, kFontBody, FrameBuffer565::kCentreTop);
+    fb.text(kMidX, kMidY, "MODEL UNAVAILABLE", theme::kBad, kFontBody, FrameBuffer565::kCentreTop);
     return;
   }
   if (_card != nullptr && _card->isOpen()) {
@@ -260,12 +281,16 @@ void NodesPage::draw(FrameBuffer565& fb, uint32_t now_ms) {
     return;
   }
   // Rows follow the model (not mid-drag: the list would jump under the finger).
-  if (!_built || (!_drag && (_ctx->data_gen != _builtGen || (uint32_t)(now_ms - _builtMs) >= 1000))) rebuild(now_ms);
+  if (firstBand() &&
+      (!_built || (!_drag && (_ctx->data_gen != _builtGen || (uint32_t)(now_ms - _builtMs) >= 1000))))
+    rebuild(now_ms);
   char note[40];
-  snprintf(note, sizeof(note), "%d node%s \xB7 tap a header to sort", _count, _count == 1 ? "" : "s");
-  fb.text(kPanel.x + kPanel.w - 8, kPanel.y + 6, note, theme::kAccent, kFontSmall, FrameBuffer565::kRightTop);
+  if (HMI_CYD) snprintf(note, sizeof(note), "%d node%s", _count, _count == 1 ? "" : "s");
+  else snprintf(note, sizeof(note), "%d node%s \xB7 tap a header to sort", _count, _count == 1 ? "" : "s");
+  fb.text(kPanel.x + kPanel.w - kNoteInset, kPanel.y + kNoteDy, note, theme::kAccent, kFontSmall, FrameBuffer565::kRightTop);
   // Column headers; the sort column in the accent colour with ^ / v.
   for (int c = 0; c < widgets::kColCount; c++) {
+    if (!shown(c)) continue;
     const bool active = c == _sort;
     char lab[16];
     headerLabel(lab, sizeof(lab), c, active, _desc);

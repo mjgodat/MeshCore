@@ -3,6 +3,25 @@
 // ESP32-2432S028 "Cheap Yellow Display": ST7789 320x240 on VSPI, XPT2046
 // resistive touch on its own HSPI pins, PWM backlight on GPIO21. Pin and panel
 // settings are the ones proven on this board by wichat/lora_term.
+//
+// Visual head (FREENOVE_VISUAL_HEAD with HMI_PROFILE_CYD, env
+// CYD_ESPNOW_Head_companion_usb): the Freenove head's pages
+// (ui-freenove/FreenoveUITask) share the panel with the companion UI, which
+// is the HEAD page. There is no full-screen buffer (no PSRAM): every frame is
+// composed in horizontal bands (StripRenderer, one 320 x kBandRows RGB565
+// buffer in internal RAM) and each band that changed is pushed over SPI.
+//   - Pages: the page task renders and pushes (renderPage()).
+//   - HEAD: the companion UI draws its usual RGB332 sprite (160 x 105
+//     logical, 2x zoom), but its text and its fills / rects are recorded
+//     (CompanionText / CompanionSkin, as on the Freenove): endFrame()
+//     composes the HMI backdrop, the skin's panels / tiles / keys, the
+//     sprite's own pixels (icons, QR), the D-DIN text and the page tab bar
+//     below, band by band, and pushes the bands that changed. The night
+//     palette keeps the plain look (sprite + AA text).
+// PanelOwner says whose frames reach the glass; owner changes, renders and
+// pushes happen under one lock (both run on core 1, the lock also orders
+// LovyanGFX's SPI use). The page task reads the touch controller and relays
+// HEAD-page touches to getTouch(), which the companion UI polls.
 
 #include <helpers/ui/ColorTheme.h>
 #include <helpers/ui/LGFXDisplay.h>
@@ -10,6 +29,20 @@
 
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
+
+#if defined(FREENOVE_VISUAL_HEAD) && FREENOVE_VISUAL_HEAD
+  #define CYD_VISUAL_HEAD 1
+  #include <atomic>
+  #include <freertos/FreeRTOS.h>
+  #include <freertos/semphr.h>
+  #include "CompanionSkin.h"
+  #include "CompanionText.h"
+  #include "FrameBuffer565.h"
+  #include "PageNav.h"
+  #include "StripRenderer.h"
+#else
+  #define CYD_VISUAL_HEAD 0
+#endif
 
 class LGFX_CYD : public lgfx::LGFX_Device {
   lgfx::Panel_ST7789 _panel;
@@ -80,6 +113,19 @@ public:
   }
 };
 
+namespace cyd {
+constexpr int kScreenW = 320;
+constexpr int kScreenH = 240;
+#if CYD_VISUAL_HEAD
+// Rows of the companion UI on the HEAD page; the tab bar is below.
+constexpr int kCompanionH = kScreenH - freenove_ui::kTabBarH;
+// Band height of the strip renderer: 320 x 40 x 2 = 25.6 KB.
+constexpr int kBandRows = 40;
+#else
+constexpr int kCompanionH = kScreenH;
+#endif
+}  // namespace cyd
+
 class CYDDisplay : public LGFXDisplay {
   LGFX_CYD disp;
 
@@ -116,8 +162,9 @@ class CYDDisplay : public LGFXDisplay {
   }
 
 public:
-  CYDDisplay() : LGFXDisplay(320, 240, disp) {}
+  CYDDisplay() : LGFXDisplay(cyd::kScreenW, cyd::kCompanionH, disp) {}
 
+#if !CYD_VISUAL_HEAD
   bool begin() {
     if (!LGFXDisplay::begin()) return false;
     calibrateTouch();
@@ -125,4 +172,110 @@ public:
     disp.fillScreen(mesh::ui::color_theme::background(UIColor::window_bkg));
     return true;
   }
+#else
+  bool begin();
+  // Companion text in D-DIN (CompanionText) and the HMI skin (CompanionSkin).
+  void setTextSize(int sz) override;
+  void setCursor(int x, int y) override;
+  void print(const char* str) override;
+  uint16_t getTextWidth(const char* str) override;
+  void fillRect(int x, int y, int w, int h) override;
+  void setColor(ColorVal c) override;
+  void drawRect(int x, int y, int w, int h) override;
+  int textLineHeight() override { return freenove_ui::CompanionText::lineHeight(_aaSize); }
+  // The band buffer was allocated: the visual head can run.
+  bool hmiReady() const { return _pages != nullptr; }
+  void startFrame(ColorVal bkg = UIColor::window_bkg) override;
+  void endFrame() override;
+  bool getTouch(int* x, int* y) override;
+
+  // The touch controller, read by the page task (screen pixels).
+  class Touch {
+   public:
+    explicit Touch(LGFX_CYD& d) : _d(d) {}
+    bool read(int& x, int& y);
+   private:
+    LGFX_CYD& _d;
+  };
+  Touch& touch() { return _touchReader; }
+
+  // ---- Visual head (FreenoveUITask) ----
+  enum class PanelOwner : uint8_t { Companion, Pages };
+  // Any task. To Pages: the next page frame is pushed whole. To Companion:
+  // the UI loop recomposes the HEAD page on its next touch poll.
+  void setPanelOwner(PanelOwner owner);
+  PanelOwner panelOwner() const { return (PanelOwner)_owner.load(); }
+  // Page task: compose one page frame band by band (draw is called once per
+  // band, FrameBuffer565 in band mode) and push the bands that changed.
+  // False when the pages do not own the panel (nothing drawn).
+  bool renderPage(StripRenderer::DrawFn draw, void* ctx);
+  // Bands pushed by the last renderPage(), and the frame's push time.
+  int lastBandsPushed() const { return _lastPushed; }
+  uint32_t lastPushUs() const { return _lastPushUs; }
+  // While relayed, the page task reads the touch controller and getTouch()
+  // returns what relayTouch() reported (HEAD page). relayActivity(): a
+  // visual page was touched -- the UI loop wakes the screen / restarts the
+  // auto-off timer as for a companion touch.
+  void setTouchRelayed(bool relayed);
+  void relayTouch(bool down, int x, int y);
+  void relayActivity() { _activity.store(true); }
+  // Drawn under the companion area (the tab bar) on every HEAD frame.
+  typedef void (*Overlay)(FrameBuffer565& fb, void* ctx);
+  void setCompanionOverlay(Overlay fn, void* ctx) {
+    _overlayCtx = ctx;
+    _overlay = fn;
+  }
+  // Test console screenshots: the frame as composed (the ST7789 on this
+  // board does not read back), one row at a time (RGB565, native order,
+  // kScreenW px). dumpPage: page task, the current page's frame (draw as
+  // for renderPage); dumpCompanion: UI loop, the HEAD frame. Nothing is
+  // pushed and the band hashes are untouched.
+  typedef void (*RowSink)(int y, const uint16_t* row, void* ctx);
+  bool dumpPage(StripRenderer::DrawFn draw, void* drawCtx, RowSink sink, void* sinkCtx);
+  bool dumpCompanion(RowSink sink, void* sinkCtx);
+  // Test console: labelled colour bars (panel colour order check) until the
+  // next frame of whoever owns the panel.
+  void showColourBars();
+
+private:
+  bool lockPanel();
+  void unlockPanel();
+  void composeCompanion(bool force);
+  void serviceRelay();
+  static void drawHeadBand(FrameBuffer565& fb, int band, void* ctx);
+  static void pushBand(const uint16_t* px, int w, int y0, int rows, void* ctx);
+  static void dumpBand(const uint16_t* px, int w, int y0, int rows, void* ctx);
+  RowSink _dumpSink = nullptr;
+  void* _dumpCtx = nullptr;
+
+  Touch _touchReader{disp};
+  uint16_t* _strip = nullptr;             // kScreenW x kBandRows (internal RAM)
+  StripRenderer* _pages = nullptr;        // band hashes of the page frames
+  StripRenderer* _head = nullptr;         // ...and of the HEAD frames
+  uint16_t _lut565[256];                  // RGB332 sprite -> RGB565
+  SemaphoreHandle_t _panelLock = nullptr; // owner changes, renders, pushes (recursive)
+  std::atomic<uint8_t> _owner{(uint8_t)PanelOwner::Companion};
+  std::atomic<bool> _companionRepaint{false};
+  std::atomic<bool> _activity{false};
+  std::atomic<bool> _relayed{false};
+  portMUX_TYPE _relayMux = portMUX_INITIALIZER_UNLOCKED;
+  freenove_ui::TouchRelay _relay;
+  Overlay _overlay = nullptr;
+  void* _overlayCtx = nullptr;
+  int _lastPushed = 0;
+  uint32_t _lastPushUs = 0;
+  uint32_t _pushUs = 0;                   // accumulates during one render
+  // The frame being drawn (UI loop). Composed right after endFrame(), so
+  // it is also the frame on the glass until the next startFrame().
+  static freenove_ui::CompanionPalette skinPalette();
+  freenove_ui::CompanionText _text;
+  freenove_ui::CompanionSkin _skin;
+  int _aaSize = 1;
+  int _cursorX = 0, _cursorY = 0;
+  ColorVal _semantic = 0;
+  bool _skinOn = false;
+  uint8_t _skinKey = 0;                   // the sprite's background (RGB332 raw)
+  uint32_t _shownHash = 0;                // sprite + text + skin of the frame composed last
+  bool _shownValid = false;
+#endif
 };

@@ -1,5 +1,11 @@
 #include "HomePage.h"
 
+// CYD: these loops run once per band on a 240 MHz ESP32 without PSRAM;
+// the default -Os costs about 2x here.
+#if HMI_CYD
+#pragma GCC optimize("O2")
+#endif
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -123,9 +129,22 @@ uint16_t linkColour(int8_t snr_q4) {
   return theme::kSigPoor;
 }
 
+#if HMI_CYD
+const PanelRect HomePage::kTopoPanel = {4, 34, 190, 132};
+const PanelRect HomePage::kNoisePanel = {198, 34, 118, 64};
+const PanelRect HomePage::kPacketsPanel = {198, 102, 118, 64};
+
+int HomePage::tileId(int i) {
+  static const int kIds[kTilesShown] = {hmi::kTileAdvert, hmi::kTilePreset, hmi::kTileBridge, hmi::kTileAdmin};
+  return i >= 0 && i < kTilesShown ? kIds[i] : -1;
+}
+#else
 const PanelRect HomePage::kTopoPanel = {6, 42, 288, 196};
 const PanelRect HomePage::kNoisePanel = {300, 42, 174, 98};
 const PanelRect HomePage::kPacketsPanel = {300, 144, 174, 94};
+
+int HomePage::tileId(int i) { return i >= 0 && i < kTilesShown ? i : -1; }
+#endif
 
 HomePage::HomePage()
     : _card(nullptr), _pressing(false), _pressX(0), _pressY(0), _mode(kGraph), _drawn(false), _drawnGen(0), _drawnMs(0), _syncGen(0), _syncMs(0), _synced(false),
@@ -188,9 +207,9 @@ int HomePage::contactAt(int x, int y) const {
 int HomePage::tileAt(int x, int y) {
   if (y < kTileY - 2 || y >= kTileY + kTileH + 2 || x < kTileX - 2) return -1;
   const int i = (x - kTileX + 2) / kTilePitch;
-  if (i >= hmi::kTileCount) return -1;
+  if (i >= kTilesShown) return -1;
   const int rx = x - (kTileX + i * kTilePitch);
-  return rx >= -2 && rx < kTileW + 2 ? i : -1;
+  return rx >= -2 && rx < kTileW + 2 ? tileId(i) : -1;
 }
 
 bool HomePage::touch(int x, int y, bool down) {
@@ -267,12 +286,15 @@ void HomePage::requestDone(PageRequest req, bool ok, uint32_t now_ms) {
 // ------------------------------------------------------------ scheduling
 
 bool HomePage::pinging(uint32_t now_ms) const {
+  if (!profile::kAnimations) return false;   // no ping rings
   for (int i = 0; i < kMaxPings; i++)
     if (_pings[i].slot >= 0 && (uint32_t)(now_ms - _pings[i].start) < kPingMs) return true;
   return false;
 }
 
 bool HomePage::animating(uint32_t now_ms) const {
+  // CYD: nothing moves; the route highlight ends with the next once-a-second frame.
+  if (!profile::kAnimations) return false;
   if (_pathAnim && (uint32_t)(now_ms - _pathStart) < kPathAnimMs) return true;
   if (pinging(now_ms)) return true;
   if (_needle.settling() || _odo.rolling(now_ms)) return true;
@@ -298,7 +320,7 @@ bool HomePage::wantsFrame(uint32_t now_ms) {
   if (_ctx != nullptr && _ctx->data_gen != _drawnGen) return true;
   if (animating(now_ms)) return true;
   if (quickSignature(now_ms) != _quickDrawn) return true;
-  if (sweeping()) return (uint32_t)(now_ms - _drawnMs) >= kSweepFrameMs;   // sweep, <= 20 fps
+  if (profile::kAnimations && sweeping()) return (uint32_t)(now_ms - _drawnMs) >= kSweepFrameMs;   // sweep, <= 20 fps
   return (uint32_t)(now_ms - _drawnMs) >= 1000;   // ages, stale vitals
 }
 
@@ -653,14 +675,14 @@ bool HomePage::slotPos(int slot, int& x, int& y) const {
 void HomePage::drawBackground(FrameBuffer565& fb) {
   drawPanel(fb, kTopoPanel, "MESH TOPOLOGY", nullptr);
   // Noise floor: the gauge's track and its quiet / noisy zones.
-  drawPanel(fb, kNoisePanel, "NOISE FLOOR", "dBm");
+  drawPanel(fb, kNoisePanel, "NOISE FLOOR", HMI_CYD ? nullptr : "dBm");
   const float gx = (float)kGaugeX, gy = (float)kGaugeY, gr = (float)kGaugeR, gt = (float)kGaugeThick;
   const float a0 = (float)hmi::kGaugeStartDeg, a1 = a0 + (float)hmi::kGaugeSweepDeg;
   fb.aaArc(gx, gy, gr, gt, a0, a1, theme::kGaugeTrack);
   fb.aaArc(gx, gy, gr, gt, a0, hmi::gaugeAngle((float)hmi::kQuietMaxDbm), theme::kGood);
   fb.aaArc(gx, gy, gr, gt, hmi::gaugeAngle((float)hmi::kNoisyMinDbm), a1, theme::kWarn);
   // Packets: the odometer's windows.
-  drawPanel(fb, kPacketsPanel, "PACKETS", "since boot");
+  drawPanel(fb, kPacketsPanel, "PACKETS", HMI_CYD ? nullptr : "since boot");
   for (int i = 0; i < kOdoDigits; i++) {
     const int bx = kOdoX + i * kOdoPitch;
     fb.fillRoundRect(bx, kOdoY, kOdoW, kOdoH, 3, theme::kOdoFill);
@@ -671,6 +693,8 @@ void HomePage::drawBackground(FrameBuffer565& fb) {
 bool HomePage::sweeping() const { return _mode == kGeo && _geoCentreKnown; }
 
 void HomePage::draw(FrameBuffer565& fb, uint32_t now_ms) {
+  // Strip rendering replays this per band: state advances on band 0 only.
+  const bool first = firstBand();
   _drawn = true;
   _drawnMs = now_ms;
   _drawnGen = _ctx != nullptr ? _ctx->data_gen : 0;
@@ -686,10 +710,11 @@ void HomePage::draw(FrameBuffer565& fb, uint32_t now_ms) {
     _lastDrawAnimated = false;
     return;
   }
-  sync(now_ms);
+  if (first) sync(now_ms);
   // Layout: a few cooling steps per frame (a new node glides in); in GEO
-  // the graph is not visible, so it settles at once.
-  if (_mode == kGraph) {
+  // (and on the CYD, no animations) it settles at once.
+  if (!first) {
+  } else if (_mode == kGraph && profile::kAnimations) {
     for (int i = 0; i < 3 && _graph.hot(); i++) _graph.step();
   } else {
     for (int i = 0; i < 300 && _graph.hot(); i++) _graph.step();
@@ -706,8 +731,8 @@ void HomePage::draw(FrameBuffer565& fb, uint32_t now_ms) {
 // The panel's header note names the view and toggles it.
 void HomePage::drawToggle(FrameBuffer565& fb) const {
   const char* note = _mode == kGraph ? "GRAPH" : "GEO";
-  fb.text(kTopoPanel.x + kTopoPanel.w - 8, kTopoPanel.y + 6, note, theme::kAccent, kFontSmall,
-          FrameBuffer565::kRightTop);
+  fb.text(kTopoPanel.x + kTopoPanel.w - (HMI_CYD ? 7 : 8), kTopoPanel.y + (HMI_CYD ? 4 : 6), note, theme::kAccent,
+          kFontSmall, FrameBuffer565::kRightTop);
 }
 
 // Range rings are drawn by drawTopology (their labels need the collision
@@ -724,6 +749,7 @@ void HomePage::drawGeoOverlay(FrameBuffer565& fb, int cx, int cy, uint32_t now_m
             FrameBuffer565::kCentreMiddle);
   }
   // Sweep: the beam and two fading trail lines, clockwise from north.
+  if (!profile::kAnimations) return;
   const float turn = (float)(now_ms % kSweepTurnMs) / (float)kSweepTurnMs;
   static const unsigned kAlpha[3] = {255, 110, 45};
   for (int k = 2; k >= 0; k--) {
@@ -881,7 +907,7 @@ void HomePage::drawTopology(FrameBuffer565& fb, uint32_t now_ms) {
   }
   drawPath(fb, now_ms, false);
   // Pings: an expanding ring that fades (clipped to the area).
-  for (int i = 0; i < kMaxPings; i++) {
+  for (int i = 0; profile::kAnimations && i < kMaxPings; i++) {
     const Ping& p = _pings[i];
     const uint32_t t = now_ms - p.start;
     int x, y;
@@ -935,7 +961,7 @@ void HomePage::drawPath(FrameBuffer565& fb, uint32_t now_ms, bool blip) const {
                 flying ? theme::kRoute : theme::kRouteRest);
     return;
   }
-  if (!flying) return;
+  if (!flying || !profile::kAnimations) return;
   // The blip travels from the sender to the repeater.
   float len[kMaxPath];
   float total = 0;
@@ -975,8 +1001,26 @@ void HomePage::drawNoise(FrameBuffer565& fb, uint32_t now_ms) {
   const mesh::observer::Vitals* v = m->vitals();
   const bool live = v != nullptr && (uint32_t)(now_ms - m->vitalsMs()) < kRadioStaleMs;
   const int x = kNoisePanel.x + 10;
-  if (v != nullptr) _needle.setTarget((float)v->noise_floor, now_ms);   // only vitals move it
-  const float pos = _needle.update(now_ms);
+  if (firstBand()) {
+    if (v != nullptr) _needle.setTarget((float)v->noise_floor, now_ms);   // only vitals move it
+    // CYD: no easing, the needle shows the value.
+    if (profile::kAnimations) _needle.update(now_ms);
+  }
+  const float pos = profile::kAnimations ? _needle.position() : _needle.target();
+#if HMI_CYD
+  if (v != nullptr) {
+    char num[12];
+    snprintf(num, sizeof(num), "%d", (int)v->noise_floor);
+    fb.text(kNoisePanel.x + 8, kNoisePanel.y + 24, num, live ? theme::kText : kDimText, kFontDigits);
+    const hmi::NoiseRating r = hmi::noiseRating(v->noise_floor);
+    const uint16_t rc = !live ? kDimText : (r == hmi::kNoiseQuiet ? theme::kGood : (r == hmi::kNoiseModerate ? theme::kWarn : theme::kBad));
+    fb.text(kNoisePanel.x + 8, kNoisePanel.y + 47, live ? hmi::noiseRatingName(r) : "stale", rc, kFontBody);
+  } else {
+    fb.text(kNoisePanel.x + 8, kNoisePanel.y + 24, "---", kDimText, kFontDigits);
+    fb.text(kNoisePanel.x + 8, kNoisePanel.y + 47, "no data", kDimText, kFontBody);
+  }
+  (void)x;
+#else
   if (v != nullptr) {
     char num[12];
     snprintf(num, sizeof(num), "%d", (int)v->noise_floor);
@@ -988,6 +1032,7 @@ void HomePage::drawNoise(FrameBuffer565& fb, uint32_t now_ms) {
     fb.text(x, 72, "---", kDimText, kFontBig);
     fb.text(x, 112, "no data", kDimText, kFontBody);
   }
+#endif
   const float a = (_needle.has() ? hmi::gaugeAngle(pos) : (float)hmi::kGaugeStartDeg) * 3.14159265f / 180.0f;
   const float r = (float)(kGaugeR - 6);
   const uint16_t nc = live ? theme::kNeedle : kDimText;
@@ -997,8 +1042,14 @@ void HomePage::drawNoise(FrameBuffer565& fb, uint32_t now_ms) {
 
 void HomePage::drawPackets(FrameBuffer565& fb, uint32_t now_ms) {
   const MeshModel* m = _ctx->model;
-  _odo.set(m->feedSeq(), now_ms);
-  const double shown = _odo.shown(now_ms);
+  if (firstBand()) _odo.set(m->feedSeq(), now_ms);
+  // CYD: no rolling digits, the count itself.
+  const double shown = profile::kAnimations ? _odo.shown(now_ms) : (double)(m->feedSeq() % 1000000u);
+#if HMI_CYD
+  const AAFont& digitFont = kFontTitle;
+#else
+  const AAFont& digitFont = kFontDigits;
+#endif
   for (int i = 0; i < kOdoDigits; i++) {
     const int bx = kOdoX + i * kOdoPitch;
     int d = 0;
@@ -1008,8 +1059,8 @@ void HomePage::drawPackets(FrameBuffer565& fb, uint32_t now_ms) {
     const int cx = bx + kOdoW / 2, cy = kOdoY + kOdoH / 2;
     const int off = (int)lroundf(roll * (float)kOdoH);
     char a[2] = {(char)('0' + d), 0}, b[2] = {(char)('0' + (d + 1) % 10), 0};
-    fb.text(cx, cy - off, a, theme::kText, kFontDigits, FrameBuffer565::kCentreMiddle);
-    if (off > 0) fb.text(cx, cy - off + kOdoH, b, theme::kText, kFontDigits, FrameBuffer565::kCentreMiddle);
+    fb.text(cx, cy - off, a, theme::kText, digitFont, FrameBuffer565::kCentreMiddle);
+    if (off > 0) fb.text(cx, cy - off + kOdoH, b, theme::kText, digitFont, FrameBuffer565::kCentreMiddle);
     fb.resetClip();
   }
   // Rate (the repeater's RX/min, or the head's observed count when the
@@ -1020,9 +1071,17 @@ void HomePage::drawPackets(FrameBuffer565& fb, uint32_t now_ms) {
   char rate[12];
   if (rx.known) snprintf(rate, sizeof(rate), "%u", rx.rx);
   else snprintf(rate, sizeof(rate), "--");
+#if HMI_CYD
+  const int x = kPacketsPanel.x + 8, rateY = kPacketsPanel.y + 48;
+  const int end = fb.text(x, rateY, rate, live ? theme::kAccent : kDimText, kFontSmall);
+  fb.text(end + 3, rateY, rx.from_head ? "/m head" : "/min", theme::kTextDim, kFontBody);
+  const int trendY = rateY;
+#else
   const int x = kPacketsPanel.x + 10;
   const int end = fb.text(x, 207, rate, live ? theme::kAccent : kDimText, kFontDigits);
   fb.text(end + 4, 212, rx.from_head ? "/min head" : "/min", theme::kTextDim, kFontBody);
+  const int trendY = 212;
+#endif
   uint16_t rates[60];
   m->ratesPerMinute(rates);
   int pct = 0;
@@ -1032,7 +1091,7 @@ void HomePage::drawPackets(FrameBuffer565& fb, uint32_t now_ms) {
     if (pct > 0) { snprintf(trend, sizeof(trend), "^ %d%%", pct); tc = theme::kGood; }
     else if (pct < 0) { snprintf(trend, sizeof(trend), "v %d%%", -pct); tc = theme::kWarn; }
     else snprintf(trend, sizeof(trend), "= 0%%");
-    fb.text(kPacketsPanel.x + kPacketsPanel.w - 8, 212, trend, tc, kFontBody, FrameBuffer565::kRightTop);
+    fb.text(kPacketsPanel.x + kPacketsPanel.w - 8, trendY, trend, tc, kFontBody, FrameBuffer565::kRightTop);
   }
 }
 
@@ -1059,8 +1118,9 @@ void HomePage::drawQuick(FrameBuffer565& fb, uint32_t now_ms) const {
   const MeshModel* m = _ctx->model;
   const mesh::observer::Vitals* v = m->vitals();
   const int room = kTileW - 6;
-  for (int i = 0; i < hmi::kTileCount; i++) {
-    const int x = kTileX + i * kTilePitch;
+  for (int pos = 0; pos < kTilesShown; pos++) {
+    const int i = tileId(pos);
+    const int x = kTileX + pos * kTilePitch;
     const char* title = kTitles[i];
     char sub[24];
     uint16_t c = theme::kAccent;
@@ -1118,8 +1178,13 @@ void HomePage::drawQuick(FrameBuffer565& fb, uint32_t now_ms) const {
     }
     fb.fillRoundRect(x, kTileY, kTileW, kTileH, 4, on ? theme::kTileOnFill : theme::kTileOffFill);
     fb.strokeRoundRect(x, kTileY, kTileW, kTileH, 4, edge);
+#if HMI_CYD
+    fb.text(x + kTileW / 2, kTileY + 11, title, titleColour, kFontTile, FrameBuffer565::kCentreMiddle);
+    fb.text(x + kTileW / 2, kTileY + 27, sub, c, kFontSmall, FrameBuffer565::kCentreMiddle);
+#else
     fb.text(x + kTileW / 2, kTileY + 14, title, titleColour, kFontTile, FrameBuffer565::kCentreMiddle);
     fb.text(x + kTileW / 2, kTileY + 33, sub, c, kFontSmall, FrameBuffer565::kCentreMiddle);
+#endif
   }
 }
 

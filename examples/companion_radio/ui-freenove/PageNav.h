@@ -26,11 +26,14 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "HmiProfile.h"
+
 namespace freenove_ui {
 
-// Height of the tab bar at the bottom of the 480x320 screen; the HEAD page's
-// companion UI gets the rows above it.
-static const int kTabBarH = 24;
+// Height of the tab bar at the bottom of the screen (24 on the 480x320
+// Freenove, 30 on the 320x240 CYD); the HEAD page's companion UI gets the
+// rows above it.
+static const int kTabBarH = profile::kTabBarH;
 
 struct NavConfig {
   int width, height;
@@ -43,10 +46,17 @@ struct NavConfig {
 
 inline NavConfig defaultNavConfig() {
   NavConfig c;
-  c.width = 480; c.height = 320;
+  c.width = profile::kScreenW; c.height = profile::kScreenH;
+#if HMI_CYD
+  // Resistive touch jitters more; the screen is narrower.
+  c.slopPx = 14;
+  c.swipeMinPx = 48;
+  c.flickMinPx = 24;
+#else
   c.slopPx = 12;
   c.swipeMinPx = 60;
   c.flickMinPx = 24;
+#endif
   c.flickMinPxPerS = 400;
   c.barH = kTabBarH;
   return c;

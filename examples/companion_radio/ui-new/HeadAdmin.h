@@ -224,7 +224,13 @@ class HeadAdminScreen : public UIScreen {
   static constexpr int kKeyH = 22;
   static constexpr int kMaxPick = MAX_CONTACTS < 255 ? MAX_CONTACTS : 255;  // the whole table
   static constexpr size_t kPasswordMax = 15;  // the terminal's limit
-  static constexpr int kSettingRows = 7;
+  // Rows of the settings list and the repeater picker (plus a button row).
+  // The CYD visual head's HEAD page (105 logical rows) shows 5, so each row
+  // stays a finger-sized 28 px.
+#ifndef UI_HEAD_LIST_ROWS
+#define UI_HEAD_LIST_ROWS 7
+#endif
+  static constexpr int kSettingRows = UI_HEAD_LIST_ROWS;
   static constexpr int kConsoleCols = 3;
   static constexpr int kConsoleRows = 3;
   static constexpr int kPresetSlots = 5;
@@ -614,11 +620,14 @@ class HeadAdminScreen : public UIScreen {
     _keyboard.drawText(d, top + 12);
     d.setColor(UIColor::secondary_txt);
     d.drawRect(0, top + 10, d.width(), kTextH - 2);
-    _keyboard.draw(d, top + 10 + kTextH - 2, kKeyH - 1, _mode == Mode::Password ? "Login" : "OK");
+    const int kb_top = top + 10 + kTextH - 2;
+    _keyboard.draw(d, kb_top, TouchKeyboard::keyHeight(kb_top, d.height(), kKeyH - 1),
+                   _mode == Mode::Password ? "Login" : "OK");
   }
 
   bool touchEntry(int x, int y, int width) {
-    switch (_keyboard.touch(x, y, width, kHeaderH + 10 + kTextH - 2, kKeyH - 1)) {
+    (void)width;
+    switch (_keyboard.touch(x, y)) {   // the keys as last drawn
       case TouchKeyboard::Result::Changed: return true;
       case TouchKeyboard::Result::Cancel:
         if (_mode == Mode::Password) _presets_after_login = false;

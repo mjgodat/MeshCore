@@ -21,6 +21,7 @@
 
 #include <stdint.h>
 
+#include "HmiProfile.h"
 #include "HomePage.h"
 #include "MapPage.h"
 #include "NodeCard.h"
@@ -32,11 +33,21 @@
 
 namespace freenove_ui {
 
-static const int kHeaderH = 40;
+static const int kHeaderH = profile::kHeaderH;
 // Panel header row (title, note, divider on its last row).
-static const int kPanelHeaderH = 26;
+static const int kPanelHeaderH = profile::kPanelHeaderH;
+// A panel's header note: right edge inset and top offset from the panel.
+static const int kNoteInset = HMI_CYD ? 7 : 8;
+static const int kNoteDy = HMI_CYD ? 4 : 6;
+// Centre of the content area (messages such as MODEL UNAVAILABLE).
+static const int kMidX = profile::kScreenW / 2;
+static const int kMidY = HMI_CYD ? 110 : 150;
 // Widest repeater name in the header (cut with '~' beyond).
+#if HMI_CYD
+static const int kHeaderNameMaxPx = 210;
+#else
 static const int kHeaderNameMaxPx = 200;
+#endif
 
 // Tab label of page i ("HOME", "TELEMETRY", ...); "" out of range.
 const char* tabLabel(int i);
@@ -57,6 +68,13 @@ void drawPageChrome(FrameBuffer565& fb, Page& page, int index, int count);
 void drawTabBar(FrameBuffer565& fb, int index, int count);
 // The header (dynamic: drawn every frame by the framework).
 void drawHeader(FrameBuffer565& fb, const PageContext& ctx, uint32_t now_ms);
+// A whole frame without a cached background layer, in the order the
+// layered Freenove path composes it: backdrop (CYD: the gradient without
+// glow), the page's static layer, the tab bar, the page's dynamic layer,
+// the header. The CYD's strip renderer replays it once per band (fb in band
+// mode, ctx.band = the band's index); hosts use it as the full-frame
+// reference.
+void drawFrame(FrameBuffer565& fb, Page& page, const PageContext& ctx, int index, int count, uint32_t now_ms);
 // "M5 // CAPTCALLAHAN-BASE" (upper case) in the font it fits max_px with
 // (18 px, else 16 px); else the name alone, else its leading whole words.
 const AAFont& headerName(char* out, size_t cap, const char* repeaterName, int max_px);

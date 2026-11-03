@@ -1,5 +1,11 @@
 #include "NodeCard.h"
 
+// CYD: these loops run once per band on a 240 MHz ESP32 without PSRAM;
+// the default -Os costs about 2x here.
+#if HMI_CYD
+#pragma GCC optimize("O2")
+#endif
+
 #include <stdio.h>
 #include <string.h>
 
@@ -16,13 +22,35 @@ using mesh::head::MeshModel;
 using mesh::head::NodeInfo;
 using mesh::head::PathHash;
 
-const PanelRect NodeCard::kRect = {6, kHeaderH + 2, 468, 250};
-
 namespace {
 
-const int kColL = 16, kColR = 252, kSplitX = 240;
-const int kLineH = 18;
-const int kTextW = 218;   // a column's text width
+// Where everything sits (screen px).
+struct CardLayout {
+  int colL, colR, splitX;          // left / right column x, divider x
+  int lineH, textW, colRW;         // path line height, path text width, right column text width
+  int infoY, infoW, dividerY, dividerH;
+  int sigY, boxX, boxY, boxW, boxH, viaDx, snrLineY;
+  int pathY, pathLineY, pathMaxY;
+  int posY, posL1Y, posL2Y;
+  int pktY, pktRowY, pktTypeDx, pktHopsDx, pktRight;
+  bool shortNotes;                 // "2 hops" instead of "GRP: this packet 2 hops"
+};
+#if HMI_CYD
+const CardLayout L = {10, 164, 158, 15, 142, 146, 58, 300, 76, 128,
+                      76, 36, 94, 116, 28, 48, 126,
+                      146, 162, 192,
+                      76, 92, 108,
+                      126, 142, 26, 58, 310, true};
+#else
+const CardLayout L = {16, 252, 240, 18, 218, 0, 71, 0, 94, 190,
+                      94, 48, 116, 184, 56, 66, 180,
+                      204, 222, 258,
+                      94, 112, 130,
+                      156, 174, 40, 92, 462, false};
+#endif
+const int kColL = L.colL, kColR = L.colR, kSplitX = L.splitX;
+const int kLineH = L.lineH;
+const int kTextW = L.textW;   // a column's text width
 
 void hashHex(char* out, size_t cap, const PathHash& h) {
   if (cap == 0) return;
@@ -95,6 +123,12 @@ const NodeInfo* findNode(const MeshModel& m, const uint8_t key[4]) {
   return nullptr;
 }
 
+#if HMI_CYD
+const PanelRect NodeCard::kRect = {4, kHeaderH + 2, 312, 174};
+#else
+const PanelRect NodeCard::kRect = {6, kHeaderH + 2, 468, 250};
+#endif
+
 NodeCard::NodeCard()
     : _ctx(nullptr), _open(false), _drawn(false), _drawnMs(0), _drawnGen(0), _pressClose(false) {
   memset(_key, 0, sizeof(_key));
@@ -147,8 +181,8 @@ void NodeCard::draw(FrameBuffer565& fb, uint32_t now_ms) {
   fb.text(kCloseX + kCloseW / 2, kCloseY + kCloseH / 2, "CLOSE  X", theme::kAccent, kFontSmall,
           FrameBuffer565::kCentreMiddle);
   if (n == nullptr) {
-    fb.text(kRect.x + kRect.w / 2, 150, "This node is no longer in the head's table", theme::kTextDim, kFontSmall,
-            FrameBuffer565::kCentreTop);
+    fb.text(kRect.x + kRect.w / 2, kMidY, HMI_CYD ? "No longer in the head's table" : "This node is no longer in the head's table",
+            theme::kTextDim, kFontSmall, FrameBuffer565::kCentreTop);
     return;
   }
   // Who: type, key, last heard, hops, packets.
@@ -157,8 +191,14 @@ void NodeCard::draw(FrameBuffer565& fb, uint32_t now_ms) {
   snprintf(info, sizeof(info), "%s \xB7 %02X%02X%02X%02X \xB7 heard %s ago \xB7 advert %u hop%s \xB7 %lu packet%s",
            widgets::typeLong(n->type), n->pub_prefix[0], n->pub_prefix[1], n->pub_prefix[2], n->pub_prefix[3], age,
            (unsigned)n->hops, n->hops == 1 ? "" : "s", (unsigned long)n->packets, n->packets == 1 ? "" : "s");
-  fb.text(kColL, 71, info, theme::kTextDim, kFontSmall);
-  fb.vline(kSplitX, 94, 190, theme::kDivider);
+  if (L.infoW > 0) {
+    char fitted[96];
+    widgets::fitText(fitted, sizeof(fitted), info, kFontSmall, L.infoW);
+    fb.text(kColL, L.infoY, fitted, theme::kTextDim, kFontSmall);
+  } else {
+    fb.text(kColL, L.infoY, info, theme::kTextDim, kFontSmall);
+  }
+  fb.vline(kSplitX, L.dividerY, L.dividerH, theme::kDivider);
   drawSignal(fb, *n);
   drawPath(fb, *n);
   drawPosition(fb, *n);
@@ -166,14 +206,14 @@ void NodeCard::draw(FrameBuffer565& fb, uint32_t now_ms) {
 }
 
 void NodeCard::drawSignal(FrameBuffer565& fb, const NodeInfo& n) const {
-  widgets::sectionLabel(fb, kColL, 94, "SIGNAL");
+  widgets::sectionLabel(fb, kColL, L.sigY, "SIGNAL");
   // snr_hist is newest first: oldest left on the chart.
   int16_t v[32];
   const int count = (int)(sizeof(n.snr_hist) / sizeof(n.snr_hist[0]));
   for (int i = 0; i < count; i++) v[i] = n.snr_hist[count - 1 - i];
   int lo = 0, hi = 0;
   const int have = widgets::sparkRange(v, count, mesh::head::SNR_NONE, 5 * 4, lo, hi);
-  const int bx = 48, by = 116, bw = 184, bh = 56;
+  const int bx = L.boxX, by = L.boxY, bw = L.boxW, bh = L.boxH;
   fb.fillRect(bx, by, bw, bh, theme::kOdoFill);
   fb.hline(bx, by + bh, bw, theme::kDivider);
   const widgets::SnrCell cell = widgets::snrCell(*_ctx->model, n);
@@ -183,22 +223,23 @@ void NodeCard::drawSignal(FrameBuffer565& fb, const NodeInfo& n) const {
     char via[48], fitted[48];
     if (cell.relayed && cell.via[0]) snprintf(via, sizeof(via), "heard via %s", cell.via);
     else snprintf(via, sizeof(via), "heard only via relays");
-    widgets::fitText(fitted, sizeof(fitted), via, kFontSmall, kSplitX - 8 - (kColL + 66));
-    fb.text(kColL + 66, 94, fitted, theme::kTextDim, kFontSmall);
+    widgets::fitText(fitted, sizeof(fitted), via, kFontSmall, kSplitX - 8 - (kColL + L.viaDx));
+    fb.text(kColL + L.viaDx, L.sigY, fitted, theme::kTextDim, kFontSmall);
     fb.text(bx + bw / 2, by + bh / 2, "no SNR samples", kDimText, kFontSmall, FrameBuffer565::kCentreMiddle);
     if (cell.relayed && cell.has_snr) {
       char snr[12], line[48];
       widgets::formatSnr(snr, sizeof(snr), cell.snr_q4);
-      snprintf(line, sizeof(line), "Advert at %s dB from the relay", snr);
-      fb.text(kColL, 180, line, theme::kText, kFontSmall);
+      snprintf(line, sizeof(line), L.shortNotes ? "Advert at %s dB" : "Advert at %s dB from the relay", snr);
+      fb.text(kColL, L.snrLineY, line, theme::kText, kFontSmall);
     } else {
-      fb.text(kColL, 180, "Signal is measured on the last hop only", theme::kTextDim, kFontSmall);
+      fb.text(kColL, L.snrLineY, L.shortNotes ? "Last hop only" : "Signal is measured on the last hop only",
+              theme::kTextDim, kFontSmall);
     }
     return;
   }
   char note[24];
   snprintf(note, sizeof(note), "%d sample%s", have, have == 1 ? "" : "s");
-  fb.text(kSplitX - 8, 94, note, theme::kTextDim, kFontSmall, FrameBuffer565::kRightTop);
+  fb.text(kSplitX - 8, L.sigY, note, theme::kTextDim, kFontSmall, FrameBuffer565::kRightTop);
   // Range labels (whole dB).
   char a[16], b[16];
   snprintf(a, sizeof(a), "%+d", (hi >= 0 ? hi + 2 : hi - 2) / 4);
@@ -214,13 +255,13 @@ void NodeCard::drawSignal(FrameBuffer565& fb, const NodeInfo& n) const {
                      linkColour(n.last_snr_q4));
   char snr[12], line[48];
   widgets::formatSnr(snr, sizeof(snr), n.last_snr_q4);
-  snprintf(line, sizeof(line), "SNR %s dB   RSSI %d dBm", snr, (int)n.last_rssi);
-  fb.text(kColL, 180, line, theme::kText, kFontSmall);
+  snprintf(line, sizeof(line), L.shortNotes ? "SNR %s  RSSI %d" : "SNR %s dB   RSSI %d dBm", snr, (int)n.last_rssi);
+  fb.text(kColL, L.snrLineY, line, theme::kText, kFontSmall);
 }
 
 void NodeCard::drawPath(FrameBuffer565& fb, const NodeInfo& n) const {
   const MeshModel& m = *_ctx->model;
-  widgets::sectionLabel(fb, kColL, 204, "LAST PATH");
+  widgets::sectionLabel(fb, kColL, L.pathY, "LAST PATH");
   const FeedItem* item = nullptr;
   for (size_t i = 0; i < m.feedCount() && item == nullptr; i++) {
     const FeedItem* f = m.feed(i);
@@ -228,7 +269,7 @@ void NodeCard::drawPath(FrameBuffer565& fb, const NodeInfo& n) const {
     if (routeThroughNode(m, *f, n)) item = f;
   }
   if (item == nullptr) {
-    fb.text(kColL, 222, "No route through it heard yet", kDimText, kFontSmall);
+    fb.text(kColL, L.pathLineY, L.shortNotes ? "No route heard yet" : "No route through it heard yet", kDimText, kFontSmall);
     return;
   }
   // Hops in travel order, then the M5; wrapped at " > " into three lines.
@@ -245,13 +286,17 @@ void NodeCard::drawPath(FrameBuffer565& fb, const NodeInfo& n) const {
     snprintf(hops[count++], sizeof(hops[0]), "M5");
   // Hops of this packet (the header's are the node's own advert).
   char note[40];
-  snprintf(note, sizeof(note), "%s: this packet %u hop%s", payloadTypeName(item->payload_type),
-           (unsigned)item->hops, item->hops == 1 ? "" : "s");
-  fb.text(kSplitX - 8, 204, note, theme::kTextDim, kFontSmall, FrameBuffer565::kRightTop);
+  if (L.shortNotes)
+    snprintf(note, sizeof(note), "%s %u hop%s", payloadTypeName(item->payload_type), (unsigned)item->hops,
+             item->hops == 1 ? "" : "s");
+  else
+    snprintf(note, sizeof(note), "%s: this packet %u hop%s", payloadTypeName(item->payload_type),
+             (unsigned)item->hops, item->hops == 1 ? "" : "s");
+  fb.text(kSplitX - 8, L.pathY, note, theme::kTextDim, kFontSmall, FrameBuffer565::kRightTop);
   char line[128];
   line[0] = 0;
-  int y = 222;
-  for (int i = 0; i < count && y <= 258; i++) {
+  int y = L.pathLineY;
+  for (int i = 0; i < count && y <= L.pathMaxY; i++) {
     char next[128];
     next[0] = 0;
     append(next, sizeof(next), line);
@@ -268,44 +313,52 @@ void NodeCard::drawPath(FrameBuffer565& fb, const NodeInfo& n) const {
       append(line, sizeof(line), next);
     }
   }
-  if (line[0] && y <= 258) fb.text(kColL, y, line, theme::kText, kFontSmall);
+  if (line[0] && y <= L.pathMaxY) fb.text(kColL, y, line, theme::kText, kFontSmall);
 }
 
 void NodeCard::drawPosition(FrameBuffer565& fb, const NodeInfo& n) const {
-  widgets::sectionLabel(fb, kColR, 94, "POSITION");
+  widgets::sectionLabel(fb, kColR, L.posY, "POSITION");
   int32_t lat = 0, lon = 0;
   const bool fix = _ctx->model->repeaterPosition(lat, lon);
   char l1[48], l2[48];
   widgets::positionLines(l1, sizeof(l1), l2, sizeof(l2), n, fix, lat, lon);
   const bool has = n.has_pos;
-  fb.text(kColR, 112, l1, has ? theme::kText : kDimText, kFontSmall);
-  fb.text(kColR, 130, l2, has && fix ? theme::kAccent : kDimText, kFontSmall);
+  if (L.colRW > 0) {
+    char f1[48], f2[48];
+    widgets::fitText(f1, sizeof(f1), l1, kFontSmall, L.colRW);
+    widgets::fitText(f2, sizeof(f2), l2, kFontSmall, L.colRW);
+    fb.text(kColR, L.posL1Y, f1, has ? theme::kText : kDimText, kFontSmall);
+    fb.text(kColR, L.posL2Y, f2, has && fix ? theme::kAccent : kDimText, kFontSmall);
+    return;
+  }
+  fb.text(kColR, L.posL1Y, l1, has ? theme::kText : kDimText, kFontSmall);
+  fb.text(kColR, L.posL2Y, l2, has && fix ? theme::kAccent : kDimText, kFontSmall);
 }
 
 void NodeCard::drawPackets(FrameBuffer565& fb, const NodeInfo& n, uint32_t now_ms) const {
   const MeshModel& m = *_ctx->model;
-  widgets::sectionLabel(fb, kColR, 156, "LAST PACKETS");
+  widgets::sectionLabel(fb, kColR, L.pktY, "LAST PACKETS");
   int shown = 0;
   for (size_t i = 0; i < m.feedCount() && shown < kLastPackets; i++) {
     const FeedItem* f = m.feed(i);
     if (f == nullptr) break;
     if (!feedFromNode(m, *f, n)) continue;
-    const int y = 174 + shown * kLineH;
+    const int y = L.pktRowY + shown * kLineH;
     char age[12], hops[12], sig[16];
     widgets::formatAge(age, sizeof(age), now_ms - f->ms);
     snprintf(hops, sizeof(hops), "%u hop%s", (unsigned)f->hops, f->hops == 1 ? "" : "s");
     fb.text(kColR, y, age, theme::kTextDim, kFontSmall);
-    fb.text(kColR + 40, y, payloadTypeName(f->payload_type), feedTypeColour(f->payload_type), kFontSmall);
-    fb.text(kColR + 92, y, hops, theme::kText, kFontSmall);
+    fb.text(kColR + L.pktTypeDx, y, payloadTypeName(f->payload_type), feedTypeColour(f->payload_type), kFontSmall);
+    fb.text(kColR + L.pktHopsDx, y, hops, theme::kText, kFontSmall);
     if (f->observed) {
       widgets::formatSnr(sig, sizeof(sig), f->snr_q4);
-      fb.text(kRect.x + kRect.w - 12, y, sig, linkColour(f->snr_q4), kFontSmall, FrameBuffer565::kRightTop);
+      fb.text(L.pktRight, y, sig, linkColour(f->snr_q4), kFontSmall, FrameBuffer565::kRightTop);
     } else {
-      fb.text(kRect.x + kRect.w - 12, y, "ESP-NOW", theme::kEsp, kFontSmall, FrameBuffer565::kRightTop);
+      fb.text(L.pktRight, y, HMI_CYD ? "ESP" : "ESP-NOW", theme::kEsp, kFontSmall, FrameBuffer565::kRightTop);
     }
     shown++;
   }
-  if (shown == 0) fb.text(kColR, 174, "None traced to it in the feed", kDimText, kFontSmall);
+  if (shown == 0) fb.text(kColR, L.pktRowY, L.shortNotes ? "None in the feed" : "None traced to it in the feed", kDimText, kFontSmall);
 }
 
 }  // namespace freenove_ui

@@ -1,10 +1,21 @@
 #pragma once
 
 // On-screen QWERTY keyboard for touch heads (UI_REPEATER_HEAD). Four rows in
-// logical display coordinates: letters, shift, delete, a symbols toggle, space,
-// cancel and an action key ("Send", "OK"). The "123" page follows a PC
-// keyboard: digits, then their shifted symbols !@#$%^&*(), then common
-// punctuation; "#+=" holds the remaining ASCII symbols.
+// logical display coordinates: two character rows; the mode key, a third
+// character row and delete; space, cancel (X) and the action key ("Send",
+// "OK", "Login").
+//
+// One mode key (left of the third row, labelled with the current mode, lit
+// when not lower case) cycles abc -> ABC -> 123 -> abc. ABC types capitals
+// until cycled on (no one-shot shift). The "123" page is the phone layout
+// in the 26 letter slots: 1234567890 / -/:;()$&@ / .,?!'"#. Not typeable
+// on screen: % ^ * + = _ ~ { } [ ] < > \ | and the backtick.
+//
+// Every key that can be touched is drawn: draw() records the geometry it
+// drew with (only rows that fit on the screen are drawn) and touch(x, y)
+// hit-tests against exactly that. keyHeight() sizes the rows so all four
+// fit below `top` (the 2.8" CYD's HEAD page has 105 logical rows; larger
+// screens keep the hosts' usual key height).
 
 #include <helpers/ui/DisplayDriver.h>
 #include <string.h>
@@ -16,6 +27,13 @@ class TouchKeyboard {
   static constexpr int kRows = 4;
   static constexpr size_t kCapacity = 168;
 
+  // Row height for a keyboard whose first row starts at `top` on a screen
+  // `height` rows tall: max_h, or less so that all kRows rows fit.
+  static int keyHeight(int top, int height, int max_h) {
+    const int fit = (height - top) / kRows;
+    return fit < max_h ? fit : max_h;
+  }
+
   void reset(const char* initial = "", size_t max_len = kCapacity - 1, bool masked = false) {
     _max_len = max_len < kCapacity - 1 ? max_len : kCapacity - 1;
     if (initial == nullptr) initial = "";
@@ -23,8 +41,7 @@ class TouchKeyboard {
     if (_len > _max_len) _len = _max_len;
     memcpy(_text, initial, _len);
     _text[_len] = 0;
-    _shift = false;
-    _page = LETTERS;
+    _mode = LOWER;
     _masked = masked;
   }
 
@@ -49,12 +66,41 @@ class TouchKeyboard {
     d.print("_");
   }
 
-  void draw(DisplayDriver& d, int top, int key_h, const char* action_label) const {
+  void draw(DisplayDriver& d, int top, int key_h, const char* action_label) {
+    _drawnTop = top;
+    _drawnKeyH = key_h;
+    _drawnWidth = d.width();
+    _drawnRows = 0;
     for (int r = 0; r < kRows; r++) {
+      if (key_h <= 0 || top + (r + 1) * key_h > d.height()) break;   // never a key off the screen
       Key keys[kMaxKeysPerRow];
       const int count = rowKeys(r, d.width(), action_label, keys);
       for (int k = 0; k < count; k++) drawKey(d, keys[k], top + r * key_h, key_h);
+      _drawnRows = r + 1;
     }
+  }
+
+  // The mode key's label: "abc", "ABC", "123" or "#+=".
+  const char* modeLabel() const {
+    static const char* const kLabels[3] = {"abc", "ABC", "123"};
+    return kLabels[_mode];
+  }
+
+  // Rows the last draw() put on the screen (kRows when they all fit).
+  int drawnRows() const { return _drawnRows; }
+
+  // Hit test against what the last draw() drew: rows that were not drawn
+  // (or nothing drawn yet) are not touchable.
+  Result touch(int x, int y) {
+    if (_drawnRows <= 0 || y < _drawnTop || _drawnKeyH <= 0) return Result::None;
+    const int r = (y - _drawnTop) / _drawnKeyH;
+    if (r < 0 || r >= _drawnRows) return Result::None;
+    Key keys[kMaxKeysPerRow];
+    const int count = rowKeys(r, _drawnWidth, "", keys);
+    for (int k = 0; k < count; k++) {
+      if (x >= keys[k].x && x < keys[k].x + keys[k].w) return press(keys[k]);
+    }
+    return Result::None;
   }
 
   Result touch(int x, int y, int width, int top, int key_h) {
@@ -71,15 +117,14 @@ class TouchKeyboard {
 
  private:
   static constexpr int kMaxKeysPerRow = 11;
-  enum KeyKind : uint8_t { CHAR, SHIFT, DEL, SYMBOLS, LETTERS_KEY, SPACE, ACTION, CANCEL };
-  enum Page : uint8_t { LETTERS, SYM1, SYM2 };
+  enum KeyKind : uint8_t { CHAR, MODE, DEL, SPACE, ACTION, CANCEL };
+  enum Mode : uint8_t { LOWER, UPPER, SYMBOLS, kModes };
   struct Key { int x, w; KeyKind kind; char ch; const char* label; };
 
   int rowKeys(int r, int width, const char* action_label, Key* out) const {
     static const char* letters[3] = {"qwertyuiop", "asdfghjkl", "zxcvbnm"};
-    static const char* sym1[3] = {"1234567890", "!@#$%^&*()", "-_=+.,?"};
-    static const char* sym2[3] = {"~`{}[]<>\\|",";:'\"/", "-_=+.,?"};
-    const char* const* rows = _page == LETTERS ? letters : _page == SYM1 ? sym1 : sym2;
+    static const char* symbols[3] = {"1234567890", "-/:;()$&@", ".,?!'\"#"};
+    const char* const* rows = _mode == SYMBOLS ? symbols : letters;
     const int u = width / 10;
     int n = 0;
     if (r == 0 || r == 1) {
@@ -89,25 +134,25 @@ class TouchKeyboard {
     } else if (r == 2) {
       const int len = strlen(rows[2]);
       const int side = (width - len * u) / 2;
-      if (_page == LETTERS) out[n++] = {0, side, SHIFT, 0, _shift ? "ABC" : "abc"};
-      else out[n++] = {0, side, LETTERS_KEY, 0, "abc"};
+      out[n++] = {0, side, MODE, 0, modeLabel()};
       for (int i = 0; i < len; i++) out[n++] = {side + i * u, u, CHAR, rows[2][i], nullptr};
       out[n++] = {side + len * u, width - side - len * u, DEL, 0, "<-"};
     } else {
-      out[n++] = {0, 2 * u, SYMBOLS, 0, _page == SYM1 ? "#+=" : "123"};
-      out[n++] = {2 * u, 4 * u, SPACE, ' ', "space"};
-      out[n++] = {6 * u, u + u / 2, CANCEL, 0, "X"};
-      out[n++] = {7 * u + u / 2, width - 7 * u - u / 2, ACTION, 0, action_label};
+      out[n++] = {0, 5 * u, SPACE, ' ', "space"};
+      out[n++] = {5 * u, 2 * u, CANCEL, 0, "X"};
+      out[n++] = {7 * u, width - 7 * u, ACTION, 0, action_label};
     }
     return n;
   }
 
   void drawKey(DisplayDriver& d, const Key& k, int y, int key_h) const {
-    d.setColor(k.kind == ACTION ? UIColor::corp_blue : UIColor::secondary_txt);
+    // The action key, and the mode key when not lower case, are lit.
+    const bool lit = k.kind == ACTION || (k.kind == MODE && _mode != LOWER);
+    d.setColor(lit ? UIColor::corp_blue : UIColor::secondary_txt);
     d.drawRect(k.x + 1, y + 1, k.w - 2, key_h - 2);
     d.setColor(UIColor::primary_txt);
     char cap[2] = {k.ch, 0};
-    if (k.kind == CHAR && _shift && _page == LETTERS && cap[0] >= 'a' && cap[0] <= 'z') cap[0] -= 32;
+    if (k.kind == CHAR && _mode == UPPER && cap[0] >= 'a' && cap[0] <= 'z') cap[0] -= 32;
     d.drawTextCentered(k.x + k.w / 2, y + key_h / 2 - 4, k.label ? k.label : cap);
   }
 
@@ -115,14 +160,12 @@ class TouchKeyboard {
     switch (k.kind) {
       case CHAR: {
         char c = k.ch;
-        if (_shift && _page == LETTERS && c >= 'a' && c <= 'z') { c -= 32; _shift = false; }
+        if (_mode == UPPER && c >= 'a' && c <= 'z') c -= 32;
         append(c);
         return Result::Changed;
       }
       case SPACE: append(' '); return Result::Changed;
-      case SHIFT: _shift = !_shift; return Result::Changed;
-      case SYMBOLS: _page = _page == SYM1 ? SYM2 : SYM1; return Result::Changed;
-      case LETTERS_KEY: _page = LETTERS; return Result::Changed;
+      case MODE: _mode = (Mode)((_mode + 1) % kModes); return Result::Changed;
       case DEL: if (_len) _text[--_len] = 0; return Result::Changed;
       case CANCEL: return Result::Cancel;
       case ACTION: return Result::Submit;
@@ -139,7 +182,7 @@ class TouchKeyboard {
   char _text[kCapacity] = {};
   size_t _len = 0;
   size_t _max_len = kCapacity - 1;
-  bool _shift = false;
-  Page _page = LETTERS;
+  Mode _mode = LOWER;
   bool _masked = false;
+  int _drawnTop = 0, _drawnKeyH = 0, _drawnWidth = 0, _drawnRows = 0;
 };

@@ -23,6 +23,7 @@
 #include <stdint.h>
 
 #include "FrameBuffer565.h"
+#include "HmiProfile.h"
 #include "MeshModel.h"
 
 namespace freenove_ui {
@@ -49,6 +50,11 @@ struct PageContext {
   // The repeater's name until the model learns it from its own advert: the
   // name last learned (kept in NVS), else the head's home-repeater contact.
   char repeater_name[24];
+  // Strip rendering (CYD, StripRenderer.h): the index of the band being
+  // drawn. A frame's draw is replayed once per band; pages advance their
+  // state (layout steps, sync, counters) only on band 0, so every band sees
+  // the same frame. Always 0 on a full framebuffer (Freenove).
+  int band;
 };
 
 // A rounded panel of the page (glow is drawn around it in the backdrop).
@@ -95,6 +101,8 @@ class Page {
   void attach(const PageContext* ctx) { _ctx = ctx; }
 
  protected:
+  // The first (or only) draw of this frame: state may advance.
+  bool firstBand() const { return _ctx == nullptr || _ctx->band == 0; }
   const PageContext* _ctx;
 };
 

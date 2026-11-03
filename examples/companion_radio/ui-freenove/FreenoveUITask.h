@@ -29,6 +29,13 @@
 // xTaskDelayUntil; a frame is rendered only when the page was just shown,
 // touch changed it or Page::wantsFrame() (new data / animation). Otherwise
 // the loop just drains, polls touch and sleeps.
+//
+// CYD (HMI_PROFILE_CYD, classic ESP32 without PSRAM): the same task and
+// pages, with the model in internal RAM (HMI_MODEL_NODES / HMI_MODEL_FEED),
+// no framebuffers and no background layer: CYDDisplay::renderPage() replays
+// the page's whole frame (drawFrame) once per band and pushes the bands that
+// changed. Touch is polled every kFramePeriodMs (25 ms); frames are capped at
+// one per kMinFrameGapMs (66 ms, <= 15 fps); an idle page pushes nothing.
 
 #include <stdint.h>
 
@@ -41,12 +48,19 @@
 
 #include "FrameBuffer565.h"
 #include "HmiLogic.h"
+#include "HmiProfile.h"
 #include "MeshModel.h"
 #include "RelayNameStore.h"
 #include "PageNav.h"
 #include "StubPages.h"
 
+#if HMI_CYD
+class CYDDisplay;
+typedef CYDDisplay HeadDisplay;
+#else
 class FreenoveDisplay;
+typedef FreenoveDisplay HeadDisplay;
+#endif
 
 // Companion loop (MyMesh::logRxRaw): a MeshCore packet this head received
 // itself (ESP-NOW). Bounded copy for the page task; no-op before begin().
@@ -54,7 +68,7 @@ void freenoveHeadReceived(const uint8_t* raw, int len);
 
 class FreenoveUITask {
  public:
-  explicit FreenoveUITask(FreenoveDisplay& display);
+  explicit FreenoveUITask(HeadDisplay& display);
 
   // Allocates the model and framebuffers (PSRAM), registers the observer
   // handler with ESPNOWRadio and starts the page task. Call once the display
@@ -66,7 +80,13 @@ class FreenoveUITask {
   // on the companion's own loop. Cheap when there is none.
   void serviceUiLoop();
 
+#if HMI_CYD
+  static constexpr uint32_t kFramePeriodMs = 25;   // touch poll
+  static constexpr uint32_t kMinFrameGapMs = 66;   // <= 15 fps
+#else
   static constexpr uint32_t kFramePeriodMs = 17;   // <= 60 fps
+  static constexpr uint32_t kMinFrameGapMs = 0;
+#endif
   static constexpr size_t kRingDepth = 16;          // observer frames (~4 KB)
   static constexpr size_t kBridgedDepth = 8;        // received packets (~2 KB)
 
@@ -74,6 +94,9 @@ class FreenoveUITask {
   static void taskEntry(void* arg);
   static void onObserverFrame(const uint8_t* frame, size_t len, void* ctx);
   static void drawHeadOverlay(FrameBuffer565& fb, void* ctx);
+#if HMI_CYD
+  static void drawBand(FrameBuffer565& fb, int band, void* ctx);
+#endif
   friend void freenoveHeadReceived(const uint8_t* raw, int len);
 
   void run();
@@ -86,7 +109,7 @@ class FreenoveUITask {
   void handleRequest(freenove_ui::PageRequest req, uint32_t now_ms);
   freenove_ui::Page* current() { return _pages.page(_nav.current()); }
 
-  FreenoveDisplay& _display;
+  HeadDisplay& _display;
   TaskHandle_t _task = nullptr;
 
   // WiFi task -> page task.
@@ -100,12 +123,19 @@ class FreenoveUITask {
   freenove_ui::PageSet _pages;
   freenove_ui::PageNav _nav;
 
+#if HMI_CYD
+  uint32_t _lastFrameMs = 0;
+  uint32_t _pushUs = 0;            // time pushing bands since the last stats line
+  uint32_t _bandsPushed = 0;
+  uint32_t _chromeUs = 0, _pageUs = 0, _headerUs = 0;   // render split (drawBand)
+#else
   uint16_t* _bg = nullptr;                  // current page background layer (PSRAM)
   uint16_t* _buf[2] = {nullptr, nullptr};   // double-buffered frames (PSRAM)
   FrameBuffer565 _fb[2] = {FrameBuffer565(nullptr, 0, 0), FrameBuffer565(nullptr, 0, 0)};
   int _cur = 0;
-  bool _bgDirty = true;          // rebuild _bg before the next frame
   bool _needsCopy[2] = {true, true};
+#endif
+  bool _bgDirty = true;          // rebuild _bg before the next frame (Freenove); a new page (CYD)
   bool _forceFrame = true;
   bool _wasOn = true;
   bool _touchDown = false;

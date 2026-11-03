@@ -130,7 +130,7 @@ class HeadComposeScreen : public UIScreen {
     }
     d.setColor(UIColor::secondary_txt);
     d.drawRect(0, kHeaderH + 1, d.width(), kTextH - 2);
-    _keyboard.draw(d, kHeaderH + kTextH, kKeyH, "Send");
+    _keyboard.draw(d, kHeaderH + kTextH, TouchKeyboard::keyHeight(kHeaderH + kTextH, d.height(), kKeyH), "Send");
     return 1000;
   }
 
@@ -158,7 +158,7 @@ class HeadComposeScreen : public UIScreen {
       _keyboard.setMaxLength(maxLen());
       return true;
     }
-    switch (_keyboard.touch(x, y, width, kHeaderH + kTextH, kKeyH)) {
+    switch (_keyboard.touch(x, y)) {   // the keys as last drawn
       case TouchKeyboard::Result::Changed: _status = nullptr; return true;
       case TouchKeyboard::Result::Submit: send(); return true;
       case TouchKeyboard::Result::Cancel: close(nullptr); return true;

@@ -11,8 +11,12 @@
 #include <helpers/UsbLogging.h>
 #include <helpers/esp32/ESPNOWRadio.h>
 
+#if HMI_CYD
+#include "CYDDisplay.h"
+#else
 #include "FreenoveDisplay.h"
 #include "FreenoveGeometry.h"
+#endif
 #include "HeadRadio.h"
 #include "RadioLabel.h"
 #include "target.h"
@@ -31,16 +35,35 @@ extern UITask ui_task;
 
 namespace {
 
-constexpr int kW = freenove::kLandscapeW;
-constexpr int kH = freenove::kLandscapeH;
-constexpr size_t kFbBytes = (size_t)kW * kH * 2;   // RGB565
+constexpr int kW = freenove_ui::profile::kScreenW;
+constexpr int kH = freenove_ui::profile::kScreenH;
 constexpr uint32_t kTaskStack = 8192;
-constexpr UBaseType_t kTaskPriority = 1;   // same as the Arduino loop task
+#ifndef HMI_TASK_PRIORITY
+#define HMI_TASK_PRIORITY 1   // same as the Arduino loop task
+#endif
+constexpr UBaseType_t kTaskPriority = HMI_TASK_PRIORITY;
 constexpr uint32_t kStatsMs = 10000;
+#if HMI_CYD
+// Internal RAM only (no PSRAM): a bounded model.
+#ifndef HMI_MODEL_NODES
+#define HMI_MODEL_NODES 64
+#endif
+#ifndef HMI_MODEL_FEED
+#define HMI_MODEL_FEED 128
+#endif
+constexpr size_t kNodeCapacity = HMI_MODEL_NODES;
+constexpr size_t kFeedCapacity = HMI_MODEL_FEED;
+constexpr uint32_t kBigCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+#else
+constexpr size_t kFbBytes = (size_t)kW * kH * 2;   // RGB565
 constexpr size_t kNodeCapacity = 256;      // spec: node table
 constexpr size_t kFeedCapacity = 512;      // spec: packet ring
+constexpr uint32_t kBigCaps = MALLOC_CAP_SPIRAM;
+#endif
 
-void* psramAlloc(size_t bytes, void*) { return heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM); }
+// Model, page tables and relay names: PSRAM on the Freenove, internal RAM
+// on the CYD.
+void* psramAlloc(size_t bytes, void*) { return heap_caps_malloc(bytes, kBigCaps); }
 void psramFree(void* p, void*) { heap_caps_free(p); }
 const mesh::head::ModelAllocator kPsramAllocator = {psramAlloc, psramFree, nullptr};
 
@@ -126,10 +149,10 @@ constexpr const char* kRelayNamesNs = "hrelays";
 constexpr const char* kRelayNamesKey = "v1";
 
 mesh::head::RelayNameStore* loadRelayNames() {
-  void* mem = heap_caps_malloc(sizeof(mesh::head::RelayNameStore), MALLOC_CAP_SPIRAM);
+  void* mem = heap_caps_malloc(sizeof(mesh::head::RelayNameStore), kBigCaps);
   if (mem == nullptr) return nullptr;
   auto* store = new (mem) mesh::head::RelayNameStore();
-  uint8_t* blob = (uint8_t*)heap_caps_malloc(mesh::head::RelayNameStore::kBlobMax, MALLOC_CAP_SPIRAM);
+  uint8_t* blob = (uint8_t*)heap_caps_malloc(mesh::head::RelayNameStore::kBlobMax, kBigCaps);
   Preferences prefs;
   if (blob != nullptr && prefs.begin(kRelayNamesNs, true)) {
     const size_t len = prefs.getBytesLength(kRelayNamesKey);
@@ -163,12 +186,25 @@ void logln(const char* s) { logf("%s\n", s); }
 
 }  // namespace
 
-FreenoveUITask::FreenoveUITask(FreenoveDisplay& display) : _display(display), _nav(freenove_ui::PageSet::kCount) {
+FreenoveUITask::FreenoveUITask(HeadDisplay& display) : _display(display), _nav(freenove_ui::PageSet::kCount) {
   memset(&_ctx, 0, sizeof(_ctx));
 }
 
 bool FreenoveUITask::begin(const uint8_t* self_pub_key) {
   if (_task != nullptr) return true;
+#if HMI_CYD
+  if (!_display.hmiReady()) {
+    logln("cyd: no band buffer; companion UI only");
+    return false;
+  }
+  _model = new (std::nothrow) mesh::head::MeshModel(kNodeCapacity, kFeedCapacity, &kPsramAllocator);
+  if (_model == nullptr || !_model->ok()) {
+    logln("cyd: visual head allocation failed; companion UI only");
+    delete _model;
+    _model = nullptr;
+    return false;
+  }
+#else
   _model = new (std::nothrow) mesh::head::MeshModel(kNodeCapacity, kFeedCapacity, &kPsramAllocator);
   _bg = (uint16_t*)heap_caps_malloc(kFbBytes, MALLOC_CAP_SPIRAM);
   _buf[0] = _display.reservedPageBuffer();
@@ -183,6 +219,7 @@ bool FreenoveUITask::begin(const uint8_t* self_pub_key) {
     return false;
   }
   for (int i = 0; i < 2; i++) _fb[i] = FrameBuffer565(_buf[i], kW, kH);
+#endif
   updateClock(millis());
   _model->setHeadKey(self_pub_key);
   _names = loadRelayNames();   // before the first advert: "via" names at boot
@@ -214,9 +251,9 @@ bool FreenoveUITask::begin(const uint8_t* self_pub_key) {
   // Frames queue up (bounded) until the task drains them.
   ESPNOWRadio::setObserverHandler(onObserverFrame, this);
   s_head.store(this, std::memory_order_release);
-  logf("freenove: visual head up (pages, model %u nodes / %u feed in PSRAM); "
+  logf("freenove: visual head up (pages, model %u nodes / %u feed in %s); "
                 "free internal %u B, free PSRAM %u B\n",
-                (unsigned)kNodeCapacity, (unsigned)kFeedCapacity,
+                (unsigned)kNodeCapacity, (unsigned)kFeedCapacity, HMI_CYD ? "RAM" : "PSRAM",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   return true;
@@ -390,7 +427,8 @@ void FreenoveUITask::pollTouch(uint32_t now_ms) {
   int x = -1, y = -1;
 #if defined(FREENOVE_UITEST) && FREENOVE_UITEST
   bool down = _display.touch().read(x, y);
-  freenove_uitest::overrideTouch(now_ms, down, x, y);   // an injected gesture wins
+  if (!freenove_uitest::overrideTouch(now_ms, down, x, y))   // an injected gesture wins
+    freenove_uitest::noteRealTouch(down, x, y);
 #else
   const bool down = _display.touch().read(x, y);
 #endif
@@ -446,7 +484,7 @@ void FreenoveUITask::pollTouch(uint32_t now_ms) {
 // Page task: new or renamed relay names go to NVS, at most once a minute.
 void FreenoveUITask::saveRelayNames(uint32_t now_ms) {
   if (_names == nullptr || !_names->saveDue(now_ms)) return;
-  uint8_t* blob = (uint8_t*)heap_caps_malloc(mesh::head::RelayNameStore::kBlobMax, MALLOC_CAP_SPIRAM);
+  uint8_t* blob = (uint8_t*)heap_caps_malloc(mesh::head::RelayNameStore::kBlobMax, kBigCaps);
   if (blob == nullptr) return;
   const size_t len = _names->serialize(blob, mesh::head::RelayNameStore::kBlobMax);
   Preferences prefs;
@@ -496,9 +534,9 @@ void FreenoveUITask::showPage(int index, uint32_t now_ms) {
   _nav.setCurrent(index);
   _display.relayTouch(false, -1, -1);
   if (next->external()) {
-    _display.setPanelOwner(FreenoveDisplay::PanelOwner::Companion);
+    _display.setPanelOwner(HeadDisplay::PanelOwner::Companion);
   } else {
-    _display.setPanelOwner(FreenoveDisplay::PanelOwner::Pages);
+    _display.setPanelOwner(HeadDisplay::PanelOwner::Pages);
     _bgDirty = true;
     _forceFrame = true;
   }
@@ -510,6 +548,7 @@ void FreenoveUITask::showPage(int index, uint32_t now_ms) {
   logf("freenove: page %s\n", next->title());
 }
 
+#if !HMI_CYD
 void FreenoveUITask::renderFrame(uint32_t now_ms) {
   const int64_t t0 = esp_timer_get_time();
   freenove_ui::Page* page = current();
@@ -541,6 +580,44 @@ void FreenoveUITask::renderFrame(uint32_t now_ms) {
   if (!_display.submitPage(fb)) _forceFrame = true;
   _framesRendered++;
 }
+#else
+// One band of the current page's frame (CYDDisplay::renderPage, page task).
+void FreenoveUITask::drawBand(FrameBuffer565& fb, int band, void* ctx) {
+  FreenoveUITask* self = static_cast<FreenoveUITask*>(ctx);
+  self->_ctx.band = band;
+  // drawFrame() in three timed steps (stats: chrome / page / header).
+  freenove_ui::Page& page = *self->current();
+  const int64_t t0 = esp_timer_get_time();
+  fb.resetClip();
+  freenove_ui::drawPageChrome(fb, page, self->_nav.current(), self->_nav.count());
+  const int64_t t1 = esp_timer_get_time();
+  fb.resetClip();
+  page.draw(fb, self->_ctx.now_ms);
+  const int64_t t2 = esp_timer_get_time();
+  fb.resetClip();
+  freenove_ui::drawHeader(fb, self->_ctx, self->_ctx.now_ms);
+  const int64_t t3 = esp_timer_get_time();
+  self->_chromeUs += (uint32_t)(t1 - t0);
+  self->_pageUs += (uint32_t)(t2 - t1);
+  self->_headerUs += (uint32_t)(t3 - t2);
+  self->_ctx.band = 0;
+}
+
+void FreenoveUITask::renderFrame(uint32_t now_ms) {
+  const int64_t t0 = esp_timer_get_time();
+  _ctx.now_ms = now_ms;
+  _bgDirty = false;
+  const bool drawn = _display.renderPage(drawBand, this);
+  _forceFrame = false;
+  _lastFrameMs = now_ms;
+  const uint32_t pushUs = _display.lastPushUs();
+  _renderUs += (uint32_t)(esp_timer_get_time() - t0) - pushUs;
+  _pushUs += pushUs;
+  _bandsPushed += (uint32_t)_display.lastBandsPushed();
+  if (drawn) _framesRendered++;
+  else _forceFrame = true;   // the companion still owns the panel: retry
+}
+#endif
 
 void FreenoveUITask::run() {
   showPage(freenove_ui::PageSet::kHome, millis());
@@ -586,6 +663,17 @@ void FreenoveUITask::run() {
     if (wanted >= 0 && wanted < _nav.count()) showPage(wanted, now);
 #endif
     pollTouch(now);
+#if HMI_CYD && defined(FREENOVE_UITEST) && FREENOVE_UITEST
+    {
+      freenove_uitest::ShotSink sink = nullptr;
+      void* sinkCtx = nullptr;
+      if (freenove_uitest::takeShotRequest(sink, sinkCtx)) {
+        _ctx.now_ms = _lastFrameMs;   // the frame on the glass
+        if (!current()->external()) _display.dumpPage(drawBand, this, sink, sinkCtx);
+        freenove_uitest::shotDone();
+      }
+    }
+#endif
     handleRequest(current()->takeRequest(), now);
     const uint8_t result = _uiResult.exchange(0);
     if (result != 0) {
@@ -597,11 +685,39 @@ void FreenoveUITask::run() {
     const bool on = _display.isOn();
     if (on && !_wasOn) _forceFrame = true;   // frames were skipped while dark
     _wasOn = on;
-    if (on && !page->external() && (_forceFrame || _bgDirty || page->wantsFrame(now))) {
+#if HMI_CYD
+    const bool due = _bgDirty || (uint32_t)(now - _lastFrameMs) >= kMinFrameGapMs;
+#else
+    const bool due = true;
+#endif
+    if (on && !page->external() && due && (_forceFrame || _bgDirty || page->wantsFrame(now))) {
       renderFrame(now);
     }
 
     if ((uint32_t)(now - lastStats) >= kStatsMs) {
+#if HMI_CYD
+      logf("cyd: pages page=%s frames=%lu (%.1f fps) render_ms=%.1f (chrome %.1f page %.1f header %.1f) "
+           "push_ms=%.1f bands=%.1f obs=%lu dropped=%lu bad=%lu nodes=%u heap=%u min=%u largest=%u\n",
+           page->title(), (unsigned long)_framesRendered, _framesRendered * 1000.0f / (float)(now - lastStats),
+           _framesRendered ? (double)_renderUs / 1000.0 / _framesRendered : 0.0,
+           _framesRendered ? (double)_chromeUs / 1000.0 / _framesRendered : 0.0,
+           _framesRendered ? (double)_pageUs / 1000.0 / _framesRendered : 0.0,
+           _framesRendered ? (double)_headerUs / 1000.0 / _framesRendered : 0.0,
+           _framesRendered ? (double)_pushUs / 1000.0 / _framesRendered : 0.0,
+           _framesRendered ? (double)_bandsPushed / _framesRendered : 0.0, (unsigned long)_ctx.obs_frames,
+           (unsigned long)_ctx.obs_dropped, (unsigned long)_ctx.obs_bad, (unsigned)_model->nodeCount(),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+#if defined(FREENOVE_UITEST) && FREENOVE_UITEST
+      freenove_uitest::noteStats(_framesRendered, now - lastStats, _renderUs, _pushUs, _bandsPushed, _chromeUs,
+                                 _pageUs, _headerUs);
+#endif
+      _framesRendered = 0;
+      _renderUs = _bgUs = _pushUs = _bandsPushed = 0;
+      _chromeUs = _pageUs = _headerUs = 0;
+      lastStats = now;
+#else
       const FramePusher::Stats s = _display.pusher().takeStats();
       logf("freenove: pages page=%s frames=%lu (%.1f fps) render_ms=%.2f bg_ms=%lu push_kb=%.1f "
                     "push_ms=%.2f diff_ms=%.2f obs=%lu dropped=%lu bad=%lu nodes=%u\n",
@@ -616,6 +732,7 @@ void FreenoveUITask::run() {
       _framesRendered = 0;
       _renderUs = _bgUs = 0;
       lastStats = now;
+#endif
     }
 
     // Fixed frame budget: never faster than kFramePeriodMs, always yield.
