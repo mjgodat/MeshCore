@@ -1017,6 +1017,28 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
     uint8_t sf, cr, preset_slot;
     bool started;
   } _observer_window = {};
+  // observer.transport: one shared rate limiter, one outbox per transport.
+  struct EspNowObserverSink : mesh::observer::FanoutSink {
+    MyMesh* self = nullptr;
+    bool observerActive() const override;
+    bool observerMeshPending() const override;
+    mesh::observer::Outbox& observerOutbox() override;
+  } _observer_espnow_sink;
+#ifdef WITH_UDP_BRIDGE
+  struct UdpObserverSink : mesh::observer::FanoutSink {
+    MyMesh* self = nullptr;
+    bool observerActive() const override;
+    bool observerMeshPending() const override;
+    mesh::observer::Outbox& observerOutbox() override;
+  } _observer_udp_sink;
+#endif
+  mesh::observer::Fanout _observer_fanout;
+  void offerObserverFrame(const uint8_t* frame, size_t len);
+  bool observerFeedActive();
+  static void describeObserverTransport(void* ctx, char* out, size_t capacity);
+public:
+  void getObserverRuntime(mesh::espnow::ObserverRuntime& runtime) override;
+private:
 #endif
 #if MESH_ENABLE_TELEMETRY_HISTORY
   void sampleTelemetryHistory(bool emergency_only = false);

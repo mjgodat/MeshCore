@@ -1049,12 +1049,16 @@ bool ESPNowBridge::sendTest(uint32_t nonce) {
   return true;
 }
 
-bool ESPNowBridge::sendObserverFrame(const uint8_t* frame, size_t len) {
-  if (!_initialized) return false;
+bool ESPNowBridge::observerMeshPending() {
   portENTER_CRITICAL(&_tx_mux);
   const bool mesh_pending = _tx_count > 0;
   portEXIT_CRITICAL(&_tx_mux);
-  return _observer.offer(frame, len, millis(), mesh_pending) == mesh::observer::Offer::Queued;
+  return mesh_pending;
+}
+
+bool ESPNowBridge::sendObserverFrame(const uint8_t* frame, size_t len) {
+  if (!_initialized) return false;
+  return _observer.offer(frame, len, millis(), observerMeshPending()) == mesh::observer::Offer::Queued;
 }
 
 void ESPNowBridge::formatStatus(char* reply, size_t reply_size) {
@@ -1136,8 +1140,15 @@ void ESPNowBridge::formatStats(const char* page, char* reply, size_t reply_size)
         (unsigned long)s.probe.tx_timeout, (unsigned long)s.probe.rx_ok,
         (unsigned long)s.probe.rx_bad, (unsigned long)s.probe.last_tx_nonce,
         (unsigned long)s.probe.last_rx_nonce);
+  } else if (strcmp(page, "obs") == 0) {
+    // Observer feed over ESP-NOW (observer.transport espnow|both).
+    const auto& o = _observer.stats();
+    snprintf(reply, reply_size, "> queued=%lu ok=%lu fail=%lu timeout=%lu rate=%lu preempt=%lu overflow=%lu",
+        (unsigned long)o.queued, (unsigned long)o.sent_ok, (unsigned long)o.sent_fail,
+        (unsigned long)o.timeouts, (unsigned long)o.rate_drops,
+        (unsigned long)o.preempt_drops, (unsigned long)o.overflow_drops);
   } else {
-    snprintf(reply, reply_size, "Error: use get espnow.stats [mac|rx|tx|drops|test]");
+    snprintf(reply, reply_size, "Error: use get espnow.stats [mac|rx|tx|drops|test|obs]");
   }
 }
 

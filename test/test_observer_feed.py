@@ -426,11 +426,11 @@ class ObserverWiringTests(unittest.TestCase):
         self.assertLess(guard, body.index("emitObserverPacket(snr, rssi, raw, len);"))
         self.assertEqual(self.repeater.count("emitObserverPacket("), 2)   # definition + one call
         emit = method(self.repeater, "void MyMesh::emitObserverPacket(")
-        self.assertIn("isEspNowBridgeRunning()", emit)
+        self.assertIn("observerFeedActive()", emit)   # any transport (observer.transport)
         self.assertIn("Disposition::Unknown", emit)
         self.assertIn("mesh::observer::setPacketBytes(record, raw, (size_t)len)", emit)
         self.assertNotIn("MAX_RAW", emit.split("setPacketBytes")[1])
-        self.assertIn("sendObserverFrame(", emit)
+        self.assertIn("offerObserverFrame(frame, frame_len)", emit)
 
     def test_vitals_timer_in_loop_only_when_enabled(self):
         loop = method(self.repeater, "void __attribute__((noinline)) MyMesh::servicePostMeshLoop()")
@@ -439,7 +439,7 @@ class ObserverWiringTests(unittest.TestCase):
         self.assertLess(loop.index("serviceObserverVitals();"), loop.index("espnow_bridge.loop();"))
         self.assertEqual(self.repeater.count("serviceObserverVitals();"), 1)
         vitals = method(self.repeater, "void MyMesh::serviceObserverVitals()")
-        self.assertLess(vitals.index("espNowObserverEnabled()"), vitals.index("sendObserverFrame("))
+        self.assertLess(vitals.index("observerActive()"), vitals.index("offerObserverFrame("))
         self.assertIn("kVitalsIntervalMs", vitals)
         self.assertIn("#if MESH_ENABLE_RADIO_PRESETS", vitals)
         disabled = vitals[:vitals.index("const uint32_t now = millis();")]
@@ -449,7 +449,7 @@ class ObserverWiringTests(unittest.TestCase):
         load = method(self.common, "void CommonCLI::loadPrefs(FILESYSTEM* fs)")
         self.assertIn("#if defined(MESH_ESPNOW_OBSERVER_SETTINGS)\n  mesh::espnow::loadEspNowObserverSettings(fs);", load)
         handle = method(self.common, "void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply)")
-        self.assertIn("mesh::espnow::handleEspNowObserverCommand(command, reply, 157)", handle)
+        self.assertIn("mesh::espnow::handleEspNowObserverCommand(command, reply, 157, &observer_runtime)", handle)
 
     def test_manager_allow_lists_exclude_observer(self):
         for name in ("static bool isRegionMgrAllowed(const char* cmd)",
@@ -469,7 +469,9 @@ class ObserverWiringTests(unittest.TestCase):
                   "#define MESH_ENABLE_FLOOD_RULE_ENGINE 1\n" + functions + r'''
 int main() {
   const char* observer[] = {"get espnow.observer", "set espnow.observer on", "set espnow.observer off",
-                            "  set espnow.observer on", "set espnow.observer\ton"};
+                            "  set espnow.observer on", "set espnow.observer\ton",
+                            "set observer on", "get observer", "set observer.transport both",
+                            "get observer.transport"};
   for (const char* c : observer)
     assert(!isRegionMgrAllowed(c) && !isFilterMgrAllowed(c) && !isCommonManagerReadOnlyAllowed(c));
   // Controls: the matchers are live.

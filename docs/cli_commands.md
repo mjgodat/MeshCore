@@ -6757,6 +6757,46 @@ record means `off`, and `get espnow.observer` reports an error until it is saved
 again. Over LoRa only full admins can read or change it (it is not in the region
 or filter manager allow lists).
 
+#### Observer feed transport (`observer`, `observer.transport`)
+
+```text
+get observer
+set observer on|off
+get observer.transport
+set observer.transport espnow|udp|both
+get espnow.stats obs
+get udp.stats obs
+```
+
+`observer` is the transport-neutral name of `espnow.observer` (the same saved
+switch). `observer.transport` chooses where the feed goes; default `espnow`
+(exactly the behaviour above):
+
+| Value | Observer frames go to |
+| --- | --- |
+| `espnow` | the ESP-NOW bridge (broadcast or `espnow.peer`) |
+| `udp` | every UDP bridge peer that subscribed (a visual head in UDP mode) |
+| `both` | both; each record passes one shared rate limit (20/s, burst 40) |
+
+`udp` and `both` need firmware with the WiFi UDP bridge (for the ThinkNode M5:
+`ThinkNode_M5_Repeater_bridge_espnow_udp`); other builds refuse them. `both`
+is refused while the WiFi station is joined on a channel other than
+`bridge.channel`; the reply names both channels and the fix (move the router
+to the ESP-NOW channel, or move every ESP-NOW node to the router's channel).
+UDP frames use kind `6` of the UDP bridge framing and reach a peer only while
+it is subscribed (kind `7`, refreshed by the head every 20 s, dropped after
+60 s or when the peer's session changes), so plain UDP bridge peers never see
+them. Each transport keeps its own 4-frame queue; mesh traffic still goes first
+on each. `get observer.transport` adds the live state, for example
+`> both (espnow ch 6 running; udp ready subs=1)`.
+
+The `obs` statistics pages count the feed per transport: `queued`, sent
+(`ok`/`fail`; ESP-NOW also `timeout`), `rate` (refused by the shared rate
+limit), `preempt` (mesh traffic waiting) and `overflow` (oldest dropped). The
+UDP page adds `subs` (live subscribers) and per-peer datagrams
+(`peer.ok`/`peer.fail`). The setting is saved in `/observer_transport`; a
+missing or damaged record means `espnow`.
+
 Status reports local state (`off`, `teardown-error`, `driver-error`,
 `channel-mismatch` or `ready`), then these compact fields:
 
