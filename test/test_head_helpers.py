@@ -113,36 +113,47 @@ static int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { std::printf("FAIL line %d: %s\n", __LINE__, #cond); failures++; } } while (0)
 using R = TouchKeyboard::Result;
 // 160 wide, keys from y=0, 22 tall: rows at y 5 / 27 / 49 / 71.
+// Row 2: [mode 0..24][z..m][del 136..160]; row 3: [space 0..80][X 80..112][action 112..160].
 static R tap(TouchKeyboard& k, int x, int y) { return k.touch(x, y, 160, 0, 22); }
 int main() {
   TouchKeyboard k;
   k.reset("", 3);
+  CHECK(std::strcmp(k.modeLabel(), "abc") == 0);
   CHECK(tap(k, 5, 5) == R::Changed);           // q
   CHECK(std::strcmp(k.text(), "q") == 0);
-  CHECK(tap(k, 2, 49) == R::Changed);          // shift (left of z row)
-  CHECK(tap(k, 21, 5) == R::Changed);          // w -> W, shift releases
-  CHECK(tap(k, 37, 5) == R::Changed);          // e
-  CHECK(std::strcmp(k.text(), "qWe") == 0);
+  CHECK(tap(k, 2, 49) == R::Changed);          // mode: abc -> ABC
+  CHECK(std::strcmp(k.modeLabel(), "ABC") == 0);
+  CHECK(tap(k, 21, 5) == R::Changed);          // W
+  CHECK(tap(k, 37, 5) == R::Changed);          // E: capitals stay until cycled
+  CHECK(std::strcmp(k.text(), "qWE") == 0);
   CHECK(tap(k, 53, 5) == R::Changed);          // r ignored: max length 3
-  CHECK(std::strcmp(k.text(), "qWe") == 0);
+  CHECK(std::strcmp(k.text(), "qWE") == 0);
   CHECK(tap(k, 150, 49) == R::Changed);        // delete
   CHECK(std::strcmp(k.text(), "qW") == 0);
-  CHECK(tap(k, 40, 71) == R::Changed);         // space
-  CHECK(std::strcmp(k.text(), "qW ") == 0);
-  CHECK(tap(k, 100, 71) == R::Cancel);
+  CHECK(tap(k, 40, 71) == R::Changed);         // space (wide)
+  CHECK(tap(k, 5, 71) == R::Changed);          // still space at the far left: no 123 key there
+  CHECK(std::strcmp(k.text(), "qW ") == 0);    // (max length 3: the second space is dropped)
+  CHECK(tap(k, 90, 71) == R::Cancel);
   CHECK(tap(k, 150, 71) == R::Submit);
   CHECK(tap(k, 80, 200) == R::None);           // below the keyboard
-  k.reset("", 10);
-  CHECK(tap(k, 5, 71) == R::Changed);          // 123 (PC layout)
+  k.reset("", 12);
+  CHECK(tap(k, 2, 49) == R::Changed);          // abc -> ABC
+  CHECK(tap(k, 2, 49) == R::Changed);          // ABC -> 123 (iPhone layout)
+  CHECK(std::strcmp(k.modeLabel(), "123") == 0);
   CHECK(tap(k, 5, 5) == R::Changed);           // 1
   CHECK(tap(k, 21, 5) == R::Changed);          // 2
-  CHECK(tap(k, 5, 27) == R::Changed);          // ! (shifted 1)
-  CHECK(tap(k, 21, 27) == R::Changed);         // @ (shifted 2)
-  CHECK(tap(k, 5, 71) == R::Changed);          // #+= page
-  CHECK(tap(k, 5, 5) == R::Changed);           // ~
-  CHECK(tap(k, 2, 49) == R::Changed);          // abc: back to letters
+  CHECK(tap(k, 10, 27) == R::Changed);         // - (row 1: -/:;()$&@, from x 8)
+  CHECK(tap(k, 136, 27) == R::Changed);        // @
+  CHECK(tap(k, 30, 49) == R::Changed);         // . (row 2: .,?!'"#, from x 24)
+  CHECK(tap(k, 126, 49) == R::Changed);        // #
+  CHECK(tap(k, 2, 49) == R::Changed);          // 123 -> abc (three modes)
+  CHECK(std::strcmp(k.modeLabel(), "abc") == 0);
   CHECK(tap(k, 5, 5) == R::Changed);           // q
-  CHECK(std::strcmp(k.text(), "12!@~q") == 0);
+  CHECK(std::strcmp(k.text(), "12-@.#q") == 0);
+  k.reset("x", 10);
+  CHECK(tap(k, 2, 49) == R::Changed);          // ABC
+  k.reset("", 10);                             // a new entry starts in lower case
+  CHECK(std::strcmp(k.modeLabel(), "abc") == 0);
   k.reset("abcdefghijklmnop", 5);              // initial text is clamped
   CHECK(std::strcmp(k.text(), "abcde") == 0);
   CHECK(k.length() == 5);

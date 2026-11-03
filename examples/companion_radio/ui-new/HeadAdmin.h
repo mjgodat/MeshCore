@@ -614,11 +614,14 @@ class HeadAdminScreen : public UIScreen {
     _keyboard.drawText(d, top + 12);
     d.setColor(UIColor::secondary_txt);
     d.drawRect(0, top + 10, d.width(), kTextH - 2);
-    _keyboard.draw(d, top + 10 + kTextH - 2, kKeyH - 1, _mode == Mode::Password ? "Login" : "OK");
+    const int kb_top = top + 10 + kTextH - 2;
+    _keyboard.draw(d, kb_top, TouchKeyboard::keyHeight(kb_top, d.height(), kKeyH - 1),
+                   _mode == Mode::Password ? "Login" : "OK");
   }
 
   bool touchEntry(int x, int y, int width) {
-    switch (_keyboard.touch(x, y, width, kHeaderH + 10 + kTextH - 2, kKeyH - 1)) {
+    (void)width;
+    switch (_keyboard.touch(x, y)) {   // the keys as last drawn
       case TouchKeyboard::Result::Changed: return true;
       case TouchKeyboard::Result::Cancel:
         if (_mode == Mode::Password) _presets_after_login = false;
