@@ -449,19 +449,27 @@ class CompanionSkinTest(unittest.TestCase):
         self.assertIn('displayNightActive()', src)   # night palette keeps the legacy path
 
     def test_other_boards_untouched(self):
-        # The skin lives in the Freenove adapter only: LGFXDisplay, the
-        # DisplayDriver API and the companion screens do not know about it,
-        # so the CYD and every other board draw exactly as before.
+        # The skin lives in the visual heads' display adapters only (Freenove,
+        # and the CYD's visual head build): LGFXDisplay, the DisplayDriver API
+        # and the companion screens do not know about it, so every other
+        # board draws exactly as before.
         shared = [ROOT / 'src' / 'helpers' / 'ui' / 'LGFXDisplay.cpp', ROOT / 'src' / 'helpers' / 'ui' / 'LGFXDisplay.h',
                   ROOT / 'src' / 'helpers' / 'ui' / 'DisplayDriver.h', UI_NEW / 'HeadAdmin.h', UI_NEW / 'HeadCompose.h',
                   UI_NEW / 'TouchKeyboard.h', UI_NEW / 'UITask.cpp']
         for p in shared:
             self.assertNotIn('CompanionSkin', p.read_text(encoding='utf-8', errors='replace'), p.name)
             self.assertNotIn('HMI_SKIN', p.read_text(encoding='utf-8', errors='replace'), p.name)
-        cyd = list((ROOT / 'variants').glob('*cyd*/**/*')) + list((ROOT / 'variants').glob('*CYD*/**/*'))
-        for p in cyd:
-            if p.is_file() and p.suffix in ('.h', '.cpp', '.ini'):
-                self.assertNotIn('CompanionSkin', p.read_text(encoding='utf-8', errors='replace'), p.name)
+        # The CYD uses it only in its visual head build (CYD_VISUAL_HEAD).
+        import re
+        cyd = re.sub(r'//[^\n]*', '', (ROOT / 'variants' / 'cyd_espnow_head' / 'CYDDisplay.h').read_text(encoding='utf-8'))
+        visual = cyd[cyd.index('#if defined(FREENOVE_VISUAL_HEAD)'):]
+        self.assertIn('CompanionSkin.h', visual[:visual.index('#else')])
+        self.assertNotIn('CompanionSkin', cyd[:cyd.index('#if defined(FREENOVE_VISUAL_HEAD)')])
+        others = [p for p in (ROOT / 'variants').glob('**/*')
+                  if p.is_file() and p.suffix in ('.h', '.cpp') and 'freenove_s3_35_head' not in p.parts
+                  and 'cyd_espnow_head' not in p.parts]
+        for p in others:
+            self.assertNotIn('CompanionSkin', p.read_text(encoding='utf-8', errors='replace'), str(p))
 
 
 def write_preview():

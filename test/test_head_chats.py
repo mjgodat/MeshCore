@@ -349,7 +349,7 @@ class HeadChatsTest(unittest.TestCase):
 
     def test_wiring_is_freenove_only(self):
         # The chat list replaces the one-message swipe view only where
-        # UI_HEAD_CHAT_LIST is set (the Freenove head); the CYD keeps it.
+        # UI_HEAD_CHAT_LIST is set (the visual heads: Freenove and the CYD).
         ui = (UI_NEW / 'UITask.cpp').read_text(encoding='utf-8')
         self.assertIn('#include "HeadChats.h"', ui)
         self.assertRegex(ui, r'#if UI_HEAD_CHAT_LIST')
@@ -357,7 +357,10 @@ class HeadChatsTest(unittest.TestCase):
         self.assertRegex(freenove, r'-D UI_HEAD_CHAT_LIST=1')
         self.assertRegex(freenove, r'-D UI_MSG_PREVIEW_SIZE=161')
         cyd = (ROOT / 'variants' / 'cyd_espnow_head' / 'platformio.ini').read_text(encoding='utf-8')
-        self.assertNotIn('UI_HEAD_CHAT_LIST', cyd)
+        self.assertRegex(cyd, r'-D UI_HEAD_CHAT_LIST=1')
+        self.assertRegex(cyd, r'-D UI_MSG_PREVIEW_SIZE=161')
+        others = (ROOT / 'platformio.ini').read_text(encoding='utf-8')
+        self.assertNotIn('UI_HEAD_CHAT_LIST=1', others)
         # The view reuses the companion's store: no message buffer of its own.
         view = (UI_NEW / 'HeadChats.h').read_text(encoding='utf-8')
         self.assertNotRegex(view, r'Entry\s+_\w+\s*\[')
