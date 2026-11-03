@@ -2,8 +2,8 @@
 
 A LoRa repeater with the ESP-NOW bridge can serve small touch-screen "heads"
 next to it: ESP-NOW-only MeshCore companions that chat through the repeater,
-administer it from the screen, and (on the Freenove head) show what the
-repeater hears.
+administer it from the screen, and show what the repeater hears (the CYD and
+the Freenove head run the same pages).
 
 ```text
                 LoRa mesh
@@ -18,9 +18,9 @@ repeater hears.
         +-----------+-------------------------+
         |                    |                |
   ESP-NOW relay(s)      CYD head        Freenove head
-  (DevKit, optional)    chat + admin    chat + admin + HOME/TELEMETRY/
-  repeats MeshCore                      MAP/NODES pages from the
-  packets                               observer feed
+  (DevKit, optional)    chat + admin + HOME/TELEMETRY/MAP/NODES pages
+  repeats MeshCore      from the observer feed (same page code;
+  packets               CYD 320x240 in bands, Freenove 480x320)
 ```
 
 1. **Bridge transports.** The repeater's ESP-NOW bridge carries MeshCore
@@ -38,7 +38,7 @@ All branches are based on `keymindCascade` (`236d12610`). Pull in this order;
 each one builds on the previous:
 
 ```text
-espnow/bridge-improvements -> espnow/observer-feed -> head/cyd -> head/freenove
+espnow/bridge-improvements -> espnow/observer-feed -> head/cyd -> head/freenove -> head/cyd-hmi
 m5/hold-actions   (independent)
 espnow-head       (everything above combined, plus this file)
 ```
@@ -50,6 +50,7 @@ espnow-head       (everything above combined, plus this file)
 | `m5/hold-actions` | ThinkNode M5: user-button hold runs the page action (home page: flood advert) instead of power off (`REPEATER_UI_HOLD_ACTIONS`); bold e-ink fonts (`EINK_BOLD_FONTS`) | upstream |
 | `head/cyd` | CYD ESP-NOW head (`variants/cyd_espnow_head`), ui-new head screens (compose, admin console, repeater picker, login, presets, settings, keyboard), head contact policy, BaseChatMesh hooks, NVS identity backup | observer-feed |
 | `head/freenove` | Freenove FNK0104N visual head (`variants/freenove_s3_35_head`, `ui-freenove/`), chats list/threads, relay-name store, UI test env, fonts with licences, screenshots | head/cyd |
+| `head/cyd-hmi` | The visual head's pages on the CYD: screen profile (`HMI_PROFILE_CYD`), strip renderer (320x40 bands, no PSRAM), CYD layouts, HEAD page in the HMI style, chats; keyboard with one mode key (abc / ABC / 123) where every touchable key is drawn; CYD uitest env; CYD screenshots | head/freenove |
 | `espnow-head` | The combined line used on the owner's devices, plus this document | all |
 
 Each branch builds and passes its host tests on its own; the commit messages
@@ -58,6 +59,7 @@ Windows include-path shortener commit for the ThinkNode M5 envs that
 `espnow/bridge-improvements` contains (needed to build those envs on
 Windows); skip it when both are pulled. `head/cyd` and `head/freenove` each
 carry an optional `docs/superpowers/` design/plan commit that can be dropped.
+`head/cyd-hmi` changes the shared keyboard for both heads (owner design).
 `docs/espnow-head/README.md` summarises the heads.
 
 ## Node kinds
@@ -110,7 +112,7 @@ last 15 minutes.
 |--------|------|--------|
 | ThinkNode M5 (ESP32-S3, SX1262) | LoRa repeater + ESP-NOW bridge + observer feed | tested on air |
 | Freenove FNK0104N (ESP32-S3, 3.5" ST77922 QSPI, touch) | visual head | tested on air |
-| CYD ESP32-2432S028 (ESP32, 2.8" ST7789, XPT2046 resistive touch) | head | tested on air |
+| CYD ESP32-2432S028 (ESP32, 2.8" ST7789, XPT2046 resistive touch) | visual head (same pages as the Freenove, 320x240) | tested on air; visual head tested on the device with the observer feed |
 | ESP32 DevKit (ESP32-D0WD) | ESP-NOW-only relay | tested on air |
 | M5Stack Cardputer ADV | companion; shares the NVS identity backup | build only for this work |
 | nRF52 boards (e.g. Heltec T114) | - | not supported: no WiFi, so no ESP-NOW. A future option is an ESP32 attached over UART as an ESP-NOW adapter. |
@@ -146,7 +148,7 @@ On ESP-NOW-only nodes: `set espnow.channel <1-13>` (reboot),
   Observer frames never use the bridge TX queue, are never retried, repeated
   or deduplicated, and are ignored by other bridges.
 - On ESP-NOW primary nodes observer frames are taken by the demux only when a
-  handler is registered (the Freenove head). Every other build passes all
+  handler is registered (the visual heads). Every other build passes all
   frames to MeshCore as before.
 - `espnow.repeat` defaults to 1 (send once, unchanged behaviour). OTA payloads
   are never repeated; copies stop while `radio.mode` disables transmit.
@@ -170,10 +172,37 @@ They are complementary; a repeater can run both where the build allows.
 
 ## What it looks like
 
-Freenove head, 480x320. The real screenshots are from a quiet area (few
+### CYD head, 320x240
+
+Real frames from the CYD (`CYD_ESPNOW_Head_uitest`), quiet area; chat
+contents are injected test messages, the login field holds masked test
+digits, node names are public adverts. No animations on the CYD; fewer
+panels (TELEMETRY without the SNR waterfall and ACTIVE NODES, four quick
+tiles on HOME, NODES without TYPE / KM).
+
+| | |
+|-|-|
+| ![CYD HOME](docs/espnow-head/images/cyd_home.png) HOME | ![CYD TELEMETRY](docs/espnow-head/images/cyd_telemetry.png) TELEMETRY |
+| ![CYD MAP](docs/espnow-head/images/cyd_map.png) MAP | ![CYD NODES](docs/espnow-head/images/cyd_nodes.png) NODES |
+| ![CYD node card](docs/espnow-head/images/cyd_node_card.png) Node card | ![CYD chats](docs/espnow-head/images/cyd_chats.png) Chats |
+| ![CYD compose](docs/espnow-head/images/cyd_compose_123.png) Compose, 123 mode | ![CYD login](docs/espnow-head/images/cyd_login.png) Login (masked) |
+
+How it fits a classic ESP32 without PSRAM: each frame is drawn into one
+320x40 RGB565 band buffer (25.6 KB) by replaying the page draw per band;
+a band whose pixels did not change is not pushed (idle = nothing pushed).
+At most 15 frames/s; a frame takes 43-94 ms (render + push) depending on the
+page. The model (64 nodes, 128 packets) lives in internal RAM; about 62 KB
+of heap stays free.
+
+The keyboard (both heads): one mode key cycles abc -> ABC -> 123 (phone
+layout `1234567890` / `-/:;()$&@` / `.,?!'"#`); `% ^ * + = _ ~ { } [ ] < > \ |`
+and the backtick are not on the screen keyboard.
+
+### Freenove head, 480x320
+
+The real screenshots are from a quiet area (few
 nodes); chat contents are injected test messages, passwords are masked, node
-names and positions come from public adverts. CYD screenshots will come with
-the CYD convergence work.
+names and positions come from public adverts.
 
 | | |
 |-|-|
@@ -183,7 +212,7 @@ the CYD convergence work.
 | ![Node card](docs/espnow-head/images/node_card.png) Node detail card | ![Chats](docs/espnow-head/images/chats.png) Chats list |
 | ![Thread](docs/espnow-head/images/chat_thread.png) Chat thread | ![Picker](docs/espnow-head/images/repeater_picker.png) Repeater picker, home repeater first |
 | ![Login](docs/espnow-head/images/login.png) Login (password masked) | ![Presets](docs/espnow-head/images/presets.png) Radio presets |
-| ![Keyboard](docs/espnow-head/images/keyboard_123.png) Keyboard, PC-style 123 page | |
+| ![Keyboard](docs/espnow-head/images/keyboard_123.png) Keyboard (outdated: the layout before the single mode key) | |
 
 ## Credits and licences
 
