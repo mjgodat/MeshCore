@@ -199,6 +199,16 @@ static void autoSelector() {
   // UDP lost while on UDP: back to ESP-NOW at once (nothing better)
   t += failover + 5000; assert(a.update(t, failover, true) && a.onUdp());
   t += 1000; assert(a.update(t, failover, false) && !a.onUdp());
+  // F6: UDP comes straight back with still no ESP-NOW vitals: no re-fail-over
+  // for 30 s (hysteresis both ways), then over again; no flapping in between.
+  const uint32_t back = t;
+  for (int i = 0; i < 29; ++i) { t += 1000; assert(!a.update(t, failover, i % 2 == 0) && !a.onUdp()); }
+  t = back + AutoSelector::kMinEspNowDwellMs; assert(a.update(t, failover, true) && a.onUdp());
+  // a UDP session toggling every second while ESP-NOW is dead switches at most
+  // once per 30 s
+  { AutoSelector f; uint32_t u = 0; f.begin(u); int switches = 0;
+    for (int i = 0; i < 600; ++i) { u += 1000; if (f.update(u, failover, i % 2 == 0)) ++switches; }
+    assert(switches <= 2 * 600 / 30 + 2); }
   // millis() wrap: fail-over timing is wrap-safe
   AutoSelector w; uint32_t u = 0xFFFFF000u; w.begin(u); w.noteEspNowVitals(u);
   u += 10000; assert(!w.update(u, failover, true));
@@ -214,20 +224,31 @@ static std::string frameOf(uint32_t id, bool vitals) {
 
 static void dedupe() {
   FrameDeduper d;
-  // the same record over ESP-NOW then UDP (any order, up to 16 apart) passes once
+  // the same record over ESP-NOW then UDP (any order, 3 apart) passes once
   for (uint32_t i = 0; i < 100; ++i) {
     const std::string f = frameOf(i, i % 5 == 0);
     assert(!d.duplicate((const uint8_t*)f.data(), f.size()));
     if (i >= 3) { const std::string g = frameOf(i - 3, (i - 3) % 5 == 0); assert(d.duplicate((const uint8_t*)g.data(), g.size())); }
   }
   assert(d.dropped() == 97);
+  // F7: realistic skew under load: one transport 40 frames (a full burst)
+  // behind the other, interleaved; every frame still passes exactly once.
+  { FrameDeduper k; int passed = 0;
+    for (uint32_t i = 0; i < 2000; ++i) {
+      const std::string a = frameOf(10000 + i, i % 7 == 0);
+      if (!k.duplicate((const uint8_t*)a.data(), a.size())) ++passed;
+      if (i >= 40) { const std::string b = frameOf(10000 + i - 40, (i - 40) % 7 == 0);
+                     if (!k.duplicate((const uint8_t*)b.data(), b.size())) ++passed; }
+    }
+    assert(passed == 2000); }
   // distinct records (different receive time or uptime) are never merged
   FrameDeduper e;
   for (uint32_t i = 0; i < 1000; ++i) { const std::string f = frameOf(i, false); assert(!e.duplicate((const uint8_t*)f.data(), f.size())); }
-  // a record repeated after more than 16 others is passed again (bounded memory)
+  // a record repeated after more than 64 others is passed again (bounded memory)
+  assert(FrameDeduper::kDepth == 64);
   const std::string first = frameOf(5000, false);
   assert(!e.duplicate((const uint8_t*)first.data(), first.size()));
-  for (uint32_t i = 0; i < 16; ++i) { const std::string f = frameOf(6000 + i, false); e.duplicate((const uint8_t*)f.data(), f.size()); }
+  for (uint32_t i = 0; i < 64; ++i) { const std::string f = frameOf(6000 + i, false); e.duplicate((const uint8_t*)f.data(), f.size()); }
   assert(!e.duplicate((const uint8_t*)first.data(), first.size()));
   assert(!e.duplicate(nullptr, 0));
   e.reset(); assert(!e.duplicate((const uint8_t*)first.data(), first.size()));
@@ -260,11 +281,18 @@ class HeadTransportWiringTests(unittest.TestCase):
         loop = method(self.radio, "void HeadLinkRadio::loop()")
         self.assertIn("if (!_link) return;", loop)
 
-    def test_station_joins_only_through_the_channel_policy(self):
-        self.assertIn("mesh::wifi::beginStation(_cfg.ssid, _cfg.password)", self.radio)
-        self.assertIn("mesh::wifi::enforceStationChannel()", self.radio)
-        self.assertNotIn("WiFi.begin(", self.radio)
-        self.assertNotIn("setAutoReconnect(true", self.radio)
+    def test_station_joins_only_through_the_channel_safe_async_join(self):
+        self.assertIn("_join.poll(_driver, now, _cfg.ssid, _cfg.password);", self.radio)
+        self.assertIn("_join(kDiagnoseEveryMs)", self.radio)
+        for blocking in ("beginStation(", "WiFi.begin(", "scanNetworks(", "setAutoReconnect(true"):
+            self.assertNotIn(blocking, self.radio)
+
+    def test_wifi_task_reads_the_mode_under_the_lock(self):
+        deliver = method(self.radio, "void HeadLinkRadio::deliverObserver(")
+        self.assertNotIn("_cfg.", deliver)
+        self.assertLess(deliver.index("portENTER_CRITICAL(&_mux);"), deliver.index("_rx_mode"))
+        apply = method(self.radio, "void HeadLinkRadio::apply()")
+        self.assertIn("_rx_mode = _cfg.mode;", apply)
 
     def test_secrets_never_logged(self):
         import re

@@ -23,6 +23,7 @@
 #include <helpers/esp32/ESPNOWRadio.h>
 #include <helpers/HeadTransport.h>
 #include <helpers/bridges/UDPBridgeProtocol.h>
+#include <helpers/StationJoin.h>
 #include <freertos/FreeRTOS.h>
 
 class HeadUdpLink;
@@ -62,6 +63,8 @@ private:
 
   static HeadLinkRadio* _instance;
   mesh::headlink::Config _cfg;
+  // The mode as the WiFi task sees it: written only under _mux (apply()).
+  mesh::headlink::Mode _rx_mode = mesh::headlink::Mode::EspNow;
   HeadUdpLink* _link = nullptr;
   bool _loaded = false;
   bool _tx_espnow = false;        // the current send went out on ESP-NOW
