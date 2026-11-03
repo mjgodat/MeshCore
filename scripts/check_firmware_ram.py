@@ -208,6 +208,13 @@ def requirements(platform, defines, target):
         zoom = integer(defines, "UI_ZOOM", 1)
         depth = integer(defines, "UI_BUFFER_COLOR_DEPTH", 8)
         display_heap = ((320 // zoom) * (240 // zoom) * depth + 7) // 8 + 1024
+    elif display == "FreenoveDisplay":
+        # Same internal-RAM LGFXDisplay sprite as the CYD head, of the
+        # 480x320 landscape layout / UI_ZOOM. Its two RGB332 framebuffers
+        # and the RGB565 row buffer are PSRAM allocations, never included.
+        zoom = integer(defines, "UI_ZOOM", 1)
+        depth = integer(defines, "UI_BUFFER_COLOR_DEPTH", 8)
+        display_heap = ((480 // zoom) * (320 // zoom) * depth + 7) // 8 + 1024
     elif display == "HeltecV4Display":
         if platform != "ESP32_PLATFORM" or not integer(defines, "HELTEC_V4_DISPLAY_UNIFIED", 0):
             raise ValueError("unified Heltec V4 display budget requires ESP32 and its unified recipe")
@@ -263,6 +270,11 @@ def requirements(platform, defines, target):
         # Two SPI hosts (VSPI panel, HSPI XPT2046 touch): LGFX DMA line
         # buffers, bus/touch driver state and the LEDC backlight channel.
         parts["display_dma_and_bus"] = 8192
+    if display == "FreenoveDisplay":
+        # St77922Panel: two 9,600-byte internal DMA bounce buffers, the
+        # SPI2 bus/device and its 8-deep transaction queue, I2C touch and
+        # the LEDC backlight channel.
+        parts["display_dma_and_bus"] = 24576
     if display == "HeltecV4Display":
         # Pinned Arduino-ESP32 2.x: the private I2C controller owns two bounded
         # 128-byte buffers, HAL/IDF locks, master state and transient command

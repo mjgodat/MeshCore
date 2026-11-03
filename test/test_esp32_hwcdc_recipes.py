@@ -73,7 +73,10 @@ UNCHANGED_COUNTS = {
     # Three shared SX1262/SX1268 Tenstar roles retain external UART.
     ("esp32-c3-devkitm-1", "uart"): 22,
     ("esp32-c6-devkitm-1", "hwcdc"): 16,
-    ("esp32-s3-devkitc-1", "hwcdc"): 22,
+    # 22 reviewed roles plus the three Freenove visual head envs
+    # (companion_usb / companion_bringup / uitest), which set
+    # ARDUINO_USB_CDC_ON_BOOT=1 on the board's native USB-JTAG port.
+    ("esp32-s3-devkitc-1", "hwcdc"): 25,
     # Original OPI and N16R2 Indicator LoRa repeaters retain their UART backend.
     ("esp32-s3-devkitc-1", "uart"): 57,
     ("esp32-s3-zero", "hwcdc"): 25,
@@ -182,7 +185,7 @@ def expected_other_transport(board, name):
     if len(choices) == 1:
         return next(iter(choices))
     if board == "esp32-s3-devkitc-1":
-        return "hwcdc" if name.startswith(("Heltec_Wireless_Tracker_", "RAK_3112_")) else "uart"
+        return "hwcdc" if name.startswith(("Heltec_Wireless_Tracker_", "RAK_3112_", "Freenove_S3_35_Head_")) else "uart"
     if board in ("heltec_v4_migrator", "seeed_xiao_esp32s3_migrator"):
         return "hwcdc" if name.endswith("_test_usb_diagnostic") else "uart"
     raise AssertionError(f"unreviewed ESP32 board: {board}")
@@ -293,7 +296,7 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                 self.assertEqual(self.sdk["hwcdc_primary_enabled"](row["env"]),
                                  row["kind"] == "hwcdc")
                 self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
-        expected = Counter({"hwcdc": 353, "uart": 125, "classic_uart": 80})
+        expected = Counter({"hwcdc": 356, "uart": 125, "classic_uart": 80})
         expected.update(kind for _, _, kind in USB_PARTITION_BRIDGES.values())
         self.assertEqual(counts, expected)
 

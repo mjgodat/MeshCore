@@ -14,6 +14,11 @@
 #ifndef LED_STATE_ON
   #define LED_STATE_ON 1
 #endif
+// Repeater head: messages as a conversation list and scrollable threads
+// (HeadChats.h) instead of one message at a time. Freenove head only.
+#ifndef UI_HEAD_CHAT_LIST
+  #define UI_HEAD_CHAT_LIST 0
+#endif
 
 #ifdef PIN_BUZZER
   #include <helpers/ui/buzzer.h>
@@ -113,6 +118,13 @@ class UITask : public AbstractUITask {
   // Compose/admin closed: a message preview held back while it was open,
   // else home.
   void closeHeadScreen();
+#endif
+#if UI_HEAD_CHAT_LIST
+  bool _compose_to_chats = false;   // compose opened from a chat: return there
+  static void onComposeSent(void* ctx, int channel_idx, const char* channel_name, const char* sender,
+                            const char* peer, const char* text);
+  // The chat screen's touch result (HeadChatsView::Action as int).
+  void chatAction(int action);
 #endif
 #if UI_POCKET_GUI
   mesh::ui::pocket::Settings _pocket_settings;

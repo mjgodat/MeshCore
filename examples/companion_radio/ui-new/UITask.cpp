@@ -30,6 +30,13 @@
 #include "HeadClock.h"
 static HeadClockFloor head_clock_floor(rtc_clock);
 #endif
+#if UI_HEAD_CHAT_LIST && !UI_REPEATER_HEAD
+  #error "UI_HEAD_CHAT_LIST needs UI_REPEATER_HEAD (touch compose)"
+#endif
+#if UI_HEAD_CHAT_LIST
+// Messages as a conversation list + scrollable threads (Freenove head).
+#include "HeadChats.h"
+#endif
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
 #include "HeadRadio.h"   // ESP-NOW-only heads: radio screens (any UI)
 #endif
@@ -2126,6 +2133,84 @@ public:
 #endif
   explicit MsgPreviewScreen(UITask* task)
       : _task(task), view_offset(0), channel_filter(CHANNEL_FILTER_ALL) {}
+#if UI_HEAD_CHAT_LIST
+ private:
+  // Conversation list + threads over `history` (no copy of the messages).
+  HeadChatsView<MessageHistory> _chats;
+
+ public:
+  using ChatView = HeadChatsView<MessageHistory>;
+
+ private:
+  static bool chatVisible(const MsgEntry& e) {
+    return mesh::ui::displayPowerPrefs().inbox != mesh::ui::DisplayInboxMode::Pending || e.queue_index >= 0;
+  }
+  static constexpr int kMaxChatContacts = 16;
+
+ public:
+  void chatsShowList() { _chats.showList(); }
+  // An incoming message while the chat screen is not showing: open its thread.
+  void chatsOpenNewest() {
+    const MsgEntry* e = history.newest(0);
+    if (e != nullptr) _chats.openThreadOf(*e);
+  }
+  int chatsTouch(bool touched, int x, int y, int width, int height) {
+    return static_cast<int>(_chats.handleTouch(touched, x, y, width, height));
+  }
+  int chatComposeChannel() const { return _chats.composeChannel(); }
+  const char* chatComposePeer() const { return _chats.composePeer(); }
+  void chatsDescribe(char* out, size_t size) const { _chats.describe(out, size); }
+  // The head's own post, shown in its thread ("You").
+  void addOwn(int channel_idx, const char* channel_name, const char* sender, const char* peer, const char* text) {
+    char origin[sizeof(MsgEntry::origin)];
+    if (channel_idx >= 0) snprintf(origin, sizeof(origin), "%s", sender != nullptr ? sender : "");
+    else snprintf(origin, sizeof(origin), "%s [you]", peer != nullptr ? peer : "");
+    history.add(companionMessageNowMillis(), channel_idx >= 0 ? channel_idx : CHANNEL_FILTER_DIRECT,
+                channel_idx >= 0 ? channel_name : nullptr, origin, text, -1, true);
+  }
+
+  int renderChats(DisplayDriver& display) {
+    int channels[MAX_GROUP_CHANNELS];
+    char channel_names[MAX_GROUP_CHANNELS][sizeof(ChannelDetails::name)];
+    const char* channel_ptrs[MAX_GROUP_CHANNELS];
+    int nch = 0;
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails details;
+      if (!the_mesh.getChannel(i, details) || details.name[0] == 0) continue;
+      channels[nch] = i;
+      StrHelper::strncpy(channel_names[nch], details.name, sizeof(channel_names[0]));
+      channel_ptrs[nch] = channel_names[nch];
+      nch++;
+    }
+    // Favourite chat contacts get a row before their first message (every
+    // other DM shows once it has messages; "New" reaches any contact).
+    char dm_names[kMaxChatContacts][sizeof(ContactInfo::name)];
+    const char* dm_ptrs[kMaxChatContacts];
+    int ndm = 0;
+    const int contacts = the_mesh.getNumContacts();
+    for (int i = 0; i < contacts && ndm < kMaxChatContacts; i++) {
+      ContactInfo c;
+      if (!the_mesh.getContactByIdx(MAX_ANON_CONTACTS + i, c) || c.type != ADV_TYPE_CHAT || c.name[0] == 0
+          || (c.flags & 1) == 0) continue;
+      StrHelper::strncpy(dm_names[ndm], c.name, sizeof(dm_names[0]));
+      dm_ptrs[ndm] = dm_names[ndm];
+      ndm++;
+    }
+    const HeadChatsView<MessageHistory>::Sources src = {channels, channel_ptrs, nch, dm_ptrs, ndm};
+    return _chats.render(display, history, src, companionMessageNowMillis(), display.isOn(), &chatVisible);
+  }
+
+  bool chatsKey(uint8_t key) {
+    using Action = HeadChatsView<MessageHistory>::Action;
+    Action a = Action::None;
+    if (key == KEY_NEXT || key == KEY_RIGHT || key == KEY_DOWN) a = _chats.handleKey(1);
+    else if (key == KEY_PREV || key == KEY_LEFT || key == KEY_UP) a = _chats.handleKey(-1);
+    else if (key == KEY_ENTER || key == KEY_CANCEL) a = _chats.handleKey(0);
+    else return false;
+    if (a == Action::Home) _task->gotoHomeScreen();
+    return true;
+  }
+#endif
 #if UI_POCKET_GUI
   MessageHistory& pocketHistory() { return history; }
   const MessageHistory& pocketHistory() const { return history; }
@@ -2251,6 +2336,9 @@ public:
   }
 
   int render(DisplayDriver& display) override {
+#if UI_HEAD_CHAT_LIST
+    return renderChats(display);
+#endif
     // Native larger panels retain their normal font and line metrics.
     // Leave the Indicator's scaled chrome unchanged.
     display.setTextSize(1);
@@ -2410,6 +2498,9 @@ public:
 
   bool handleInput(char c) override {
     const uint8_t key = static_cast<uint8_t>(c);
+#if UI_HEAD_CHAT_LIST
+    return chatsKey(key);
+#endif
     if (key == KEY_NEXT || key == KEY_RIGHT) {
       if (view_offset + 1 < filteredCount()) {
         ++view_offset;
@@ -2529,15 +2620,68 @@ void UITask::showAlert(const char* text, int duration_millis) {
 }
 
 void UITask::showMessages() {
+#if UI_HEAD_CHAT_LIST
+  static_cast<MsgPreviewScreen*>(msg_preview)->chatsShowList();
+#endif
   setCurrScreen(msg_preview);
 }
 
+#if UI_HEAD_CHAT_LIST
+void UITask::onComposeSent(void* ctx, int channel_idx, const char* channel_name, const char* sender,
+                           const char* peer, const char* text) {
+  UITask* task = static_cast<UITask*>(ctx);
+  if (task->msg_preview)
+    static_cast<MsgPreviewScreen*>(task->msg_preview)->addOwn(channel_idx, channel_name, sender, peer, text);
+}
+
+void UITask::chatAction(int action) {
+  using Action = MsgPreviewScreen::ChatView::Action;
+  MsgPreviewScreen* chats = static_cast<MsgPreviewScreen*>(msg_preview);
+  switch (static_cast<Action>(action)) {
+    case Action::Home:
+      gotoHomeScreen();
+      break;
+    case Action::Compose: {
+      if (!_display) break;
+      if (!compose) compose = new (std::nothrow) HeadComposeScreen(&UITask::onComposeClosed, this);
+      if (!compose) { showAlert("Compose: no memory", 1500); break; }
+      HeadComposeScreen* screen = static_cast<HeadComposeScreen*>(compose);
+      screen->setOnSent(&UITask::onComposeSent);
+      const int channel = chats->chatComposeChannel();
+      if (channel == MsgPreviewScreen::ChatView::kNoTarget) {
+        screen->open();
+      } else if (!screen->openFor(channel, chats->chatComposePeer())) {
+        // Never fall back to another destination for a reply.
+        showAlert(channel >= 0 ? "Channel not set up" : "No saved contact", 1500);
+        break;
+      }
+      _compose_to_chats = true;
+      setCurrScreen(compose);
+      break;
+    }
+    default:
+      break;
+  }
+}
+#endif
 
 #if UI_REPEATER_HEAD
 void UITask::closeHeadScreen() {
+#if UI_HEAD_CHAT_LIST
+  if (_compose_to_chats) {
+    // Back to the conversation the compose was opened from.
+    _compose_to_chats = false;
+    _deferred_msg_preview = false;
+    setCurrScreen(msg_preview);
+    return;
+  }
+#endif
   if (_deferred_msg_preview && !hasConnection()
       && static_cast<MsgPreviewScreen*>(msg_preview)->hasMessages()) {
     _deferred_msg_preview = false;
+#if UI_HEAD_CHAT_LIST
+    static_cast<MsgPreviewScreen*>(msg_preview)->chatsOpenNewest();
+#endif
     setCurrScreen(msg_preview);
   } else {
     _deferred_msg_preview = false;
@@ -2555,6 +2699,10 @@ void UITask::showCompose() {
   if (!_display) return;
   if (!compose) compose = new (std::nothrow) HeadComposeScreen(&UITask::onComposeClosed, this);
   if (!compose) { showAlert("Compose: no memory", 1500); return; }
+#if UI_HEAD_CHAT_LIST
+  _compose_to_chats = false;
+  static_cast<HeadComposeScreen*>(compose)->setOnSent(&UITask::onComposeSent);
+#endif
   static_cast<HeadComposeScreen*>(compose)->open();
   setCurrScreen(compose);
 }
@@ -2568,6 +2716,9 @@ void UITask::showAdmin() {
   if (!_display) return;
   if (!admin) admin = new (std::nothrow) HeadAdminScreen(&UITask::onAdminClosed, this);
   if (!admin) { showAlert("Admin: no memory", 1500); return; }
+#if UI_HEAD_CHAT_LIST
+  _compose_to_chats = false;
+#endif
   static_cast<HeadAdminScreen*>(admin)->open();
   setCurrScreen(admin);
 }
@@ -2597,7 +2748,13 @@ void UITask::describeHead(char* out, size_t size) const {
       : (msg_preview && curr == msg_preview) ? "messages" : "other";
   char admin_state[120] = "-";
   if (admin) static_cast<HeadAdminScreen*>(admin)->describe(admin_state, sizeof(admin_state));
+#if UI_HEAD_CHAT_LIST
+  char chats[64] = "-";
+  if (msg_preview) static_cast<const MsgPreviewScreen*>(msg_preview)->chatsDescribe(chats, sizeof(chats));
+  snprintf(out, size, "screen=%s admin[%s] chats[%s]", screen, admin_state, chats);
+#else
   snprintf(out, size, "screen=%s admin[%s]", screen, admin_state);
+#endif
 }
 #endif
 
@@ -2762,6 +2919,11 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
   }
 #endif
   else {
+#if UI_HEAD_CHAT_LIST
+    // Arriving from another screen: the new message's thread. Already on
+    // the chat screen: stay where the reader is (the list / thread updates).
+    if (curr != msg_preview) static_cast<MsgPreviewScreen*>(msg_preview)->chatsOpenNewest();
+#endif
     setCurrScreen(msg_preview);
   }
 
@@ -3097,10 +3259,25 @@ void UITask::loop() {
     bool touched = _display->getTouch(&touch_x, &touch_y);
 #if UI_REPEATER_HEAD
     // The compose keyboard needs raw positions, not prev/select/next zones.
+#if UI_HEAD_CHAT_LIST
+    // The chat screen scrolls by drag and taps on release: raw touches too.
+    const bool chat_screen = !_raw_touch_hold && curr == msg_preview;
+#else
+    const bool chat_screen = false;
+#endif
     const bool raw_touch_screen = _display->isOn()
-        && ((compose && curr == compose) || (admin && curr == admin));
+        && ((compose && curr == compose) || (admin && curr == admin) || chat_screen);
     if (raw_touch_screen) {
-      const bool changed = curr == compose
+      bool changed = false;
+#if UI_HEAD_CHAT_LIST
+      if (chat_screen) {
+        const int action = static_cast<MsgPreviewScreen*>(msg_preview)->chatsTouch(
+            touched, touch_x, touch_y, _display->width(), _display->height());
+        changed = action != static_cast<int>(MsgPreviewScreen::ChatView::Action::None);
+        chatAction(action);
+      } else
+#endif
+      changed = curr == compose
           ? static_cast<HeadComposeScreen*>(compose)->handleTouch(
                 touched, touch_x, touch_y, _display->width())
           : static_cast<HeadAdminScreen*>(admin)->handleTouch(
@@ -3111,7 +3288,7 @@ void UITask::loop() {
       }
       // A press that closed the screen (compose X / Send, admin Back) is
       // not also a tap on the home page underneath (it would re-open it).
-      if (touched && !((compose && curr == compose) || (admin && curr == admin))) {
+      if (touched && !((compose && curr == compose) || (admin && curr == admin) || chat_screen)) {
         _raw_touch_hold = true;
       }
     } else {

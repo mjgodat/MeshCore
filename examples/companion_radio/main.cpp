@@ -287,6 +287,11 @@ static bool isNetworkTerminalActive();
   #include "UITask.h"
   UITask ui_task(&board, &interface_manager);
 #endif
+#if defined(FREENOVE_VISUAL_HEAD) && FREENOVE_VISUAL_HEAD && !FREENOVE_BRINGUP
+  // Freenove visual head pages; the companion UI above is its HEAD page.
+  #include "FreenoveUITask.h"
+  FreenoveUITask freenove_pages(display);
+#endif
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
@@ -3729,6 +3734,10 @@ void setup() {
   // enables the SoftDevice; a late first Serial.begin() can leave that enable
   // path in an invalid state on native-USB boards such as the T1000-E.
   Serial.begin(115200);
+#if defined(FREENOVE_BOOT_BREADCRUMB) && FREENOVE_BOOT_BREADCRUMB
+  // First words over USB, before any storage or radio work (variant-local).
+  freenove::bootBreadcrumb();
+#endif
   mesh::wireless::control().begin(companion_wireless);
 #if !MESH_ESP32_HWCDC_SESSION_GUARD
   mesh::prepareUsbLoggingPort();
@@ -4363,6 +4372,9 @@ void setup() {
 #endif
   ui_task.begin(disp, &sensors, the_mesh.getNodePrefs());  // still want to pass this in as dependency, as prefs might be moved
 #endif
+#if defined(FREENOVE_VISUAL_HEAD) && FREENOVE_VISUAL_HEAD && !FREENOVE_BRINGUP
+  if (disp != NULL) freenove_pages.begin(the_mesh.self_id.pub_key);
+#endif
 #if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI) && defined(PIN_USER_BTN)
   beginWioE5HeadlessControls();
 #endif
@@ -4532,6 +4544,17 @@ void loop() {
   #else
   ui_task.loop();
   #endif
+#endif
+#if defined(FREENOVE_VISUAL_HEAD) && FREENOVE_VISUAL_HEAD && !FREENOVE_BRINGUP
+  // HOME quick controls (advert, admin console) run on this loop.
+  freenove_pages.serviceUiLoop();
+#endif
+#if defined(FREENOVE_UITEST) && FREENOVE_UITEST
+  {
+    // USB test console (UiTestConsole.cpp) instead of the companion protocol.
+    extern void freenoveUiTestLoop();
+    freenoveUiTestLoop();
+  }
 #endif
 #if defined(COMPANION_PAIRING_UI_HIL)
   if (!morse_timing) companionPairingUiHilProbe();

@@ -60,6 +60,10 @@
 #include "CompanionBluetooth.h"
 #include "CompanionWireless.h"
 #include "CompanionRetry.h"
+#if defined(FREENOVE_VISUAL_HEAD) && FREENOVE_VISUAL_HEAD && !FREENOVE_BRINGUP
+// Visual head (ui-freenove/FreenoveUITask.cpp): packets this head receives.
+void freenoveHeadReceived(const uint8_t* raw, int len);
+#endif
 #if defined(MESH_SOAK_DIAGNOSTICS)
 #include "../../tools/hil/S3SoakDiagnostics.h"
 #endif
@@ -853,6 +857,11 @@ const char* MyMesh::getLogDateTime() {
 #endif
 
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+#if defined(FREENOVE_VISUAL_HEAD) && FREENOVE_VISUAL_HEAD && !FREENOVE_BRINGUP
+  // Packets the head receives itself (ESP-NOW bridge) feed the HOME page;
+  // a bounded copy, never blocks. The model drops observer duplicates.
+  freenoveHeadReceived(raw, len);
+#endif
 #if MESH_PACKET_LOGGING
   if (mesh::isUsbPacketLoggingAllowed()) {
     mesh::SerialLogLine<> line;
