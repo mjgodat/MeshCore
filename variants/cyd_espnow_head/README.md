@@ -12,7 +12,27 @@ Board: ESP32-2432S028 "Cheap Yellow Display" (ESP32-D0WD, 4 MB, no PSRAM).
 
 | Env | What |
 |-----|------|
-| `CYD_ESPNOW_Head_companion_usb` | MeshCore only, USB terminal |
+| `CYD_ESPNOW_Head_companion_usb` | Visual head (HOME / TELEMETRY / MAP / NODES / HEAD), USB terminal |
+| `CYD_ESPNOW_Head_uitest` | The same with a serial test console (921600 baud) instead of the companion protocol; not for daily use |
+
+## Visual head
+
+The Freenove head's pages on the 2.8" screen (`HMI_PROFILE_CYD`, see
+`docs/espnow-head/README.md`): HOME, TELEMETRY, MAP, NODES and HEAD (the
+companion screens in the HMI style, chats list and threads), a 30-row tab bar
+and swipes between pages. Fed by the repeater's observer feed
+(`set espnow.observer on`) and by what the head receives itself.
+
+- No PSRAM: frames are drawn in 320x40 bands (25.6 KB) by replaying the page
+  draw per band; only bands that changed are pushed. No animations, at most
+  15 frames/s, nothing pushed while idle.
+- Model in internal RAM: 64 nodes, 128 packets (`HMI_MODEL_NODES`,
+  `HMI_MODEL_FEED`).
+- Touch: the saved XPT2046 calibration (hold BOOT at power-up to redo it).
+  The page task reads the touch controller and relays HEAD-page touches to
+  the companion UI.
+- HEAD page: the companion UI at 160x105 logical (2x), keyboards sized so all
+  four rows fit, settings / picker lists of 5 rows.
 
 ## Repeater settings
 
