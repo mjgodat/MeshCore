@@ -292,6 +292,14 @@ void ESPNowBridge::begin() {
     }
   }
 
+  // Range: transmit at the radio's maximum (20 dBm; the SDK clamps per chip).
+  // Staying awake for heads and relays is handled above: a dedicated bridge
+  // disables modem sleep (WIFI_PS_NONE), and the repeater's manual light
+  // sleep is vetoed while the WiFi driver runs (LightSleepPolicy).
+  if (esp_wifi_set_max_tx_power(80) != ESP_OK) {
+    BRIDGE_DEBUG_PRINTLN("Could not raise ESP-NOW TX power\n");
+  }
+
   // Update bridge state
   _initialized = true;
   mesh::wifi::setLongRangeOwner(mesh::wifi::kLongRangeBridgeOwner, raw_format);
@@ -634,6 +642,7 @@ void ESPNowBridge::queueReceivedFrame(const uint8_t *mac, const uint8_t *data,
     portEXIT_CRITICAL(&_rx_mux);
     return;
   }
+  if (mac != nullptr) _nodes.note(mac, millis());
 
   // Wrapped deployments share the WiFi channel with unrelated ESP-NOW users.
   // Reject obvious foreign traffic before it can occupy a queue slot.
@@ -946,14 +955,30 @@ void ESPNowBridge::formatStatus(char* reply, size_t reply_size) {
       : (!channel_ok || !mode_ok || !(mode & WIFI_MODE_STA)) ? "driver-error"
       : (channel != _prefs->bridge_channel) ? "channel-mismatch" : "ready";
   snprintf(reply, reply_size,
-      "> %s ch=%u/%u fmt=%s src=%s wifi=%s mode=%d ps=%d proto=%02X q=%u/%u last=%s/%ld",
+      "> %s ch=%u/%u fmt=%s src=%s wifi=%s mode=%d ps=%d awake=%d proto=%02X q=%u/%u last=%s/%ld",
       state, (unsigned)_prefs->bridge_channel, (unsigned)(channel_ok ? channel : 0),
       mesh::bridge::espNowFormatName(_initialized ? _active_format : _prefs->bridge_format),
       _prefs->bridge_pkt_src ? "rx" : "tx",
       (mesh::wireless::control().enabled() & mesh::wireless::WiFi) ? "on" : "off",
       mode_ok ? static_cast<int>(mode) : -1, ps_ok ? static_cast<int>(power_save) : -1,
-      (unsigned)protocols, (unsigned)rx_depth, (unsigned)tx_depth,
+      (_initialized && ps_ok && power_save == WIFI_PS_NONE) ? 1 : 0, (unsigned)protocols, (unsigned)rx_depth, (unsigned)tx_depth,
       mesh::bridge::diag::stageName(stats.error.stage), (long)stats.error.code);
+}
+
+uint8_t ESPNowBridge::activeNodeCount() {
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&_rx_mux);
+  const uint8_t count = _nodes.activeCount(now);
+  portEXIT_CRITICAL(&_rx_mux);
+  return count;
+}
+
+void ESPNowBridge::formatNodes(char* reply, size_t reply_size) {
+  mesh::bridge::ESPNowNodeTable snapshot;
+  portENTER_CRITICAL(&_rx_mux);
+  snapshot = _nodes;
+  portEXIT_CRITICAL(&_rx_mux);
+  snapshot.format(reply, reply_size, millis());
 }
 
 void ESPNowBridge::formatStats(const char* page, char* reply, size_t reply_size) {

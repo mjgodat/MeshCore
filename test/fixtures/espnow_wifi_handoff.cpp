@@ -45,6 +45,8 @@ int esp_wifi_set_ps(wifi_ps_type_t value) {
   if (!sdk_started || failure==19) return -1;
   wifi_ps=value; return ESP_OK;
 }
+// The bridge raises TX power best-effort; its result never changes startup.
+int esp_wifi_set_max_tx_power(int8_t) { return sdk_started ? ESP_OK : -1; }
 namespace mesh { namespace bridge {
 bool peer_settings_ready=true;
 uint8_t configured_peer[6]={255,255,255,255,255,255};

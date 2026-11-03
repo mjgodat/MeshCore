@@ -77,7 +77,9 @@ UNCHANGED_COUNTS = {
     # Original OPI and N16R2 Indicator LoRa repeaters retain their UART backend.
     ("esp32-s3-devkitc-1", "uart"): 57,
     ("esp32-s3-zero", "hwcdc"): 25,
-    ("esp32dev", "classic_uart"): 5,
+    # 5 reviewed roles plus this branch's ESP32 DevKit ESP-NOW repeater
+    # (classic ESP32, external UART bridge).
+    ("esp32dev", "classic_uart"): 6,
     # Two shared E22 and seven Meshadventurer roles retain classic UART.
     ("esp32doit-devkit-v1", "classic_uart"): 28,
     ("esp32s3box", "hwcdc"): 7,
@@ -291,7 +293,7 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                 self.assertEqual(self.sdk["hwcdc_primary_enabled"](row["env"]),
                                  row["kind"] == "hwcdc")
                 self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
-        expected = Counter({"hwcdc": 353, "uart": 125, "classic_uart": 78})
+        expected = Counter({"hwcdc": 353, "uart": 125, "classic_uart": 79})
         expected.update(kind for _, _, kind in USB_PARTITION_BRIDGES.values())
         self.assertEqual(counts, expected)
 

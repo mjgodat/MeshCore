@@ -8,6 +8,7 @@
 #include "helpers/bridges/BridgeBase.h"
 #include "helpers/bridges/ESPNowBridgeFormat.h"
 #include "helpers/bridges/ESPNowBridgeDiagnostics.h"
+#include "helpers/bridges/ESPNowNodeTable.h"
 #include <atomic>
 
 #ifdef WITH_ESPNOW_BRIDGE
@@ -133,6 +134,8 @@ private:
 
   /** Raw-mode fragment assemblies, keyed by source MAC. */
   mesh::espnow::ESPNowRawReassembler _raw_reassembler;
+  /** Directly heard ESP-NOW stations; guarded by _rx_mux. */
+  mesh::bridge::ESPNowNodeTable _nodes;
 
   // Snapshotted by begin() and immutable until end(), so callbacks and sends
   // never observe a partially applied preference change.
@@ -252,6 +255,9 @@ public:
   // All output is bounded and generated on the main loop, never a callback.
   void formatStatus(char* reply, size_t reply_size);
   void formatStats(const char* page, char* reply, size_t reply_size);
+  // ESP-NOW stations heard directly in the last 15 minutes.
+  uint8_t activeNodeCount();
+  void formatNodes(char* reply, size_t reply_size);
   bool sendTest(uint32_t nonce);
   void resetStats();
 };
