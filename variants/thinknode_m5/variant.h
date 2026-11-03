@@ -19,6 +19,7 @@
 #define PIN_DISPLAY_RST                (41)
 #define PIN_DISPLAY_BUSY               (42)
 #define EXP_PIN_BACKLIGHT              (5)
+#define EXP_PIN_HW_VERSION             (7)   // strap: HIGH = v2.0, LOW = v1.0
 #define EXP_PIN_POWER                  (4)
 
 #define PIN_GPS_EN                      (11)

@@ -12,8 +12,16 @@ void ThinknodeM5Board::begin() {
     expander.digitalWrite(EXP_PIN_BACKLIGHT, LOW);
     expander.digitalWrite(EXP_PIN_LED, LOW);
 
+    // Hardware revision strap (expander IO7): HIGH = v2.0 (AG3352 GPS),
+    // LOW = v1.0 (L76K). Sample a few times; the strap is a weak pull.
+    expander.pinMode(EXP_PIN_HW_VERSION, INPUT);
+    delay(2);
+    uint8_t high = 0;
+    for (uint8_t i = 0; i < 10; i++) high += expander.digitalRead(EXP_PIN_HW_VERSION) == HIGH;
+    _hw_v2 = high >= 3;
+
 #ifdef PIN_GPS_SWITCH
-    pinMode(PIN_GPS_SWITCH, INPUT);
+    pinMode(gpsSwitchPin(), INPUT);
 #endif
 
     ESP32Board::begin();
