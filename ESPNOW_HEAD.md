@@ -156,6 +156,13 @@ in separately; nothing changes for an owner who never sets these.
 Full reference, wire format and owner test plan:
 [docs/espnow-head/udp-transport.md](docs/espnow-head/udp-transport.md).
 
+> **Before pairing a head over UDP, set a `bridge.secret` on the repeater
+> that is not its admin password.** The head keeps the secret unencrypted
+> in its NVS. To rotate it: `set bridge.secret` on the repeater, then
+> `set udp.secret` on every UDP head (and `bridge.secret` on any bridge using
+> `wrapped` format) to the same value; steps in
+> [udp-transport.md](docs/espnow-head/udp-transport.md#rotating-bridgesecret).
+
 | Side | Setting | Values (default first) |
 |------|---------|------------------------|
 | Repeater | `observer on\|off` | `off`; the same switch as `espnow.observer` |
@@ -177,7 +184,13 @@ Full reference, wire format and owner test plan:
   (`udp wrong-channel (AP on ch N)`, orange Link page); `both` / `auto`
   (head) and `observer.transport both` (repeater) are refused while the
   access point is known to be elsewhere, with the fix in the reply: move the
-  router to the ESP-NOW channel, or move every ESP-NOW node.
+  router to the ESP-NOW channel, or move every ESP-NOW node. If the router
+  changes channel while joined, the repeater and the heads disconnect from
+  WiFi at once and pause UDP (`ap-moved-off-espnow-channel`) instead of
+  following it; they rejoin when it is back. Pin the router's channel.
+- **Never blocks**: joining is an asynchronous scan of the ESP-NOW channel
+  plus WiFi's asynchronous join; retries back off 15 s to 2 min, so LoRa
+  receive is never held up by WiFi.
 - **Pairing is manual**: the repeater lists the head as `udp.peer.N`
   (head IP from `get transport`), the head stores the repeater's IP:port and
   `bridge.secret`; set `bridge.source tx` and `udp.enabled on` on the
