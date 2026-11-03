@@ -117,6 +117,8 @@ last 15 minutes.
 | M5Stack Cardputer ADV | companion; shares the NVS identity backup | build only for this work |
 | nRF52 boards (e.g. Heltec T114) | - | not supported: no WiFi, so no ESP-NOW. A future option is an ESP32 attached over UART as an ESP-NOW adapter. |
 
+Build status of the bridge and observer feed on every ESP32-family repeater env (59 of 68 build; build-checked only, on-air verified: ThinkNode M5): [docs/espnow-head/board-matrix.md](docs/espnow-head/board-matrix.md).
+
 ## CLI
 
 On the bridge repeater (`docs/cli_commands.md` has the full text):
