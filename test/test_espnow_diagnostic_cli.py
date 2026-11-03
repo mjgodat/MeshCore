@@ -30,7 +30,8 @@ class EspNowDiagnosticCliTests(unittest.TestCase):
         header = (ROOT / "src/helpers/CommonCLI.h").read_text(encoding="ascii")
         body = extract_braced(source, "bool CommonCLI::handleEspNowDiagnosticCommand(")
         defaults = "\n".join(extract_braced(header, signature) for signature in (
-            "virtual void formatEspNowStatus(", "virtual void formatEspNowStats(",
+            "virtual void formatEspNowStatus(", "virtual void formatEspNowNodes(",
+            "virtual void formatEspNowStats(",
             "virtual bool sendEspNowTest(", "virtual bool resetEspNowStats("))
         self.assertIn("if (handleEspNowDiagnosticCommand(sender_timestamp, command, reply)) return;", source)
         self.compile_run(r'''
@@ -87,7 +88,7 @@ int main() {
   };
   assert(command("get espnow.status", 77));
   assert(callbacks.statuses == 1 && callbacks.capacity == 157);
-  for (const char* page : {"", "mac", "rx", "tx", "drops", "test"}) {
+  for (const char* page : {"", "mac", "rx", "tx", "drops", "test", "obs"}) {
     const std::string text = std::string("get espnow.stats") + (*page ? " " : "") + page;
     assert(command(text.c_str(), 77));
     assert(callbacks.page == page && callbacks.capacity == 157);
@@ -113,7 +114,7 @@ int main() {
     assert(strncmp(reply, "Error:", 6) == 0 && callbacks.count() == before);
   }
   assert(command("get espnow.stats unknown"));
-  assert(strstr(reply, "[mac|rx|tx|drops|test]"));
+  assert(strstr(reply, "[mac|rx|tx|drops|test|obs]"));
   for (const char* text : {"espnowtest", "espnowx test", "get espnow.enabled", "get repeat"}) {
     const int before = callbacks.count();
     assert(!command(text));
@@ -166,6 +167,7 @@ int main() {
 #include <cstring>
 struct Base {
   virtual void formatEspNowStatus(char*, size_t) {}
+  virtual void formatEspNowNodes(char*, size_t) {}
   virtual void formatEspNowStats(const char*, char*, size_t) {}
   virtual bool sendEspNowTest(uint32_t) { return false; }
   virtual bool resetEspNowStats() { return false; }
@@ -174,6 +176,7 @@ struct ESPNowBridge {
   int calls = 0; uint32_t nonce = 0;
   void formatStatus(char* r, size_t cap) { ++calls; snprintf(r, cap, "status"); }
   void formatStats(const char* page, char* r, size_t cap) { ++calls; assert(strcmp(page,"rx")==0); snprintf(r, cap, "rx"); }
+  void formatNodes(char* r, size_t cap) { ++calls; snprintf(r, cap, "nodes"); }
   bool sendTest(uint32_t n) { ++calls; nonce = n; return true; }
   void resetStats() { ++calls; }
 };

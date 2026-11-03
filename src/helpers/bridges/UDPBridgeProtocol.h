@@ -12,7 +12,13 @@ static constexpr size_t HEADER_SIZE = 28;
 static constexpr size_t TAG_SIZE = 16;
 static constexpr size_t MAX_PAYLOAD = 255;
 static constexpr size_t MAX_FRAME = HEADER_SIZE + MAX_PAYLOAD + TAG_SIZE;
-enum class Kind : uint8_t { Hello = 1, Challenge = 2, Proof = 3, Mesh = 4, Probe = 5 };
+// Observer (6) carries one ObserverFrame.h frame, repeater -> visual head,
+// and only to a peer whose Subscribe (7, payload 1 byte: 1 on / 0 off) is
+// current. Older bridges reject both kinds as malformed, so a head never
+// receives observer frames from a repeater that cannot send them, and a
+// repeater never sends them to a peer that did not ask.
+enum class Kind : uint8_t { Hello = 1, Challenge = 2, Proof = 3, Mesh = 4, Probe = 5,
+                            Observer = 6, Subscribe = 7 };
 using Authenticate = bool (*)(void*, const uint8_t*, size_t, uint8_t digest[32]);
 struct Frame {
   Kind kind = Kind::Hello;
@@ -37,6 +43,8 @@ inline bool validShape(const Frame& f) {
     case Kind::Challenge: case Kind::Proof: return f.recipient && f.length == 8 && get64(f.payload);
     case Kind::Mesh: return f.recipient && f.length >= 2;
     case Kind::Probe: return f.recipient && f.length == 4;
+    case Kind::Observer: return f.recipient && f.length >= 6;
+    case Kind::Subscribe: return f.recipient && f.length == 1 && f.payload[0] <= 1;
     default: return false;
   }
 }

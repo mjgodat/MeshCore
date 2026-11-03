@@ -4,6 +4,7 @@
 #include "helpers/bridges/BridgeBase.h"
 #include "helpers/bridges/UDPBridgeProtocol.h"
 #include "helpers/UDPBridgePrefs.h"
+#include "helpers/bridges/ObserverRateLimiter.h"
 
 // All methods run on the mesh loop. No WiFi callbacks own packet memory.
 // Network ownership belongs to the role; this class never starts/stops WiFi.
@@ -22,6 +23,16 @@ public:
   void formatStats(const char* page, char* out, size_t capacity) const;
   bool sendTest(uint8_t peer_index, uint32_t nonce);
   void resetStats();
+  // observer.transport udp|both: frames for the peers that subscribed (a
+  // visual head sends Subscribe every 20 s; a subscription lapses after 60 s
+  // or when the peer's session changes). Mesh frames always go first.
+  // The outbox (~1 KB) is allocated on the first subscription, so a bridge
+  // without visual heads keeps its 3072-byte object budget.
+  bool ensureObserverOutbox();
+  mesh::observer::Outbox& observerOutbox() { return *_observer; }  // after ensureObserverOutbox()
+  bool observerMeshPending() const { return _tx_mask != 0; }
+  uint8_t observerSubscribers() const;
+  void discardObserverFrames() { if (_observer) _observer->clear(); }
 
 private:
   const mesh::bridge::udp::Prefs* _settings;
@@ -43,6 +54,9 @@ private:
   // One verified receive slot survives packet-pool pressure; socket ingress
   // stops until it drains. No packet allocation for probes or invalid frames.
   uint8_t _rx_payload[mesh::bridge::udp::MAX_PAYLOAD]{};
+  mesh::observer::Outbox* _observer = nullptr;
+  uint32_t _observer_until[mesh::bridge::udp::MAX_PEERS]{};  // 0 = not subscribed
+  uint32_t _observer_peer_sends = 0, _observer_peer_fails = 0;
   uint16_t _rx_length = 0;
   uint8_t _rx_peer = 0;
   struct Stats {
@@ -69,6 +83,8 @@ private:
   void drainReceive();
   void pumpTransmit();
   void pumpHello();
+  void pumpObserver();
+  uint8_t observerMask() const;
   void emitDebug();
   void note(uint32_t& value);
   void error(int code);

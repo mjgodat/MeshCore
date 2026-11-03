@@ -3589,10 +3589,11 @@ bool CommonCLI::handleEspNowDiagnosticCommand(uint32_t sender_timestamp,
     if (*page == 0) {
       _callbacks->formatEspNowStats("", reply, capacity);
     } else if (strcmp(page, " mac") == 0 || strcmp(page, " rx") == 0 || strcmp(page, " tx") == 0
-               || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0) {
+               || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0
+               || strcmp(page, " obs") == 0) {
       _callbacks->formatEspNowStats(page + 1, reply, capacity);
     } else {
-      mesh::cli::formatError(reply, capacity, "use get espnow.stats [mac|rx|tx|drops|test]");
+      mesh::cli::formatError(reply, capacity, "use get espnow.stats [mac|rx|tx|drops|test|obs]");
     }
     return true;
   }
@@ -3642,9 +3643,10 @@ bool CommonCLI::handleUDPBridgeCommand(uint32_t sender_timestamp,
       const char* page = key + 5;
       if (*page == 0) _callbacks->formatUDPBridgeStats("", reply, capacity);
       else if (strcmp(page, " rx") == 0 || strcmp(page, " tx") == 0
-          || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0)
+          || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0
+          || strcmp(page, " obs") == 0)
         _callbacks->formatUDPBridgeStats(page + 1, reply, capacity);
-      else mesh::cli::formatError(reply, capacity, "use get udp.stats [rx|tx|drops|test]");
+      else mesh::cli::formatError(reply, capacity, "use get udp.stats [rx|tx|drops|test|obs]");
       return true;
     }
     const Prefs* current = _callbacks->getUDPBridgePrefs();
@@ -3738,7 +3740,11 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #endif
 #if defined(MESH_ESPNOW_OBSERVER_SETTINGS)
     // Reached remotely only by full admins: not in the manager allow lists.
-    if (mesh::espnow::handleEspNowObserverCommand(command, reply, 157)) return;
+    {
+      mesh::espnow::ObserverRuntime observer_runtime;
+      _callbacks->getObserverRuntime(observer_runtime);
+      if (mesh::espnow::handleEspNowObserverCommand(command, reply, 157, &observer_runtime)) return;
+    }
 #endif
 #if defined(WITH_ESPNOW_BRIDGE)
     if (handleEspNowPeerCommand(command, reply)) return;
@@ -3770,8 +3776,20 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #if MESH_ENABLE_TX_BEACONS
     if (handleBeaconCommand(command, reply, 157)) return;
 #endif
+#if defined(STM32_PLATFORM) && defined(STM32WLxx) && defined(USE_STM32WL) \
+    && !defined(WITH_WEBCONFIG) && !defined(WITH_MQTT_BRIDGE) \
+    && !defined(WITH_UDP_BRIDGE) && !defined(WITH_ESPNOW_BRIDGE) \
+    && !defined(WITH_BRIDGE) && !defined(ETHERNET_ENABLED) \
+    && !defined(BLE_PIN_CODE) && !defined(WIFI_SSID) \
+    && !MESH_ENABLE_EMERGENCY_POWER \
+    && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW)
+    // The integrated STM32WL target has no 2.4 GHz services. Keep the same
+    // unsupported-command replies without retaining the state machine.
+    if (mesh::wireless::handleNoServices(command, reply, 160)) return;
+#else
     if (mesh::wireless::control().handle(command, reply, 160, millis(),
                                        _callbacks->wirelessCommandSource(sender_timestamp))) return;
+#endif
     // Infrastructure callers can already have reflected a three-byte CLI
     // request prefix into the same 160-byte reply. Reserve it for bulk pages.
 #if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX

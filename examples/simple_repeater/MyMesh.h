@@ -284,7 +284,6 @@ struct NeighbourInfo {
 #define CLOCK_SYNC_PATH_ID_SIZE             8
 #define CLOCK_SYNC_STARTUP_DELAY_MILLIS     (30ULL * 60ULL * 1000ULL)
 #define CLOCK_SYNC_RETRY_INTERVAL_MILLIS    (30ULL * 60ULL * 1000ULL)
-#define CLOCK_SYNC_RESYNC_INTERVAL_MILLIS   (7ULL * 24ULL * 60ULL * 60ULL * 1000ULL)
 #define CLOCK_SYNC_SAMPLE_MAX_AGE_MILLIS    (2UL * 60UL * 60UL * 1000UL)
 #define CLOCK_SYNC_CONSENSUS_WINDOW_SECONDS 600UL
 #define CLOCK_SYNC_DRIFT_MIN_SECONDS        30UL
@@ -1018,9 +1017,31 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
     uint8_t sf, cr, preset_slot;
     bool started;
   } _observer_window = {};
+  // observer.transport: one shared rate limiter, one outbox per transport.
+  struct EspNowObserverSink : mesh::observer::FanoutSink {
+    MyMesh* self = nullptr;
+    bool observerActive() const override;
+    bool observerMeshPending() const override;
+    mesh::observer::Outbox& observerOutbox() override;
+  } _observer_espnow_sink;
+#ifdef WITH_UDP_BRIDGE
+  struct UdpObserverSink : mesh::observer::FanoutSink {
+    MyMesh* self = nullptr;
+    bool observerActive() const override;
+    bool observerMeshPending() const override;
+    mesh::observer::Outbox& observerOutbox() override;
+  } _observer_udp_sink;
+#endif
+  mesh::observer::Fanout _observer_fanout;
+  void offerObserverFrame(const uint8_t* frame, size_t len);
+  bool observerFeedActive();
+  static void describeObserverTransport(void* ctx, char* out, size_t capacity);
+public:
+  void getObserverRuntime(mesh::espnow::ObserverRuntime& runtime) override;
+private:
 #endif
 #if MESH_ENABLE_TELEMETRY_HISTORY
-  void sampleTelemetryHistory();
+  void sampleTelemetryHistory(bool emergency_only = false);
   void sampleNoiseFloorHistory();
 #if MESH_ENABLE_TELEMETRY_GPS_HISTORY
   uint8_t resizeTelemetryGpsDays(uint8_t requested_days);
@@ -1065,6 +1086,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool saveFloodPacketFilters(bool empty_scope_phase = false,
                               bool empty_forward_phase = false);
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
+  bool migrateDefaultWardrivingFilter();
   bool migrateLegacyFloodChannelBlocks();
   bool migrateLegacyFloodChannelData();
   bool importLegacyFloodPolicySections();
@@ -1158,6 +1180,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   void resetClockSyncAttempt();
   void suppressMeshClockSyncForBoot(uint8_t source);
   void checkGpsClockSyncOverride();
+  uint64_t nextClockSyncAttemptUptime() const;
   bool isClockSyncCollectionActive() const;
   uint32_t estimateClockTransitMillis(const mesh::Packet* packet) const;
   void recordClockSyncSample(uint8_t source_kind, const uint8_t source_id[4], uint32_t epoch,
@@ -1334,6 +1357,11 @@ public:
 #if MESH_ENABLE_EMERGENCY_POWER
   mesh::power::EmergencyOtaWork _emergency_ota_work;
   CommonCLI& getPowerCLI() { return _cli; }
+  void sampleEmergencyTelemetry() {
+#if MESH_ENABLE_TELEMETRY_HISTORY
+    sampleTelemetryHistory(true);
+#endif
+  }
   bool emergencyPowerBusy() const {
 #if defined(ENABLE_OTA)
     if (_emergency_ota_work.busy(mesh::ota::ota_context_if_active(), millis())) return true;

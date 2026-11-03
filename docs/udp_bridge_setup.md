@@ -195,3 +195,17 @@ Restore both previous values afterward. Bounded `UDP:` updates are emitted
 from the main loop at most once per second when diagnostic state changes.
 The counter pages and probes work without either logging gate. Never include
 WiFi passwords or `get bridge.secret` in logs you share.
+
+## Observer feed for visual heads over UDP
+
+A repeater that also runs the ESP-NOW bridge can send its observer feed (the
+per-packet records and vitals a CYD or Freenove visual head draws) to UDP
+peers: `set observer on` and `set observer.transport udp` (or `both` to keep
+the ESP-NOW feed too). Only peers that subscribe receive it; a head in UDP
+mode subscribes after its session is ready. List the head's address and port
+as a `udp.peer.N` like any other peer, use the same `bridge.secret` on both,
+and use `set bridge.source tx` so the repeater's own replies (login, CLI) reach
+the head. Payloads are authenticated, not encrypted: observer frames carry raw
+LoRa packets (already on air) and the repeater's vitals and position. See
+`docs/cli_commands.md` (observer.transport) and `ESPNOW_HEAD.md` on the
+espnow-head branch for the head side and the channel rule.
