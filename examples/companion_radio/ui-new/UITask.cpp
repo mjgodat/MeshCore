@@ -22,6 +22,17 @@
 #include "../MyMesh.h"
 #include "../CompanionWiFi.h"
 #include "target.h"
+#include <helpers/ui/BacklightToggleButton.h>
+#if UI_REPEATER_HEAD
+#include <new>
+#include "HeadCompose.h"
+#include "HeadAdmin.h"
+#include "HeadClock.h"
+static HeadClockFloor head_clock_floor(rtc_clock);
+#endif
+#if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
+#include "HeadRadio.h"   // ESP-NOW-only heads: radio screens (any UI)
+#endif
 #include <time.h>
 #include <math.h>
 #if UI_POCKET_GUI
@@ -66,6 +77,10 @@
   // historical OLED/headless Full policy.
   #define AUTO_SHUTDOWN_MILLIVOLTS 3400
   #define HELTEC_V4_TFT_SHUTDOWN_ONLY 1
+#endif
+
+#if defined(ESP32) && defined(BACKLIGHT_BTN)
+static mesh::ui::BacklightToggleButton companion_backlight_btn;
 #endif
 
 static uint64_t companionMessageNowMillis() {
@@ -435,6 +450,10 @@ public:
 class HomeScreen : public UIScreen {
   enum HomePage {
     FIRST,
+#if UI_REPEATER_HEAD
+    COMPOSE,
+    REPEATER,
+#endif
 #if UI_POCKET_GUI
     MAP,
     STATUS,
@@ -849,11 +868,21 @@ class HomeScreen : public UIScreen {
         const auto* profiles = radio ? radio->profiles() : nullptr;
         const bool secondary = _page == HomePage::RADIO2 && profiles && profiles->enabled();
         _pocket.header(secondary ? "Radio 2" : "Network");
+#if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
+        // ESP-NOW-only head: the LoRa prefs are a placeholder, never shown;
+        // the repeater's radio when known, else just "ESP-NOW".
+        {
+          char line2[48];
+          mesh::ui::formatEspNowHeadRadio(text, sizeof(text), line2, sizeof(line2));
+          row(text); row(line2);
+        }
+#else
         mesh::RadioProfileParams params;
         if (profiles && profiles->enabled()) params = profiles->params(secondary ? 1 : 0);
         else { params.freq = _node_prefs->freq; params.bw = _node_prefs->bw; params.sf = _node_prefs->sf; params.cr = _node_prefs->cr; }
         snprintf(text, sizeof(text), "%.3f MHz / %.2f kHz", params.freq, params.bw); row(text);
         snprintf(text, sizeof(text), "SF%u CR%u / %d dBm", params.sf, params.cr, _node_prefs->tx_power_dbm); row(text);
+#endif
         snprintf(text, sizeof(text), "Noise %.1f dBm / RX boost %s", radio_driver.getNoiseFloorDbm(secondary ? 1 : 0), _node_prefs->rx_boosted_gain ? "on" : "off"); row(text);
         if (profiles && profiles->enabled()) {
           snprintf(text, sizeof(text), "Radio2 %s%s / cross %s", profiles->secondary.mode == mesh::RadioProfileMode::RxTx ? "RX/TX" : "RX",
@@ -1114,11 +1143,14 @@ public:
           body_top + 2, tmp);
       display.setTextSize(1);
       display.setColor(UIColor::secondary_txt);
+#if !UI_REPEATER_HEAD
+      // App sync queue; a head has no app, so it would only ever grow.
       snprintf(tmp, sizeof(tmp), "Pending: %d", _task->getMsgCount());
       mesh::ui::drawTextCenteredEllipsized(display,
           {0, home_content_top, display.width(), display.textLineHeight()},
           home_content_top, tmp);
       home_content_top += display.textLineHeight() + 1;
+#endif
 #endif
 #ifdef UI_DEDICATED_PAIRING_BLOCK
       const mesh::ui::CompanionHomeLayout layout =
@@ -1306,9 +1338,11 @@ public:
       the_mesh.getRecentlyHeard(recent, UI_RECENT_LIST_SIZE);
       display.setColor(UIColor::primary_txt);
       int y = body_top;
+      int shown_rows = 0;
       for (int i = 0; i < UI_RECENT_LIST_SIZE && y + row_height <= display.height(); i++, y += row_height) {
         auto a = &recent[i];
         if (a->name[0] == 0) continue;  // empty slot
+        shown_rows++;
         int secs = _rtc->getCurrentTime() - a->recv_timestamp;
         if (secs < 60) {
           sprintf(tmp, "%ds", secs);
@@ -1322,10 +1356,25 @@ public:
         int max_name_width = display.width() - timestamp_width - 1;
 
         char filtered_recent_name[sizeof(a->name)];
+#if UI_REPEATER_HEAD
+        // No emoji glyphs on the head: drop them; emoji-only -> key prefix.
+        {
+          ContactInfo* known = the_mesh.lookupContactByPubKey(a->pubkey_prefix, sizeof(a->pubkey_prefix));
+          head_policy::displayName(a->name, a->pubkey_prefix, known ? known->type : 0,
+                                   filtered_recent_name, sizeof(filtered_recent_name));
+        }
+#else
         display.translateUTF8ToBlocks(filtered_recent_name, a->name, sizeof(filtered_recent_name));
+#endif
         display.drawTextEllipsized(0, y, max_name_width, filtered_recent_name);
         display.setCursor(display.width() - timestamp_width - 1, y);
         display.print(tmp);
+      }
+      if (shown_rows == 0) {
+        // Nothing heard since boot: say so instead of a blank page.
+        display.setColor(UIColor::secondary_txt);
+        display.drawTextCentered(display.width() / 2, body_top + row_height, "Recently heard:");
+        display.drawTextCentered(display.width() / 2, body_top + 3 * row_height, "no adverts yet");
       }
     } else if (_page == HomePage::RADIO || _page == HomePage::RADIO2
                || _page == HomePage::RADIO_STATUS) {
@@ -1353,6 +1402,18 @@ public:
                           : radioProfileRefreshMillis();
       }
       const bool secondary_page = dual_radio && _page == HomePage::RADIO2;
+#if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
+      // ESP-NOW-only head: the LoRa prefs are a placeholder, never shown;
+      // the repeater's radio when known, else just "ESP-NOW".
+      {
+        char line2[48];
+        mesh::ui::formatEspNowHeadRadio(tmp, sizeof(tmp), line2, sizeof(line2));
+        display.setCursor(0, body_top);
+        display.print(tmp);
+        display.setCursor(0, body_top + row_height);
+        display.print(line2);
+      }
+#else
       float freq = _node_prefs->freq;
       float bw = _node_prefs->bw;
       uint8_t sf = _node_prefs->sf;
@@ -1384,6 +1445,7 @@ public:
         snprintf(tmp, sizeof(tmp), "BW: %03.2f     CR: %d", bw, cr);
       }
       display.print(tmp);
+#endif
 
       // tx power,  noise floor
       display.setCursor(0, body_top + 2 * row_height);
@@ -1461,6 +1523,22 @@ public:
       display.setColor(UIColor::secondary_txt);
       display.setTextSize(1);
       display.drawTextCentered(display.width() / 2, body_top + 33, "toggle: " PRESS_LABEL);
+#endif
+#if UI_REPEATER_HEAD
+    } else if (_page == HomePage::COMPOSE) {
+      display.setColor(UIColor::primary_txt);
+      display.setTextSize(2);
+      display.drawTextCentered(display.width() / 2, body_top + 4, "Write");
+      display.setTextSize(1);
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextCentered(display.width() / 2, body_top + 33, "message: " PRESS_LABEL);
+    } else if (_page == HomePage::REPEATER) {
+      display.setColor(UIColor::primary_txt);
+      display.setTextSize(2);
+      display.drawTextCentered(display.width() / 2, body_top + 4, "Repeater");
+      display.setTextSize(1);
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextCentered(display.width() / 2, body_top + 33, "admin: " PRESS_LABEL);
 #endif
     } else if (_page == HomePage::ADVERT) {
       display.setColor(UIColor::corp_blue);
@@ -1808,6 +1886,16 @@ public:
       _task->showMessages();
       return true;
     }
+#if UI_REPEATER_HEAD
+    if (key == KEY_ENTER && _page == HomePage::COMPOSE) {
+      _task->showCompose();
+      return true;
+    }
+    if (key == KEY_ENTER && _page == HomePage::REPEATER) {
+      _task->showAdmin();
+      return true;
+    }
+#endif
 #if UI_MESSAGES_HOME_PAGE == 1
     if (key == KEY_ENTER && _page == HomePage::MESSAGES) {
       _task->showMessages();
@@ -2378,6 +2466,12 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
 #if UI_HAS_JOYSTICK
   back_btn.enableQuadrupleClick();
 #endif
+#if defined(ESP32) && defined(BACKLIGHT_BTN)
+  companion_backlight_btn.begin();
+#endif
+#if UI_REPEATER_HEAD
+  head_clock_floor.begin();
+#endif
 #if defined(TBEAM_1W) && defined(WIFI_SSID) && defined(PIN_WIFI_BTN)
   wifi_btn.begin();
 #endif
@@ -2437,6 +2531,75 @@ void UITask::showAlert(const char* text, int duration_millis) {
 void UITask::showMessages() {
   setCurrScreen(msg_preview);
 }
+
+
+#if UI_REPEATER_HEAD
+void UITask::closeHeadScreen() {
+  if (_deferred_msg_preview && !hasConnection()
+      && static_cast<MsgPreviewScreen*>(msg_preview)->hasMessages()) {
+    _deferred_msg_preview = false;
+    setCurrScreen(msg_preview);
+  } else {
+    _deferred_msg_preview = false;
+    setCurrScreen(home);
+  }
+}
+
+void UITask::onComposeClosed(void* ctx, const char* result) {
+  UITask* task = static_cast<UITask*>(ctx);
+  task->closeHeadScreen();
+  if (result) task->showAlert(result, 1500);
+}
+
+void UITask::showCompose() {
+  if (!_display) return;
+  if (!compose) compose = new (std::nothrow) HeadComposeScreen(&UITask::onComposeClosed, this);
+  if (!compose) { showAlert("Compose: no memory", 1500); return; }
+  static_cast<HeadComposeScreen*>(compose)->open();
+  setCurrScreen(compose);
+}
+
+void UITask::onAdminClosed(void* ctx) {
+  UITask* task = static_cast<UITask*>(ctx);
+  task->closeHeadScreen();
+}
+
+void UITask::showAdmin() {
+  if (!_display) return;
+  if (!admin) admin = new (std::nothrow) HeadAdminScreen(&UITask::onAdminClosed, this);
+  if (!admin) { showAlert("Admin: no memory", 1500); return; }
+  static_cast<HeadAdminScreen*>(admin)->open();
+  setCurrScreen(admin);
+}
+
+void UITask::showAdminLogin() {
+  showAdmin();
+  if (admin && curr == admin) static_cast<HeadAdminScreen*>(admin)->loginSaved();
+}
+
+void UITask::showAdminPresets() {
+  showAdmin();
+  if (admin && curr == admin) static_cast<HeadAdminScreen*>(admin)->openPresetsScreen();
+}
+
+void UITask::showAdminSettings() {
+  showAdmin();
+  if (admin && curr == admin) static_cast<HeadAdminScreen*>(admin)->openSettingsScreen();
+}
+
+bool UITask::adminLoggedIn() const {
+  return admin != nullptr && static_cast<HeadAdminScreen*>(admin)->loggedIn();
+}
+
+void UITask::describeHead(char* out, size_t size) const {
+  const char* screen = curr == home ? "home" : curr == splash ? "splash"
+      : (admin && curr == admin) ? "admin" : (compose && curr == compose) ? "compose"
+      : (msg_preview && curr == msg_preview) ? "messages" : "other";
+  char admin_state[120] = "-";
+  if (admin) static_cast<HeadAdminScreen*>(admin)->describe(admin_state, sizeof(admin_state));
+  snprintf(out, size, "screen=%s admin[%s]", screen, admin_state);
+}
+#endif
 
 #if COMPANION_FEATURE_READER
 void UITask::showReader() {
@@ -2582,6 +2745,13 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
 #if COMPANION_FEATURE_READER
   else if (isReaderActive()) {
     // Queue incoming messages without stealing the reader's page.
+    _deferred_msg_preview = true;
+  }
+#endif
+#if UI_REPEATER_HEAD
+  else if ((compose && curr == compose) || (admin && curr == admin)) {
+    // A busy channel must not throw away a half-typed message or an admin
+    // session: the preview is shown when the screen is closed.
     _deferred_msg_preview = true;
   }
 #endif
@@ -2924,7 +3094,38 @@ void UITask::loop() {
     next_touch_check = millis() + 25;
     int touch_x = -1;
     int touch_y = -1;
-    const bool touched = _display->getTouch(&touch_x, &touch_y);
+    bool touched = _display->getTouch(&touch_x, &touch_y);
+#if UI_REPEATER_HEAD
+    // The compose keyboard needs raw positions, not prev/select/next zones.
+    const bool raw_touch_screen = _display->isOn()
+        && ((compose && curr == compose) || (admin && curr == admin));
+    if (raw_touch_screen) {
+      const bool changed = curr == compose
+          ? static_cast<HeadComposeScreen*>(compose)->handleTouch(
+                touched, touch_x, touch_y, _display->width())
+          : static_cast<HeadAdminScreen*>(admin)->handleTouch(
+                touched, touch_x, touch_y, _display->width());
+      if (changed) {
+        _display->wake(mesh::ui::DisplayWake::Button);
+        _next_refresh = millis();
+      }
+      // A press that closed the screen (compose X / Send, admin Back) is
+      // not also a tap on the home page underneath (it would re-open it).
+      if (touched && !((compose && curr == compose) || (admin && curr == admin))) {
+        _raw_touch_hold = true;
+      }
+    } else {
+#endif
+#if UI_REPEATER_HEAD
+    if (_raw_touch_hold) {
+      if (touched) {
+        touched = false;
+        touch_x = touch_y = -1;
+      } else {
+        _raw_touch_hold = false;
+      }
+    }
+#endif
     mesh::ui::TouchSplitSelector transport_touch_selector = {};
     const mesh::ui::TouchSplitSelector* split_transport_selector = nullptr;
     const mesh::ui::TouchNavigationBar* reader_touch_bar = nullptr;
@@ -2982,6 +3183,9 @@ void UITask::loop() {
           break;
       }
     }
+#if UI_REPEATER_HEAD
+    }
+#endif
   }
 #endif
 #if defined(BACKLIGHT_BTN)
@@ -2997,6 +3201,13 @@ void UITask::loop() {
     button_state = pressed ? BacklightButtonState::Pressed : BacklightButtonState::Released;
     last_backlight_btn_check = millis();
   }
+#endif
+#if defined(ESP32) && defined(BACKLIGHT_BTN)
+  // The same press also flips the sticky backlight.
+  companion_backlight_btn.poll(millis());
+#endif
+#if UI_REPEATER_HEAD
+  head_clock_floor.loop();
 #endif
 
   // A button-wake PIN is a preview, not a modal pairing request. The next

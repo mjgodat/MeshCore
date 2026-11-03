@@ -26,7 +26,8 @@
 // The role terminal is also used by WebConfig on WiFi-only Companions. Its
 // parser and reply tracking do not require a physical USB transport.
 #if defined(ENABLE_USB_INTERFACE) \
-    || (defined(ESP32_PLATFORM) && defined(WIFI_SSID) && !defined(WEBCONFIG_DISABLED))
+    || (defined(ESP32_PLATFORM) && defined(WIFI_SSID) && !defined(WEBCONFIG_DISABLED)) \
+    || (defined(UI_REPEATER_HEAD) && UI_REPEATER_HEAD)  /* the on-screen admin console */
   #define COMPANION_FEATURE_TEXT_TERMINAL 1
 #else
   #define COMPANION_FEATURE_TEXT_TERMINAL 0

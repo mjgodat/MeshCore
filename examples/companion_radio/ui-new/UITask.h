@@ -104,6 +104,16 @@ class UITask : public AbstractUITask {
   UIScreen* home;
   UIScreen* msg_preview = nullptr;
   UIScreen* curr;
+#if UI_REPEATER_HEAD
+  UIScreen* compose = nullptr;
+  UIScreen* admin = nullptr;
+  bool _raw_touch_hold = false;  // swallow the rest of a press that closed compose/admin
+  static void onComposeClosed(void* ctx, const char* result);
+  static void onAdminClosed(void* ctx);
+  // Compose/admin closed: a message preview held back while it was open,
+  // else home.
+  void closeHeadScreen();
+#endif
 #if UI_POCKET_GUI
   mesh::ui::pocket::Settings _pocket_settings;
 #endif
@@ -146,6 +156,20 @@ public:
 
   void gotoHomeScreen() { setCurrScreen(home); }
   void showMessages();
+#if UI_REPEATER_HEAD
+  void showCompose();
+  void showAdmin();
+  // Admin console, then log in with the saved password (HeadAdminScreen).
+  void showAdminLogin();
+  // Admin console on the preset list (logging in first if needed) / on the
+  // settings list at the bridge keys.
+  void showAdminPresets();
+  void showAdminSettings();
+  // One line for test consoles: the companion screen and the admin
+  // console's state (never a password).
+  void describeHead(char* out, size_t size) const;
+  bool adminLoggedIn() const;
+#endif
 #if COMPANION_FEATURE_READER
   bool isReaderActive() const { return reader && curr == reader; }
   void showReader();

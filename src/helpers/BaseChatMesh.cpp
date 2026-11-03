@@ -208,10 +208,14 @@ ContactInfo* BaseChatMesh::allocateContactSlot(bool transient_only) {
       contact_table_revision++;
       return allocated;
     } else if (shouldOverwriteWhenFull()) {
-      // Find oldest non-favourite contact by oldest lastmod timestamp
+      // Find the oldest (lastmod) contact of the best overwrite rank; by
+      // default every non-favourite has the same rank.
+      int best_rank = 0;
       for (int i = MAX_ANON_CONTACTS; i < num_contacts; i++) {
-        bool is_favourite = mesh::isFavoriteContact(contacts[i].flags);
-        if (!is_favourite && contacts[i].lastmod < oldest_lastmod) {
+        const int rank = overwriteRank(contacts[i]);
+        if (rank <= 0) continue;
+        if (rank > best_rank || (rank == best_rank && contacts[i].lastmod < oldest_lastmod)) {
+          best_rank = rank;
           oldest_lastmod = contacts[i].lastmod;
           oldest_idx = i;
         }
@@ -346,12 +350,20 @@ int BaseChatMesh::searchPeersByHash(const uint8_t* hash) {
     }
     ++i;
   }
+  for (int k = 0; k < extraPeerCount() && n < MAX_SEARCH_RESULTS; k++) {
+    const ContactInfo* extra = extraPeer(k);
+    if (extra != NULL && extra->id.isHashMatch(hash)) matching_peer_indexes[n++] = kExtraPeerBase + k;
+  }
   return n;
 }
 
 void BaseChatMesh::getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) {
   int i = matching_peer_indexes[peer_idx];
-  if (i >= 0 && i < num_contacts) {
+  if (i >= kExtraPeerBase) {
+    ContactInfo* extra = extraPeer(i - kExtraPeerBase);
+    if (extra != NULL) memcpy(dest_secret, extra->getSharedSecret(self_id), PUB_KEY_SIZE);
+    else memset(dest_secret, 0, PUB_KEY_SIZE);
+  } else if (i >= 0 && i < num_contacts) {
     memcpy(dest_secret, contacts[i].getSharedSecret(self_id), PUB_KEY_SIZE);
   } else {
     MESH_DEBUG_PRINTLN("getPeerSharedSecret: Invalid peer idx: %d", i);
@@ -360,12 +372,17 @@ void BaseChatMesh::getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) {
 
 void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) {
   int i = matching_peer_indexes[sender_idx];
-  if (i < 0 || i >= num_contacts) {
+  ContactInfo* extra = NULL;
+  if (i >= kExtraPeerBase) {
+    // Not a contact: a plain text DM only (no requests, CLI or room posts).
+    extra = extraPeer(i - kExtraPeerBase);
+    if (extra == NULL || type != PAYLOAD_TYPE_TXT_MSG || len <= 5 || (data[4] >> 2) != TXT_TYPE_PLAIN) return;
+  } else if (i < 0 || i >= num_contacts) {
     MESH_DEBUG_PRINTLN("onPeerDataRecv: Invalid sender idx: %d", i);
     return;
   }
 
-  ContactInfo& from = contacts[i];
+  ContactInfo& from = extra != NULL ? *extra : contacts[i];
 
   // A transient service peer is not an accepted chat contact.
   if (type == PAYLOAD_TYPE_TXT_MSG && from.type == ADV_TYPE_NONE) return;

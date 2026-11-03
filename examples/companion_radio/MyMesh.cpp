@@ -10,6 +10,9 @@
 #include <helpers/esp32/CpuClockPolicy.h>
 #include <helpers/esp32/PowerTestControls.h>
 #endif
+#if COMPANION_IDENTITY_NVS_BACKUP
+#include <helpers/esp32/IdentityNvsBackup.h>
+#endif
 #include <helpers/LedSettings.h>
 #include <helpers/ui/DisplayPowerSettings.h>
 #if defined(HELTEC_V4_DISPLAY_UNIFIED) && HELTEC_V4_DISPLAY_UNIFIED && defined(DISPLAY_CLASS)
@@ -32,6 +35,10 @@
 #include <helpers/ui/StartupScreen.h>
 #include "NotificationSettingsFile.h"
 #include "MyMesh.h"
+#if UI_REPEATER_HEAD
+#include "HeadContactPolicy.h"
+#include <Preferences.h>
+#endif
 #if defined(MESH_RADIO_AUTO_SX1268) && MESH_RADIO_AUTO_SX1268
 #include <helpers/LoRaRadioFamily.h>
 #endif
@@ -678,6 +685,19 @@ bool MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
       pos++;
     }
     MESH_DEBUG_PRINTLN("INFO: no channel messages to remove from queue.");
+#ifdef UI_REPEATER_HEAD
+    // Only an app drains this queue and the head has none. Drop the oldest
+    // frame rather than refuse new ones (a refused room post is never acked).
+    popOfflineQueue();
+    Frame& tail = offlineQueueFrameAt(offline_queue_len);
+    tail.len = len;
+    memcpy(tail.buf, frame, len);
+    offline_queue_len++;
+#ifdef DISPLAY_CLASS
+    if (_ui) _ui->syncMessageQueue(offline_queue_len, 0);
+#endif
+    return true;
+#endif
   } else {
     Frame& tail = offlineQueueFrameAt(offline_queue_len);
     tail.len = len;
@@ -884,6 +904,12 @@ bool MyMesh::isAutoAddEnabled() const {
 }
 
 bool MyMesh::shouldAutoAddContactType(uint8_t contact_type) const {
+#if UI_REPEATER_HEAD
+  // A head adds only its home repeater from adverts; chat companions are
+  // remembered in RAM (onDiscoveredContact) and saved when the user sends
+  // them a DM (HeadContactPolicy.h, HeadHeardPeers.h).
+  return head_policy::shouldAutoAdd(contact_type, _head_advert_home);
+#endif
   if ((_prefs.manual_add_contacts & 1) == 0) {
     return true;
   }
@@ -910,8 +936,91 @@ bool MyMesh::shouldAutoAddContactType(uint8_t contact_type) const {
 }
 
 bool MyMesh::shouldOverwriteWhenFull() const {
+#if UI_REPEATER_HEAD
+  // The home repeater always gets in (it evicts an old heard repeater).
+  if (_head_advert_home) return true;
+#endif
   return (_prefs.autoadd_config & AUTO_ADD_OVERWRITE_OLDEST) != 0;
 }
+
+#if UI_REPEATER_HEAD
+int MyMesh::overwriteRank(const ContactInfo& c) const {
+  return head_policy::evictRank(c.type, mesh::isFavoriteContact(c.flags), isHeadHomeRepeater(c));
+}
+
+// A heard companion (not a contact) as a peer BaseChatMesh can decrypt a
+// plain DM from. One scratch contact, refilled when another slot is asked
+// for (the shared secret is kept while the same slot is reused).
+ContactInfo* MyMesh::extraPeer(int k) {
+  const auto* e = _head_heard.at((size_t)k);
+  if (e == nullptr) return nullptr;
+  if (_head_heard_slot == k && memcmp(_head_heard_peer.id.pub_key, e->key, PUB_KEY_SIZE) == 0 &&
+      strcmp(_head_heard_peer.name, e->name) == 0) {
+    return &_head_heard_peer;
+  }
+  ContactInfo c = {};
+  memcpy(c.id.pub_key, e->key, PUB_KEY_SIZE);
+  StrHelper::strncpy(c.name, e->name, sizeof(c.name));
+  c.type = ADV_TYPE_CHAT;
+  c.out_path_len = OUT_PATH_UNKNOWN;
+  c.last_advert_timestamp = e->advert_ts;
+  c.lastmod = getRTCClock()->getCurrentTime();
+  c.shared_secret_valid = false;
+  _head_heard_peer = c;
+  _head_heard_slot = k;
+  return &_head_heard_peer;
+}
+
+bool MyMesh::headHeardDmAt(int slot, uint8_t* prefix, size_t prefix_len, char* name, size_t name_cap) const {
+  const auto* e = _head_heard.at((size_t)slot);
+  if (e == nullptr || !e->dm) return false;
+  if (prefix != nullptr) memcpy(prefix, e->key, prefix_len < PUB_KEY_SIZE ? prefix_len : PUB_KEY_SIZE);
+  if (name != nullptr && name_cap > 0) StrHelper::strncpy(name, e->name, name_cap);
+  return true;
+}
+
+const char* MyMesh::headHeardName(const uint8_t* prefix, size_t len) const {
+  const auto* e = _head_heard.find(prefix, len);
+  return e != nullptr ? e->name : nullptr;
+}
+
+// The user is sending this companion a DM: save it as a contact now (the
+// only way a chat contact is added on a head), then forget the heard entry.
+ContactInfo* MyMesh::headSaveHeardPeer(const uint8_t* prefix, size_t len) {
+  const auto* e = _head_heard.find(prefix, len);
+  if (e == nullptr) return nullptr;
+  uint8_t key[PUB_KEY_SIZE];
+  memcpy(key, e->key, PUB_KEY_SIZE);
+  ContactInfo* existing = lookupPersistentContactByPubKey(key, PUB_KEY_SIZE);
+  if (existing != nullptr) {
+    _head_heard.remove(key);
+    _head_heard_slot = -1;
+    return existing;
+  }
+  if (!canMutateContacts()) return nullptr;
+  ContactInfo c = {};
+  memcpy(c.id.pub_key, key, PUB_KEY_SIZE);
+  StrHelper::strncpy(c.name, e->name, sizeof(c.name));
+  c.type = ADV_TYPE_CHAT;
+  c.out_path_len = OUT_PATH_UNKNOWN;
+  c.last_advert_timestamp = e->advert_ts;
+  c.lastmod = getRTCClock()->getCurrentTime();
+  if (!addContact(c)) {
+    onContactsFull();
+    return nullptr;
+  }
+  ContactInfo* added = lookupPersistentContactByPubKey(key, PUB_KEY_SIZE);
+  if (added == nullptr || !scheduleContactWrite(*added)) {
+    if (added != nullptr) removeContact(*added);
+    return nullptr;
+  }
+  ContactInfo* transient = lookupTransientContactByPubKey(key, PUB_KEY_SIZE);
+  if (transient != nullptr) clearTransientContact(*transient, added);
+  _head_heard.remove(key);
+  _head_heard_slot = -1;
+  return added;
+}
+#endif
 
 uint8_t MyMesh::getAutoAddMaxHops() const {
   return _prefs.autoadd_max_hops;
@@ -957,6 +1066,13 @@ void MyMesh::onContactsFull() {
 }
 
 void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) {
+#if UI_REPEATER_HEAD
+  // A chat companion that was not added (heads add none from adverts):
+  // remember it so its DMs can be decrypted, shown and answered.
+  if (contact.type == ADV_TYPE_CHAT && lookupContactByPubKey(contact.id.pub_key, PUB_KEY_SIZE) == nullptr) {
+    _head_heard.learn(contact.id.pub_key, contact.name, contact.last_advert_timestamp);
+  }
+#endif
   if (_serial->isConnected()) {
     if (is_new) {
       writeContactRespFrame(PUSH_CODE_NEW_ADVERT, contact);
@@ -1916,7 +2032,7 @@ void MyMesh::onGroupDataRecv(mesh::Packet* packet, uint8_t type,
   BaseChatMesh::onGroupDataRecv(packet, type, key, data, len);
 }
 
-#if defined(COMPANION_MESH_CLOCK_SYNC) || defined(MESHCORE_HAS_COLOR_DISPLAY)
+#if defined(COMPANION_MESH_CLOCK_SYNC) || defined(MESHCORE_HAS_COLOR_DISPLAY) || UI_REPEATER_HEAD
 void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
                           uint32_t timestamp, const uint8_t* app_data,
                           size_t app_data_len) {
@@ -1926,10 +2042,96 @@ void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
                                        app_data_len, millis());
   }
 #endif
+#if UI_REPEATER_HEAD
+  // A repeater heard at 0 hops is this head's own (its bridge forwards what
+  // it transmits): remember it, and let it into a full table.
+  {
+    AdvertDataParser parser(app_data, app_data_len);
+    _head_advert_home = parser.isValid()
+        && head_policy::isHomeAdvert(parser.getType(), packet->getPathHashCount(),
+                                     isLocalContactImport(packet));
+    if (_head_advert_home) headNoteHome(id.pub_key);
+  }
+#endif
   BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
+#if UI_REPEATER_HEAD
+  _head_advert_home = false;
+#endif
 #ifdef COMPANION_MESH_CLOCK_SYNC
   _clock_sync.observeVerifiedAdvert(packet, id, timestamp);
 #endif
+}
+#endif
+
+#if UI_REPEATER_HEAD
+void MyMesh::headLoadHome() {
+  if (_head_home_loaded) return;
+  _head_home_loaded = true;
+  Preferences prefs;
+  if (!prefs.begin("hadmin", true)) return;
+  _head_home_valid = prefs.getBytes("home", _head_home, sizeof(_head_home)) == sizeof(_head_home);
+  prefs.end();
+}
+
+void MyMesh::headNoteHome(const uint8_t* pub_key) {
+  headLoadHome();
+  if (_head_home_valid && memcmp(_head_home, pub_key, sizeof(_head_home)) == 0) return;
+  // The latest repeater heard at 0 hops is home; NVS is written only when
+  // it changes (a new or swapped repeater).
+  memcpy(_head_home, pub_key, sizeof(_head_home));
+  _head_home_valid = true;
+  Preferences prefs;
+  if (!prefs.begin("hadmin", false)) return;
+  prefs.putBytes("home", _head_home, sizeof(_head_home));
+  prefs.end();
+}
+
+bool MyMesh::isHeadHomeRepeater(const ContactInfo& c) const {
+  const_cast<MyMesh*>(this)->headLoadHome();
+  return c.type == ADV_TYPE_REPEATER && _head_home_valid
+      && head_policy::prefixMatches(c.id.pub_key, _head_home, sizeof(_head_home));
+}
+
+// Same steps as CMD_REMOVE_CONTACT: persistent slot, advert cache, then the
+// live table. 0 = removed, else an ERR_CODE_*.
+uint8_t MyMesh::deleteStoredContact(ContactInfo& contact) {
+  uint8_t pub_key[PUB_KEY_SIZE];
+  memcpy(pub_key, contact.id.pub_key, PUB_KEY_SIZE);
+  ContactInfo removed = contact;
+  uint16_t released_slot = mesh::storage::CONTACT_SLOT_NONE;
+  if (!scheduleContactWriteAfterRelease(removed, released_slot)) return ERR_CODE_FILE_IO_ERROR;
+  if (!_store->deleteBlobByKey(pub_key, PUB_KEY_SIZE)) {
+    restoreContactWriteAfterRelease(contact, released_slot);
+    return ERR_CODE_FILE_IO_ERROR;
+  }
+  if (!removeContact(contact)) {
+    restoreContactWriteAfterRelease(contact, released_slot);
+    return ERR_CODE_BAD_STATE;
+  }
+  ContactInfo* transient = lookupTransientContactByPubKey(pub_key, PUB_KEY_SIZE);
+  if (transient != NULL) clearTransientContact(*transient);
+  if (_serial != NULL && _serial->isConnected()) {
+    out_frame[0] = PUSH_CODE_CONTACT_DELETED;
+    memcpy(&out_frame[1], pub_key, PUB_KEY_SIZE);
+    _serial->writeFrame(out_frame, 1 + PUB_KEY_SIZE);
+  }
+  return 0;
+}
+
+int MyMesh::headClearHeardContacts(bool count_only) {
+  if (!canMutateContacts()) return 0;
+  int removed = 0;
+  // From the end: removeContact() shifts the entries after the removed one.
+  for (int i = getTotalContactSlots() - 1; i >= MAX_ANON_CONTACTS; i--) {
+    ContactInfo* p = getContactPtrByIdx((uint32_t)i);
+    if (p == NULL) continue;
+    ContactInfo& c = *p;
+    if (!head_policy::clearRemoves(c.type, mesh::isFavoriteContact(c.flags), isHeadHomeRepeater(c))) continue;
+    if (count_only) { removed++; continue; }
+    if (deleteStoredContact(c) == 0) removed++;
+  }
+  if (removed && !count_only) updateGpsTelemetryPolicy();
+  return removed;
 }
 #endif
 
@@ -2177,8 +2379,14 @@ void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t 
   }
 #endif
   markConnectionActive(from); // in case this is from a server, and we have a connection
+#if UI_REPEATER_HEAD
+  // A heard companion (not a contact): shown and answerable, never saved here.
+  if (isHeadHeardPeer(from)) _head_heard.markDm(from.id.pub_key);
+  if (!isHeadHeardPeer(from)) scheduleContactWrite(from);
+#else
   // BaseChatMesh updates lastmod immediately before this callback.
   scheduleContactWrite(from);
+#endif
   queueMessage(from, TXT_TYPE_PLAIN, pkt, sender_timestamp, NULL, 0, text);
 #if MESH_ENABLE_ONE_KEY_DM
 #if ONE_KEY_DM_SHARED_OFFLINE_QUEUE
@@ -2654,6 +2862,11 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       modern_login = true;
 #endif
       keep_alive_secs = ((uint16_t)data[5]) * 16;
+#if UI_REPEATER_HEAD
+      // The modern reply carries the repeater's clock; a head has no RTC
+      // battery, so take it (forward only) as trusted time.
+      if (tag > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(tag);
+#endif
       out_frame[i++] = PUSH_CODE_LOGIN_SUCCESS;
       out_frame[i++] = data[6]; // permissions (eg. is_admin)
       memcpy(&out_frame[i], contact.id.pub_key, 6);
@@ -3050,8 +3263,13 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.rx_ps_preamble = RXPS_FIXED_PREAMBLE;
   _prefs.rx_ps_rx_us = RX_POWERSAVING_DEFAULT_RX_US;
   _prefs.rx_ps_sleep_us = RX_POWERSAVING_DEFAULT_SLEEP_US;
-  _prefs.powersaving_enabled = 1;
+  _prefs.powersaving_enabled = COMPANION_POWERSAVING_DEFAULT;
   _prefs.powersaving_policy_version = 0;
+#ifdef COMPANION_FLOOD_RETRY_DEFAULT
+  // Fresh-install flood retry attempts. A head behind an ESP-NOW bridge never
+  // hears its own flood echoed back, so every retry would be spent.
+  _prefs.flood_retry_attempts = COMPANION_FLOOD_RETRY_DEFAULT;
+#endif
   // Keep WiFi-only compatibility builds reachable when they have no other
   // CLI transport. Full and Bluetooth/wired-capable Companions are opt-in.
 #if defined(WIFI_SSID) && !defined(BLE_PIN_CODE) && !defined(ENABLE_USB_INTERFACE) \
@@ -3116,7 +3334,24 @@ void MyMesh::begin(bool has_display, bool radio_available,
 #ifdef DISPLAY_CLASS
   if (startup_screen != nullptr) startup_screen->loadingIdentity();
 #endif
-  const bool identity_loaded = _store->loadMainIdentity(self_id);
+  bool identity_loaded = _store->loadMainIdentity(self_id);
+#if COMPANION_IDENTITY_NVS_BACKUP
+  // An app launcher may have replaced the data partition since the last
+  // boot. Restore the key from NVS rather than becoming a different node.
+  bool identity_restored = false;
+  if (!identity_loaded || mesh::hasReservedIdentityPrefix(self_id)) {
+    mesh::LocalIdentity backup;
+    if (mesh::esp32::loadIdentityBackup(backup)
+        && !mesh::hasReservedIdentityPrefix(backup)
+        && _store->canCreateMainIdentity()
+        && _store->saveMainIdentity(backup)) {
+      self_id = backup;
+      identity_loaded = true;
+      identity_restored = true;
+      MESH_DEBUG_PRINTLN("Identity restored from NVS backup");
+    }
+  }
+#endif
   const bool is_new_install = !identity_loaded
       || mesh::hasReservedIdentityPrefix(self_id);
   if (is_new_install && !_store->canCreateMainIdentity()) {
@@ -3158,6 +3393,9 @@ void MyMesh::begin(bool has_display, bool radio_available,
     board.reboot();
     return;
   }
+#if COMPANION_IDENTITY_NVS_BACKUP
+  if (!identity_restored) mesh::esp32::saveIdentityBackup(self_id);
+#endif
 #if defined(ENABLE_OTA)
   mesh::ota::ota_refresh_seeder_identity(self_id.pub_key);
 #endif
@@ -7426,6 +7664,9 @@ void MyMesh::handleCmdFrame(size_t len) {
         identity.readFrom(&cmd_frame[1], 64);
         if (_store->saveMainIdentity(identity)) {
           self_id = identity;
+#if COMPANION_IDENTITY_NVS_BACKUP
+          mesh::esp32::saveIdentityBackup(self_id);
+#endif
 #if MESH_ENABLE_MESHTEXT_CHAT
           refreshMeshtextIdentity();
 #endif
@@ -9764,9 +10005,28 @@ bool MyMesh::sendUiChannelMessage(int channel_idx, uint32_t timestamp,
 #endif
 
 #if COMPANION_FEATURE_TEXT_TERMINAL
+#if UI_REPEATER_HEAD
+HeadTerminalLog& headTerminalLog() {
+  static HeadTerminalLog log;
+  return log;
+}
+
+void MyMesh::headTerminal(const char* line) {
+  char command[MAX_TRANS_UNIT * 2 + 32];  // terminal line capacity
+  StrHelper::strzcpy(command, line, sizeof(command));
+  handleTerminalCommand(command, false);
+}
+#endif
+
 Stream& MyMesh::terminalOutput() {
+#if UI_REPEATER_HEAD
+  // The on-screen Admin console shows the same text the USB terminal gets.
+  if (isTerminalWaitingForInput()) return headTerminalLog().wrap(mesh::usbTerminalPort(false));
+  return headTerminalLog().wrap(_terminal_output != NULL ? *_terminal_output : Serial);
+#else
   if (isTerminalWaitingForInput()) return mesh::usbTerminalPort(false);
   return _terminal_output != NULL ? *_terminal_output : Serial;
+#endif
 }
 
 void MyMesh::resetTerminalSession() {
@@ -10180,6 +10440,45 @@ void MyMesh::sendTerminalChannelMessage(ChannelDetails& channel,
   }
 }
 
+#if UI_REPEATER_HEAD
+bool MyMesh::headSendChannel(int channel_idx, const char* sender_name,
+                             const char* text) {
+  ChannelDetails channel;
+  if (!getChannel(channel_idx, channel) || channel.name[0] == 0) return false;
+  if (sender_name == NULL || sender_name[0] == 0) sender_name = _prefs.node_name;
+  const size_t prefix_len = strlen(sender_name) + 2;  // "name: "
+  const size_t text_len = text == NULL ? 0 : strlen(text);
+  if (text_len == 0 || prefix_len + text_len > MAX_TEXT_LEN) return false;
+  return sendGroupMessage(getRTCClock()->getCurrentTimeUnique(), channel.channel,
+                          sender_name, text, text_len);
+}
+
+bool MyMesh::headSendDirect(ContactInfo& recipient, const char* text) {
+  if (text == NULL || *text == 0 || strlen(text) > MAX_TEXT_LEN) return false;
+  uint32_t expected_ack = 0;
+  uint32_t est_timeout = 0;
+  uint32_t message_timestamp = getRTCClock()->getCurrentTimeUnique();
+  uint8_t text_fingerprint[MAX_HASH_SIZE] = { 0 };
+  uint8_t packet_retry_key[MAX_HASH_SIZE] = { 0 };
+  mesh::Utils::sha256(text_fingerprint, sizeof(text_fingerprint),
+                      recipient.id.pub_key, PUB_KEY_SIZE,
+                      (const uint8_t*)text, strlen(text));
+  AckTableEntry* replacement_entry =
+      findPendingTextMessage(text_fingerprint, message_timestamp);
+  int result = sendMessage(recipient, message_timestamp, 0, text,
+                           expected_ack, est_timeout, packet_retry_key,
+                           NULL, text_fingerprint);
+  if (result == MSG_SEND_FAILED) return false;
+#if COMPANION_FEATURE_TEXT_TERMINAL
+  rememberTerminalAck(recipient, text, message_timestamp, expected_ack,
+                      est_timeout, packet_retry_key, replacement_entry);
+#else
+  (void)replacement_entry;
+#endif
+  return true;
+}
+#endif
+
 void MyMesh::printTerminalSendStatus(const char* operation,
                                      const ContactInfo& recipient, int result,
                                      uint32_t timeout_millis) {
@@ -10272,6 +10571,13 @@ void MyMesh::sendTerminalLogin(ContactInfo& recipient,
     terminalOutput().print("  ERROR: unable to send login\r\n");
     return;
   }
+#ifdef COMPANION_REPLY_TIMEOUT_FLOOR_MS
+  // Airtime estimates assume a direct reply; a head behind an ESP-NOW bridge
+  // also waits for the bridge's queue delay and the repeater's processing.
+  if (est_timeout < COMPANION_REPLY_TIMEOUT_FLOOR_MS) {
+    est_timeout = COMPANION_REPLY_TIMEOUT_FLOOR_MS;
+  }
+#endif
 
   uint32_t tag;
   memcpy(&tag, recipient.id.pub_key, 4);
@@ -10357,6 +10663,13 @@ void MyMesh::sendTerminalCommand(ContactInfo& recipient,
     terminalOutput().print(MESH_CLI_REPLY_TEXT("  ERROR: unable to send remote command\r\n", "  ERROR: remote command send failed\r\n"));
     return;
   }
+#ifdef COMPANION_REPLY_TIMEOUT_FLOOR_MS
+  // Airtime estimates assume a direct reply; a head behind an ESP-NOW bridge
+  // also waits for the bridge's queue delay and the repeater's processing.
+  if (est_timeout < COMPANION_REPLY_TIMEOUT_FLOOR_MS) {
+    est_timeout = COMPANION_REPLY_TIMEOUT_FLOOR_MS;
+  }
+#endif
 
   _terminal_command.begin(recipient.id.pub_key, command_started_at,
                           est_timeout);
@@ -10738,6 +11051,14 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
     if (strlen(recipient_prefix) < sizeof(ContactInfo::name)) {
       recipient = searchContactsByPrefix(recipient_prefix);
     }
+    if (recipient == NULL && strlen(recipient_prefix) == 8) {
+      // Fall back to a 4-byte public-key prefix in hex (the head's Repeater
+      // page selects targets this way so renamed repeaters still match).
+      uint8_t key_prefix[4];
+      if (mesh::Utils::fromHex(key_prefix, sizeof(key_prefix), recipient_prefix)) {
+        recipient = lookupContactByPubKey(key_prefix, sizeof(key_prefix));
+      }
+    }
     if (recipient == NULL || recipient->type == ADV_TYPE_NONE) {
       terminalOutput().print("  ERROR: name prefix not found\r\n");
     } else {
@@ -10812,8 +11133,13 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
     }
     sendTerminalTrace(*recipient);
   } else if (strcmp(command, "advert") == 0) {
+#if UI_REPEATER_HEAD
+    terminalOutput().print(advert() ? "  advert sent (flood)\r\n"
+                          : "  ERROR: unable to send advert\r\n");
+#else
     terminalOutput().print(advert() ? "  advert sent (zero hop)\r\n"
                           : "  ERROR: unable to send advert\r\n");
+#endif
   } else if (strcmp(command, "reset path") == 0) {
     ContactInfo* recipient = getTerminalRecipient();
     if (recipient == NULL) {
@@ -12197,7 +12523,17 @@ bool MyMesh::advert() {
     pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
   }
   if (pkt) {
+#if UI_REPEATER_HEAD
+    // A head reaches the mesh only through a repeater's bridge, which does
+    // not repeat zero-hop adverts; flood so LoRa nodes can learn the head
+    // (needed before they can decrypt its DMs). Same as the app's flood
+    // advert request.
+    TransportKey default_scope;
+    memcpy(&default_scope.key, _prefs.default_scope_key, sizeof(default_scope.key));
+    sendFloodScoped(default_scope, pkt, 0);
+#else
     sendZeroHop(pkt);
+#endif
     return true;
   } else {
     return false;

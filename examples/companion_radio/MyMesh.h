@@ -4,6 +4,18 @@
 #include <Mesh.h>
 #include "AbstractUITask.h"
 #include "CompanionFeatures.h"
+#if UI_REPEATER_HEAD
+#include "HeadTerminalLog.h"
+#include "HeadHeardPeers.h"
+// Chat companions a head remembers (not contacts) so their DMs decrypt.
+#ifndef HEAD_HEARD_PEERS
+#if defined(BOARD_HAS_PSRAM)
+#define HEAD_HEARD_PEERS 32
+#else
+#define HEAD_HEARD_PEERS 16
+#endif
+#endif
+#endif
 #include <helpers/CompanionReader.h>
 #include <helpers/PowerSavingDiagnostics.h>
 #include <helpers/ui/DisplayBuildFlags.h>
@@ -519,7 +531,7 @@ protected:
   bool allowFloodRetry(const mesh::Packet* packet) const override;
   uint8_t getFloodRetryMaxPathLength(const mesh::Packet* packet) const override;
   uint8_t getFloodRetryMaxAttempts(const mesh::Packet* packet) const override;
-#if defined(COMPANION_MESH_CLOCK_SYNC) || defined(MESHCORE_HAS_COLOR_DISPLAY)
+#if defined(COMPANION_MESH_CLOCK_SYNC) || defined(MESHCORE_HAS_COLOR_DISPLAY) || UI_REPEATER_HEAD
   void onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
                     uint32_t timestamp, const uint8_t* app_data,
                     size_t app_data_len) override;
@@ -551,6 +563,12 @@ protected:
   bool isAutoAddEnabled() const override;
   bool shouldAutoAddContactType(uint8_t type) const override;
   bool shouldOverwriteWhenFull() const override;
+#if UI_REPEATER_HEAD
+  int overwriteRank(const ContactInfo& c) const override;
+  // Heard companions as BaseChatMesh extra peers (plain DMs only).
+  int extraPeerCount() const override { return HEAD_HEARD_PEERS; }
+  ContactInfo* extraPeer(int k) override;
+#endif
   uint8_t getAutoAddMaxHops() const override;
   bool canMutateContacts() const override;
   void onContactsFull() override;
@@ -630,6 +648,40 @@ protected:
   bool hasPendingReqs() const;
 
 public:
+#if UI_REPEATER_HEAD
+  // Touch compose on a repeater head. Same send paths as the terminal's
+  // `channel`/`public` and `send` commands. sender_name lets a channel post
+  // carry the paired repeater's name ("Send as").
+  bool headSendChannel(int channel_idx, const char* sender_name, const char* text);
+  bool headSendDirect(ContactInfo& recipient, const char* text);
+  const char* headNodeName() const { return _prefs.node_name; }
+  // Run one companion terminal line (`to`, `login`, `cmd`, ...) for the
+  // on-screen Admin console; output lands in headTerminalLog().
+  void headTerminal(const char* line);
+  // The head's own repeater (HeadContactPolicy.h): the repeater heard at 0
+  // hops over the bridge; its key prefix (head_policy::kHomePrefixLen
+  // bytes) is kept in NVS. nullptr until one has been heard.
+  const uint8_t* headHomeRepeater() const {
+    const_cast<MyMesh*>(this)->headLoadHome();
+    return _head_home_valid ? _head_home : nullptr;
+  }
+  bool isHeadHomeRepeater(const ContactInfo& c) const;
+  // Removes heard repeaters, rooms and sensors (keeps the home repeater,
+  // favourites and chat contacts). Returns how many; count_only: just count.
+  int headClearHeardContacts(bool count_only);
+  // Chat companions that are not contacts (HeadHeardPeers.h). Compose lists
+  // the ones that sent a DM: headHeardDmAt(slot) fills its key prefix and
+  // name (false = empty slot or no DM). headSaveHeardPeer saves one as a
+  // contact when the user sends it a DM (null when unknown or the table
+  // refuses it); headHeardName is its name (null when unknown).
+  int headHeardPeerSlots() const { return HEAD_HEARD_PEERS; }
+  int headHeardCount() const { return (int)_head_heard.count(); }
+  bool headHeardDmAt(int slot, uint8_t* prefix, size_t prefix_len, char* name, size_t name_cap) const;
+  const char* headHeardName(const uint8_t* prefix, size_t len) const;
+  ContactInfo* headSaveHeardPeer(const uint8_t* prefix, size_t len);
+  // The scratch contact a heard companion's DM is handled with.
+  bool isHeadHeardPeer(const ContactInfo& c) const { return &c == &_head_heard_peer; }
+#endif
   // Runtime copies use the wire PSK; storage/app keep the original alias PSK.
   bool getChannel(int channel_idx, ChannelDetails& channel);
   bool setChannel(int channel_idx, const ChannelDetails& channel);
@@ -690,6 +742,20 @@ public:
   bool canRecoverUsbLogging() const;
 
 private:
+#if UI_REPEATER_HEAD
+  // Home repeater (HeadContactPolicy.h), loaded from NVS on first use.
+  uint8_t _head_home[6] = {};
+  bool _head_home_valid = false;
+  bool _head_home_loaded = false;
+  // Set only while BaseChatMesh::onAdvertRecv() handles a home advert.
+  bool _head_advert_home = false;
+  head_policy::HeardPeers<HEAD_HEARD_PEERS> _head_heard;
+  ContactInfo _head_heard_peer;   // extraPeer() scratch
+  int _head_heard_slot = -1;      // slot _head_heard_peer holds (-1 none)
+  void headLoadHome();
+  void headNoteHome(const uint8_t* pub_key);
+  uint8_t deleteStoredContact(ContactInfo& contact);
+#endif
 #if COMPANION_FEATURE_DIRECT_OTA_ADMIN
   mesh::CompanionDirectAdminGuard _ota_direct_admin;
   ContactInfo _ota_direct_contact;
@@ -784,7 +850,13 @@ private:
 #endif
 #if COMPANION_FEATURE_TEXT_TERMINAL
   Stream& terminalOutput();
+#if UI_REPEATER_HEAD
+  // The on-screen Admin console is always a terminal client, with or
+  // without USB attached.
+  bool hasTerminalOutput() const { return true; }
+#else
   bool hasTerminalOutput() const { return _terminal_output != NULL; }
+#endif
   void printTerminalBanner(bool show_binary_stop);
   ContactInfo* getTerminalRecipient();
   void printTerminalPath(const ContactInfo& recipient);

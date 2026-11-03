@@ -15,6 +15,7 @@ static_assert(MAX_CORRELATED_CLI_TEXT_LEN <= MAX_TEXT_LEN,
               "correlated CLI text must fit the encrypted datagram");
 
 #include "ContactInfo.h"
+#include "ContactListOrder.h"
 
 #define MAX_SEARCH_RESULTS   24
 
@@ -181,7 +182,19 @@ protected:
   virtual bool shouldAutoAddContactType(uint8_t type) const { return true; }
   virtual void onContactsFull() {};
   virtual bool shouldOverwriteWhenFull() const { return false; }
+  // Which contact a full table overwrites: the oldest of the highest rank;
+  // 0 = never. Default: every non-favourite alike.
+  virtual int overwriteRank(const ContactInfo& c) const { return mesh::isFavoriteContact(c.flags) ? 0 : 1; }
   virtual uint8_t getAutoAddMaxHops() const { return 0; }  // 0 = no limit, 1 = direct (0 hops), N = up to N-1 hops
+  // Peers outside the contact table that a plain DM may come from (a repeater
+  // head's heard companions, HeadHeardPeers.h). Slot k (0..extraPeerCount()-1)
+  // is searched after the contacts as peer index kExtraPeerBase + k;
+  // extraPeer(k) returns a ContactInfo for it (null = empty slot), valid until
+  // the next call. Only TXT_TYPE_PLAIN messages are accepted from an extra
+  // peer; it is never written to the contact table here. Default: none.
+  static constexpr int kExtraPeerBase = 0x4000;
+  virtual int extraPeerCount() const { return 0; }
+  virtual ContactInfo* extraPeer(int k) { return nullptr; }
   virtual bool canMutateContacts() const { return true; }
   // Return false to preserve the exact selected contact when a subclass cannot
   // safely retire its associated persistent state. A refusal must not mutate

@@ -30,6 +30,11 @@
 // preference files are upgraded to power saving on exactly once, after which
 // an explicit user choice remains persistent.
 #define COMPANION_POWERSAVING_POLICY_VERSION 1
+// Fresh-install power-saving state. Primary ESP-NOW heads must keep the WiFi
+// radio awake to receive, so they build with 0.
+#ifndef COMPANION_POWERSAVING_DEFAULT
+#define COMPANION_POWERSAVING_DEFAULT 1
+#endif
 
 // Companion preferences remain stored by DataStore's explicit, append-only
 // binary field list. The adapter objects are appended after every persisted
@@ -368,7 +373,7 @@ inline bool migrateCompanionPowerSavingDefault(CompanionNodePrefs& prefs) {
     return false;
   }
 
-  prefs.powersaving_enabled = 1;
+  prefs.powersaving_enabled = COMPANION_POWERSAVING_DEFAULT;
   prefs.powersaving_policy_version = COMPANION_POWERSAVING_POLICY_VERSION;
   return true;
 }
