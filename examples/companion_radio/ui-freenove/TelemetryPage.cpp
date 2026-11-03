@@ -19,24 +19,45 @@ using mesh::head::FeedItem;
 using mesh::head::MeshModel;
 using mesh::head::NodeInfo;
 
+#if HMI_CYD
+const PanelRect TelemetryPage::kGauge[4] = {{4, 34, 76, 60}, {82, 34, 76, 60}, {160, 34, 76, 60}, {238, 34, 78, 60}};
+const PanelRect TelemetryPage::kRatePanel = {4, 98, 190, 64};
+const PanelRect TelemetryPage::kSnrPanel = {0, 0, 0, 0};      // not on the CYD
+const PanelRect TelemetryPage::kActivePanel = {0, 0, 0, 0};   // not on the CYD
+const PanelRect TelemetryPage::kNoisePanel = {198, 98, 118, 64};
+const PanelRect TelemetryPage::kVitalsPanel = {4, 166, 312, 42};
+#else
 const PanelRect TelemetryPage::kGauge[4] = {{6, 42, 114, 70}, {124, 42, 114, 70}, {242, 42, 114, 70}, {360, 42, 114, 70}};
 const PanelRect TelemetryPage::kRatePanel = {6, 116, 228, 92};
 const PanelRect TelemetryPage::kSnrPanel = {240, 116, 234, 92};
 const PanelRect TelemetryPage::kActivePanel = {6, 212, 228, 80};
 const PanelRect TelemetryPage::kNoisePanel = {240, 212, 116, 80};
 const PanelRect TelemetryPage::kVitalsPanel = {362, 212, 112, 80};
+#endif
 
 namespace {
 
 const char* const kGaugeTitles[4] = {"LAST SNR", "RSSI", "AIRTIME", "DUPES"};
 const float kStartDeg = 135.0f, kSweepDeg = 270.0f;
+#if HMI_CYD
+const int kGaugeCx = 18, kGaugeCy = 40;
+const float kGaugeR = 12.0f, kGaugeThick = 3.5f;
+const int kValueDy = 23, kSubDy = 41, kValueInset = 6;   // value / sub line in a gauge panel
+const AAFont& kValueFont = kFontTitle;
+const int kRateX = 30, kRateY = 124, kRateW = 158, kRateH = 22;
+const int kWfX = 0, kWfY = 0, kWfW = 2, kWfH = 1;   // no waterfall on the CYD
+const int kNfX = 206, kNfY = 126, kNfW = 104, kNfH = 32;
+#else
 const int kGaugeCx = 27, kGaugeCy = 47;   // ring centre in its panel
 const float kGaugeR = 19.0f, kGaugeThick = 4.5f;
+const int kValueDy = 27, kSubDy = 51, kValueInset = 8;
+const AAFont& kValueFont = kFontDigits;
 
 // Chart plot boxes (screen px).
 const int kRateX = 42, kRateY = 146, kRateW = 182, kRateH = 40;
 const int kWfX = 276, kWfY = 146, kWfW = 188, kWfH = 54;
 const int kNfX = 250, kNfY = 242, kNfW = 96, kNfH = 40;
+#endif
 
 uint16_t rssiColour(int rssi) {
   if (rssi >= -90) return theme::kSigStrong;
@@ -64,10 +85,16 @@ void formatUptime(char* out, size_t cap, uint32_t s) {
 TelemetryPage::TelemetryPage() : _drawn(false), _drawnMs(0), _drawnGen(0) {}
 
 int TelemetryPage::panels(const PanelRect*& out) const {
+#if HMI_CYD
+  static const PanelRect kAll[7] = {kGauge[0], kGauge[1], kGauge[2], kGauge[3], kRatePanel, kNoisePanel, kVitalsPanel};
+  out = kAll;
+  return 7;
+#else
   static const PanelRect kAll[9] = {kGauge[0], kGauge[1], kGauge[2], kGauge[3], kRatePanel,
                                     kSnrPanel, kActivePanel, kNoisePanel, kVitalsPanel};
   out = kAll;
   return 9;
+#endif
 }
 
 void TelemetryPage::onShow(uint32_t now_ms) {
@@ -91,6 +118,16 @@ void TelemetryPage::drawBackground(FrameBuffer565& fb) {
   drawPanel(fb, kRatePanel, "PACKETS / MIN", nullptr);
   // Axes of the rate chart: time ticks along the bottom.
   fb.hline(kRateX, kRateY + kRateH, kRateW, theme::kDivider);
+#if HMI_CYD
+  fb.text(kRateX, kRateY + kRateH + 1, "-60m", theme::kTextDim, kFontSmall);
+  fb.text(kRateX + kRateW / 2, kRateY + kRateH + 1, "-30m", theme::kTextDim, kFontSmall, FrameBuffer565::kCentreTop);
+  fb.text(kRateX + kRateW, kRateY + kRateH + 1, "now", theme::kTextDim, kFontSmall, FrameBuffer565::kRightTop);
+  drawPanel(fb, kNoisePanel, "NOISE", nullptr);
+  drawPanel(fb, kVitalsPanel, nullptr, nullptr);
+  static const char* const kVitCyd[3] = {"ESP-NOW 15m", "BATTERY", "UPTIME"};
+  for (int i = 0; i < 3; i++) fb.text(kVitalsPanel.x + 10 + i * 104, kVitalsPanel.y + 4, kVitCyd[i], theme::kTextDim, kFontSmall);
+  return;
+#endif
   fb.text(kRateX, kRateY + kRateH + 2, "-60m", theme::kTextDim, kFontSmall);
   fb.text(kRateX + kRateW / 2, kRateY + kRateH + 2, "-30m", theme::kTextDim, kFontSmall, FrameBuffer565::kCentreTop);
   fb.text(kRateX + kRateW, kRateY + kRateH + 2, "now", theme::kTextDim, kFontSmall, FrameBuffer565::kRightTop);
@@ -116,13 +153,15 @@ void TelemetryPage::draw(FrameBuffer565& fb, uint32_t now_ms) {
   _drawnGen = _ctx != nullptr ? _ctx->data_gen : 0;
   const MeshModel* m = _ctx != nullptr ? _ctx->model : nullptr;
   if (m == nullptr || !m->ok()) {
-    fb.text(240, 150, "MODEL UNAVAILABLE", theme::kBad, kFontBody, FrameBuffer565::kCentreTop);
+    fb.text(kMidX, kMidY, "MODEL UNAVAILABLE", theme::kBad, kFontBody, FrameBuffer565::kCentreTop);
     return;
   }
   drawGauges(fb, now_ms);
   drawRates(fb, now_ms);
-  drawWaterfall(fb);
-  drawActive(fb, now_ms);
+  if (!HMI_CYD) {
+    drawWaterfall(fb);
+    drawActive(fb, now_ms);
+  }
   drawNoise(fb, now_ms);
   drawVitals(fb, now_ms);
 }
@@ -202,8 +241,9 @@ void TelemetryPage::drawGauges(FrameBuffer565& fb, uint32_t now_ms) const {
     }
     if (!fresh) c = kDimText;
     widgets::ringGauge(fb, cx, cy, r, thick, kStartDeg, kSweepDeg, has, x, lo, hi, c);
-    fb.text(p.x + p.w - 8, p.y + 27, val, has && fresh ? theme::kText : kDimText, kFontDigits, FrameBuffer565::kRightTop);
-    fb.text(p.x + p.w - 8, p.y + 51, sub, theme::kTextDim, kFontSmall, FrameBuffer565::kRightTop);
+    fb.text(p.x + p.w - kValueInset, p.y + kValueDy, val, has && fresh ? theme::kText : kDimText, kValueFont,
+            FrameBuffer565::kRightTop);
+    fb.text(p.x + p.w - kValueInset, p.y + kSubDy, sub, theme::kTextDim, kFontSmall, FrameBuffer565::kRightTop);
   }
 }
 
@@ -232,10 +272,10 @@ void TelemetryPage::drawRates(FrameBuffer565& fb, uint32_t now_ms) const {
   const bool live = rx.from_head || (vt != nullptr && (uint32_t)(now_ms - m.vitalsMs()) < kRadioStaleMs);
   char note[32];
   if (!rx.known) snprintf(note, sizeof(note), "RX --");
-  else if (rx.from_head) snprintf(note, sizeof(note), "RX %u/min head", rx.rx);
-  else snprintf(note, sizeof(note), "RX %u/min", rx.rx);
-  fb.text(kRatePanel.x + kRatePanel.w - 8, kRatePanel.y + 6, note, live ? theme::kAccent : kDimText, kFontSmall,
-          FrameBuffer565::kRightTop);
+  else if (rx.from_head) snprintf(note, sizeof(note), HMI_CYD ? "%u head" : "RX %u/min head", rx.rx);
+  else snprintf(note, sizeof(note), HMI_CYD ? "RX %u" : "RX %u/min", rx.rx);
+  fb.text(kRatePanel.x + kRatePanel.w - kNoteInset, kRatePanel.y + kNoteDy, note, live ? theme::kAccent : kDimText,
+          kFontSmall, FrameBuffer565::kRightTop);
 }
 
 void TelemetryPage::drawWaterfall(FrameBuffer565& fb) const {
@@ -307,8 +347,8 @@ void TelemetryPage::drawNoise(FrameBuffer565& fb, uint32_t now_ms) const {
   char note[16];
   if (v != nullptr) snprintf(note, sizeof(note), "%d dBm", (int)v->noise_floor);
   else snprintf(note, sizeof(note), "-- dBm");
-  fb.text(kNoisePanel.x + kNoisePanel.w - 8, kNoisePanel.y + 6, note, live ? theme::kAccent : kDimText, kFontSmall,
-          FrameBuffer565::kRightTop);
+  fb.text(kNoisePanel.x + kNoisePanel.w - kNoteInset, kNoisePanel.y + kNoteDy, note, live ? theme::kAccent : kDimText,
+          kFontSmall, FrameBuffer565::kRightTop);
   int16_t nf[60];
   bool has[60];
   m.noiseFloorPerMinute(nf, has);
@@ -341,9 +381,14 @@ void TelemetryPage::drawVitals(FrameBuffer565& fb, uint32_t now_ms) const {
   } else {
     for (int i = 0; i < 3; i++) snprintf(vals[i], sizeof(vals[i]), "--");
   }
+#if HMI_CYD
+  for (int i = 0; i < 3; i++)
+    fb.text(kVitalsPanel.x + 10 + i * 104, kVitalsPanel.y + 20, vals[i], live ? theme::kText : kDimText, kFontTitle);
+#else
   for (int i = 0; i < 3; i++)
     fb.text(kVitalsPanel.x + kVitalsPanel.w - 8, 240 + i * 17, vals[i], live ? theme::kText : kDimText, kFontSmall,
             FrameBuffer565::kRightTop);
+#endif
 }
 
 }  // namespace freenove_ui

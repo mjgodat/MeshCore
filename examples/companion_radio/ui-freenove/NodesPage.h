@@ -29,9 +29,20 @@ namespace freenove_ui {
 class NodesPage : public Page {
  public:
   static const PanelRect kPanel;
+#if HMI_CYD
+  // CYD: NAME, AGE, SNR, HOP, PKT (TYPE and KM are left out: no room).
+  static const int kHeadY = 56, kHeadH = 20;
+  static const int kRowsY = 78, kRowH = 20, kRowsH = 128;
+#ifdef HMI_MODEL_NODES
+  static const int kMaxRows = HMI_MODEL_NODES;
+#else
+  static const int kMaxRows = 64;
+#endif
+#else
   static const int kHeadY = 68, kHeadH = 22;     // column header row
   static const int kRowsY = 92, kRowH = 20, kRowsH = 198;
   static const int kMaxRows = 256;
+#endif
   static const int kSlop = 10;                   // px before a press is a drag
 
   NodesPage();

@@ -427,7 +427,8 @@ void FreenoveUITask::pollTouch(uint32_t now_ms) {
   int x = -1, y = -1;
 #if defined(FREENOVE_UITEST) && FREENOVE_UITEST
   bool down = _display.touch().read(x, y);
-  freenove_uitest::overrideTouch(now_ms, down, x, y);   // an injected gesture wins
+  if (!freenove_uitest::overrideTouch(now_ms, down, x, y))   // an injected gesture wins
+    freenove_uitest::noteRealTouch(down, x, y);
 #else
   const bool down = _display.touch().read(x, y);
 #endif

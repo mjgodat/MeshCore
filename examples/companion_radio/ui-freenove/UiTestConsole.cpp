@@ -148,6 +148,18 @@ bool takeShotRequest(ShotSink& sink, void*& ctx) {
 void shotDone() { s_shotBusy.store(false); }
 bool shotPending() { return s_shotBusy.load(); }
 
+std::atomic<uint32_t> s_realPresses{0};
+std::atomic<int> s_realX{-1}, s_realY{-1};
+bool s_realDown = false;
+void noteRealTouch(bool down, int x, int y) {
+  if (down && !s_realDown) {
+    s_realPresses.fetch_add(1);
+    s_realX.store(x);
+    s_realY.store(y);
+  }
+  s_realDown = down;
+}
+
 portMUX_TYPE s_statsMux = portMUX_INITIALIZER_UNLOCKED;
 uint32_t s_stats[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 void noteStats(uint32_t frames, uint32_t window_ms, uint32_t render_us, uint32_t push_us, uint32_t bands,
@@ -324,13 +336,15 @@ void cmdStats() {
   portEXIT_CRITICAL(&freenove_uitest::s_statsMux);
   const double f = s[0] ? (double)s[0] : 1.0;
   reply("STATS frames=%lu window_ms=%lu fps=%.1f render_ms=%.1f chrome_ms=%.1f page_ms=%.1f header_ms=%.1f "
-        "push_ms=%.1f frame_ms=%.1f bands=%.1f heap=%u min_heap=%u largest=%u cpu=%u",
+        "push_ms=%.1f frame_ms=%.1f bands=%.1f heap=%u min_heap=%u largest=%u cpu=%u real_presses=%lu last=%d,%d",
         (unsigned long)s[0], (unsigned long)s[1], s[1] ? s[0] * 1000.0 / s[1] : 0.0, s[2] / 1000.0 / f,
         s[5] / 1000.0 / f, s[6] / 1000.0 / f, s[7] / 1000.0 / f,
         s[3] / 1000.0 / f, (s[2] + s[3]) / 1000.0 / f, s[4] / f,
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)getCpuFrequencyMhz());
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)getCpuFrequencyMhz(),
+        (unsigned long)freenove_uitest::s_realPresses.load(), freenove_uitest::s_realX.load(),
+        freenove_uitest::s_realY.load());
 }
 #else
 void cmdShot(int first, int last) {

@@ -24,7 +24,11 @@ using mesh::head::MeshModel;
 using mesh::head::NodeInfo;
 using mesh::head::PathHash;
 
+#if HMI_CYD
+const PanelRect MapPage::kPanel = {4, kHeaderH + 2, 312, 174};
+#else
 const PanelRect MapPage::kPanel = {6, kHeaderH + 2, 468, 250};
+#endif
 
 namespace {
 
@@ -103,7 +107,12 @@ int MapPage::arcsActive(uint32_t now_ms) const {
 bool MapPage::wantsFrame(uint32_t now_ms) {
   if (_card != nullptr && _card->isOpen()) return _card->wantsFrame(now_ms);
   if (!_drawn) return true;
-  if (arcsActive(now_ms) > 0 || arcsActive(_drawnMs) > 0) return true;
+  if (!profile::kAnimations) {
+    // CYD: a frame when an arc ends, none while it shows.
+    if (arcsActive(now_ms) < arcsActive(_drawnMs)) return true;
+  } else if (arcsActive(now_ms) > 0 || arcsActive(_drawnMs) > 0) {
+    return true;
+  }
   if (_ctx != nullptr && _ctx->data_gen != _drawnGen) return true;
   return (uint32_t)(now_ms - _drawnMs) >= 1000;
 }
@@ -364,7 +373,7 @@ void MapPage::drawArcs(FrameBuffer565& fb, uint32_t now_ms) const {
     const float mx = (x0 + x1) * 0.5f, my = (y0 + y1) * 0.5f;
     const float qx = mx + (y1 - y0) * 0.2f, qy = my - (x1 - x0) * 0.2f;
     const float life = (float)t / (float)kArcMs;
-    const unsigned alpha = life < 0.5f ? 255u : (unsigned)(255.0f * (1.0f - life) * 2.0f);
+    const unsigned alpha = !profile::kAnimations || life < 0.5f ? 255u : (unsigned)(255.0f * (1.0f - life) * 2.0f);
     float px = x0, py = y0;
     for (int s = 1; s <= 16; s++) {
       const float u = (float)s / 16.0f, v = 1.0f - u;
@@ -373,7 +382,7 @@ void MapPage::drawArcs(FrameBuffer565& fb, uint32_t now_ms) const {
       px = bx;
       py = by;
     }
-    if (life < 0.6f) {   // the packet travelling along it
+    if (profile::kAnimations && life < 0.6f) {   // the packet travelling along it
       const float u = life / 0.6f, v = 1.0f - u;
       const float bx = v * v * x0 + 2 * v * u * qx + u * u * x1, by = v * v * y0 + 2 * v * u * qy + u * u * y1;
       fb.aaRing(bx, by, 6.0f, 1.5f, theme::kRoute, 150);
@@ -388,17 +397,17 @@ void MapPage::draw(FrameBuffer565& fb, uint32_t now_ms) {
   _drawnGen = _ctx != nullptr ? _ctx->data_gen : 0;
   const MeshModel* m = _ctx != nullptr ? _ctx->model : nullptr;
   if (m == nullptr || !m->ok()) {
-    fb.text(240, 150, "MODEL UNAVAILABLE", theme::kBad, kFontBody, FrameBuffer565::kCentreTop);
+    fb.text(kMidX, kMidY, "MODEL UNAVAILABLE", theme::kBad, kFontBody, FrameBuffer565::kCentreTop);
     return;
   }
-  sync(now_ms);
+  if (firstBand()) sync(now_ms);
   if (_card != nullptr && _card->isOpen()) {
     _card->draw(fb, now_ms);
     return;
   }
   char note[32];
   snprintf(note, sizeof(note), "%d with GPS", _withGps);
-  fb.text(kPanel.x + kPanel.w - 8, kPanel.y + 6, note, theme::kAccent, kFontSmall, FrameBuffer565::kRightTop);
+  fb.text(kPanel.x + kPanel.w - kNoteInset, kPanel.y + kNoteDy, note, theme::kAccent, kFontSmall, FrameBuffer565::kRightTop);
   fb.setClip(kAreaX, kAreaY, kAreaW, kAreaH);
   const int cx = kAreaX + _geo.cx(), cy = kAreaY + _geo.cy();
   Boxes taken;
@@ -406,7 +415,8 @@ void MapPage::draw(FrameBuffer565& fb, uint32_t now_ms) {
   // Notes first (labels keep clear of them).
   char gpsNote[32] = "";
   if (_noGps > 0) snprintf(gpsNote, sizeof(gpsNote), "%d without GPS", _noGps);
-  const char* top = _fix ? nullptr : "Repeater has no GPS fix: contacts placed by their own positions";
+  const char* top = _fix ? nullptr
+                         : (HMI_CYD ? "Repeater has no GPS fix" : "Repeater has no GPS fix: contacts placed by their own positions");
   if (top != nullptr) taken.add(kAreaX + 4, kAreaY + 2, kAreaX + 4 + FrameBuffer565::textWidth(top, kFontSmall), kAreaY + 2 + sh);
   if (gpsNote[0])
     taken.add(kAreaX + 4, kAreaY + kAreaH - sh - 3, kAreaX + 4 + FrameBuffer565::textWidth(gpsNote, kFontSmall),

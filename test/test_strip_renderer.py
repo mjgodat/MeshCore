@@ -110,10 +110,10 @@ static void band_primitives() {
   b.resetClip();
   b.clear(theme::kText);
   CHECK(b.get(5, 100) == theme::kText && b.get(5, 109) == theme::kText && b.get(5, 99) == 0 && b.get(5, 110) == 0);
-  b.setBand(230, 10);
-  CHECK(b.clipY0() == 230 && b.clipY1() == 239);
-  b.setBand(235, 10);   // clamped to the frame
-  CHECK(b.bandRows() == 5 && b.clipY1() == 239);
+  b.setBand(H - 10, 10);
+  CHECK(b.clipY0() == H - 10 && b.clipY1() == H - 1);
+  b.setBand(H - 5, 10);   // clamped to the frame
+  CHECK(b.bandRows() == 5 && b.clipY1() == H - 1);
   if (!failures) std::printf("PASS band_primitives\n");
 }
 
@@ -256,6 +256,69 @@ static void cyd_layout() {
   if (!failures) std::printf("PASS cyd_layout\n");
 }
 
+// Every touch target is a drawn control at the same place: HOME tiles,
+// the tab bar, the node card's CLOSE, the NODES column headers.
+static void hit_targets_drawn() {
+  Stack s(true);
+  std::vector<uint16_t> full((size_t)W * H);
+  FrameBuffer565 fb(full.data(), W, H);
+  const uint32_t now = s.t;
+  auto px = [&](int x, int y) { return full[(size_t)y * W + x]; };
+  // HOME: every pixel that hits a tile lies on that tile as drawn (+ the
+  // 2 px slop), the tile is on the screen and filled with a tile colour.
+  HomePage& home = *static_cast<HomePage*>(s.set.page(PageSet::kHome));
+  home.onShow(now);
+  drawFrame(fb, home, s.ctx, PageSet::kHome, PageSet::kCount, now);
+  bool seen[hmi::kTileCount] = {false};
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++) {
+      const int t = HomePage::tileAt(x, y);
+      if (t < 0) continue;
+      int pos = -1;
+      for (int i = 0; i < HomePage::kTilesShown; i++) if (HomePage::tileId(i) == t) pos = i;
+      CHECK(pos >= 0);
+      if (pos < 0) continue;
+      seen[t] = true;
+      const int tx = HomePage::kTileX + pos * HomePage::kTilePitch;
+      CHECK(x >= tx - 2 && x < tx + HomePage::kTileW + 2 && y >= HomePage::kTileY - 2 &&
+            y < HomePage::kTileY + HomePage::kTileH + 2);
+    }
+  for (int i = 0; i < HomePage::kTilesShown; i++) {
+    const int t = HomePage::tileId(i);
+    CHECK(seen[t]);
+    const int tx = HomePage::kTileX + i * HomePage::kTilePitch;
+    CHECK(tx >= 0 && tx + HomePage::kTileW <= W && HomePage::kTileY + HomePage::kTileH <= H - kTabBarH);
+    const uint16_t c = px(tx + 3, HomePage::kTileY + HomePage::kTileH / 2);
+    CHECK(c == theme::kTileOnFill || c == theme::kTileOffFill);
+  }
+  // Tiles not shown on this screen are never hit.
+  for (int t = 0; t < hmi::kTileCount; t++) {
+    bool shownTile = false;
+    for (int i = 0; i < HomePage::kTilesShown; i++) shownTile |= HomePage::tileId(i) == t;
+    if (!shownTile) CHECK(!seen[t]);
+  }
+  // Tab bar: every tab hit lies on its drawn tab tile (inset 3 px).
+  PageNav nav(PageSet::kCount);
+  for (int i = 0; i < PageSet::kCount; i++) {
+    const int cx = (nav.tabX(i) + nav.tabX(i + 1)) / 2, cy = nav.barY() + 6;
+    CHECK(nav.tabAt(cx, cy) == i);
+    const uint16_t c = px(nav.tabX(i) + 4, cy);
+    CHECK(c == theme::kTabFill || c == theme::kTabActiveFill);
+  }
+  // Node card: CLOSE drawn where it is hit.
+  int x = 0, y = 0;
+  if (home.contactPos(1, x, y)) { home.touch(x, y, true); home.touch(x, y, false); }
+  drawFrame(fb, home, s.ctx, PageSet::kHome, PageSet::kCount, now + 20);
+  CHECK(NodeCard::kCloseX >= 0 && NodeCard::kCloseX + NodeCard::kCloseW <= W && NodeCard::kCloseY + NodeCard::kCloseH <= H);
+  CHECK(px(NodeCard::kCloseX + 3, NodeCard::kCloseY + NodeCard::kCloseH / 2) == theme::kTileOnFill);
+  // NODES: a header hit is a column that is shown (has width).
+  for (int hx = 0; hx < W; hx++) {
+    const int c = NodesPage::columnAt(hx);
+    if (c >= 0) CHECK(NodesPage::columnX1(c) > NodesPage::columnX0(c) || c == widgets::kColCount - 1);
+  }
+  if (!failures) std::printf("PASS hit_targets_drawn\n");
+}
+
 // ------------------------------------------------------------ previews
 
 static bool save(const std::vector<uint16_t>& px, const std::string& path) {
@@ -300,7 +363,7 @@ static int preview(const char* dir) {
   now += 4000;
   {
     int x = 0, y = 0;
-    if (static_cast<HomePage*>(home)->contactPos(2, x, y)) { home->touch(x, y, true); home->touch(x, y, false); }
+    if (static_cast<HomePage*>(home)->contactPos(1, x, y)) { home->touch(x, y, true); home->touch(x, y, false); }
   }
   now += 50;
   shot(PageSet::kHome, "cyd_home_card");
@@ -330,13 +393,15 @@ int main(int argc, char** argv) {
   else if (name == "strip_renderer_pushes") strip_renderer_pushes();
   else if (name == "pages_strip_equals_full") pages_strip_equals_full();
   else if (name == "cyd_layout") cyd_layout();
+  else if (name == "hit_targets_drawn") hit_targets_drawn();
   else { std::printf("unknown scenario %s\n", name.c_str()); return 2; }
   return failures ? 1 : 0;
 }
 '''
 
 SOURCES = test_widgets.SOURCES
-SCENARIOS = ('band_primitives', 'strip_renderer_pushes', 'pages_strip_equals_full', 'cyd_layout')
+SCENARIOS = ('band_primitives', 'strip_renderer_pushes', 'pages_strip_equals_full', 'cyd_layout',
+             'hit_targets_drawn')
 
 
 def build(work, cyd):

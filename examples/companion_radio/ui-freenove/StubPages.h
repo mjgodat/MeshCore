@@ -36,6 +36,12 @@ namespace freenove_ui {
 static const int kHeaderH = profile::kHeaderH;
 // Panel header row (title, note, divider on its last row).
 static const int kPanelHeaderH = profile::kPanelHeaderH;
+// A panel's header note: right edge inset and top offset from the panel.
+static const int kNoteInset = HMI_CYD ? 7 : 8;
+static const int kNoteDy = HMI_CYD ? 4 : 6;
+// Centre of the content area (messages such as MODEL UNAVAILABLE).
+static const int kMidX = profile::kScreenW / 2;
+static const int kMidY = HMI_CYD ? 110 : 150;
 // Widest repeater name in the header (cut with '~' beyond).
 #if HMI_CYD
 static const int kHeaderNameMaxPx = 210;

@@ -40,6 +40,10 @@ bool takeShotRequest(ShotSink& sink, void*& ctx);
 void shotDone();
 bool shotPending();
 
+// Page task: a sample from the touch controller itself (no gesture
+// injected); press edges are counted with the last press position.
+void noteRealTouch(bool down, int x, int y);
+
 // Either side.
 int currentPage();
 const char* currentPageTitle();

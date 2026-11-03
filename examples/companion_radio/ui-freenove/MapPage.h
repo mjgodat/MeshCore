@@ -30,12 +30,18 @@ namespace freenove_ui {
 class MapPage : public Page {
  public:
   static const PanelRect kPanel;
+#if HMI_CYD
+  // CYD: the whole content area (4,34 312x174); no travelling packet on the
+  // arcs (they show while active, then go).
+  static const int kAreaX = 6, kAreaY = 56, kAreaW = 308, kAreaH = 150;
+#else
   static const int kAreaX = 8, kAreaY = 68, kAreaW = 464, kAreaH = 222;
+#endif
   static const int kMaxShown = 64;
   static const int kMaxArcs = 8;
   static const uint32_t kArcMs = 2500;
   static const int kHitR = 18;          // tap distance to a contact (px)
-  static const int kNodeR = 5;
+  static const int kNodeR = HMI_CYD ? 4 : 5;
 
   MapPage();
   const char* title() const override { return "MAP"; }

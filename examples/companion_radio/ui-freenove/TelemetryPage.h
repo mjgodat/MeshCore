@@ -20,6 +20,11 @@
 //   VITALS (362,212 112x80): ESP-NOW peers, battery, uptime
 // Frames: when the model changes (at most every kMinDataGapMs) and once a
 // second for ages and staleness.
+//
+// CYD (HMI_CYD, 320x240): the four gauges (4..316, y 34..93), PACKETS / MIN
+// (4,98 190x64), NOISE (198,98 118x64) and VITALS as one strip (4,166
+// 312x42). SNR WATERFALL and ACTIVE NODES are left out: the 2.8" screen
+// has room for them only at an unreadable size.
 
 #include <stdint.h>
 

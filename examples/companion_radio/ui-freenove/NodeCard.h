@@ -34,8 +34,15 @@ class NodeCard {
  public:
   static const PanelRect kRect;
   // CLOSE button (screen px).
+#if HMI_CYD
+  // CYD: the content area (4,34 312x174), two columns: SIGNAL / LAST PATH
+  // left, POSITION / LAST PACKETS (4) right.
+  static const int kCloseX = 250, kCloseY = 36, kCloseW = 62, kCloseH = 18;
+  static const int kLastPackets = 4;
+#else
   static const int kCloseX = 392, kCloseY = 45, kCloseW = 76, kCloseH = 21;
   static const int kLastPackets = 5;
+#endif
   static const uint32_t kRefreshMs = 1000;   // ages tick
   static const uint32_t kMinDataGapMs = 250; // new data: at most 4 frames/s
 
