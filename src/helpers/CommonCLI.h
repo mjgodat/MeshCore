@@ -34,6 +34,7 @@
 #if defined(WITH_UDP_BRIDGE)
 #include <helpers/UDPBridgePrefs.h>
 #endif
+#include <helpers/ObserverSettings.h>
 #if MESH_ENABLE_FLEET_CONTROL
 #include <helpers/FleetChannel.h>
 #endif
@@ -738,6 +739,10 @@ public:
   }
   virtual bool sendEspNowTest(uint32_t nonce) { (void)nonce; return false; }
   virtual bool resetEspNowStats() { return false; }
+#endif
+#if defined(MESH_ESPNOW_OBSERVER_SETTINGS)
+  // observer.transport: channels and per-transport state for the CLI.
+  virtual void getObserverRuntime(mesh::espnow::ObserverRuntime& runtime) { (void)runtime; }
 #endif
 
   virtual void restartBridgeSlot(int slot) {

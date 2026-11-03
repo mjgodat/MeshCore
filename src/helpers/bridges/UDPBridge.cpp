@@ -8,13 +8,18 @@
 #include <lwip/sockets.h>
 #include <SHA256.h>
 #include <esp_system.h>
+#include <new>
 
 namespace udp = mesh::bridge::udp;
 static_assert(sizeof(UDPBridge) <= 3072, "UDP bridge object exceeds its Full memory reserve");
 
 UDPBridge::UDPBridge(NodePrefs* prefs, mesh::PacketManager* mgr, mesh::RTCClock* rtc,
                      const udp::Prefs* settings) : BridgeBase(prefs, mgr, rtc), _settings(settings) {}
-UDPBridge::~UDPBridge() { end(); }
+UDPBridge::~UDPBridge() { end(); delete _observer; }
+bool UDPBridge::ensureObserverOutbox() {
+  if (!_observer) _observer = new (std::nothrow) mesh::observer::Outbox();
+  return _observer != nullptr;
+}
 void UDPBridge::note(uint32_t& value) { udp::increment(value); _debug_dirty = true; }
 void UDPBridge::error(int code) { _last_error = code; _debug_dirty = true; }
 uint64_t UDPBridge::randomNonce() {
@@ -78,6 +83,8 @@ void UDPBridge::begin() {
 void UDPBridge::end() {
   if (_socket >= 0) { close(_socket); _socket = -1; }
   _initialized = false; _tx_mask = 0; _tx_length = _rx_length = 0;
+  discardObserverFrames();
+  for (auto& until : _observer_until) until = 0;
   _boot = 0; _sequence = 0;
   for (auto& session : _sessions) session = udp::Session{};
   memset(_secret, 0, sizeof(_secret)); _secret_length = 0; _secret_valid = false;
@@ -188,6 +195,7 @@ void UDPBridge::receiveFrame(uint8_t peer, const uint8_t* data, size_t length) {
     const bool changed = session.remote != frame.sender;
     if (session.prove(frame.sender, udp::get64(frame.payload), now)) {
       note(_stats.established);
+      if (changed) _observer_until[peer] = 0;  // a new boot subscribes again
       // Expedite the reciprocal challenge after first learning a boot. This
       // also recovers a dropped startup Hello without a long ready interval.
       if (changed) session.next_hello = now;
@@ -198,6 +206,13 @@ void UDPBridge::receiveFrame(uint8_t peer, const uint8_t* data, size_t length) {
   if (frame.kind == udp::Kind::Probe) {
     _stats.last_rx_nonce = udp::get32(frame.payload); note(_stats.probe_received); return;
   }
+  if (frame.kind == udp::Kind::Subscribe) {
+    // Never 0 while subscribed: 0 means "not subscribed".
+    _observer_until[peer] = frame.payload[0] ? ((now + 60000U) | 1U) : 0;
+    _debug_dirty = true;
+    return;
+  }
+  if (frame.kind == udp::Kind::Observer) { note(_stats.filtered); return; }  // heads only
   // Copy verified bytes into one bounded holding slot before allocating from
   // the shared mesh pool. A full slot stops socket reads, preserving its owner.
   memcpy(_rx_payload, frame.payload, frame.length); _rx_length = frame.length;
@@ -283,11 +298,44 @@ bool UDPBridge::sendTest(uint8_t peer, uint32_t nonce) {
   _tx_mask = static_cast<uint8_t>(1U << peer); _tx_kind = udp::Kind::Probe; _tx_sequence = sequence;
   _stats.last_tx_nonce = nonce; note(_stats.probe_queued); return true;
 }
+uint8_t UDPBridge::observerMask() const {
+  const uint32_t now = millis();
+  uint8_t mask = 0;
+  for (uint8_t i = 0; i < udp::MAX_PEERS; ++i)
+    if (_active.peers[i].port && _sessions[i].remote && _observer_until[i]
+        && !udp::due(now, _observer_until[i])) mask |= uint8_t(1U << i);
+  return mask;
+}
+uint8_t UDPBridge::observerSubscribers() const {
+  if (!_initialized) return 0;
+  uint8_t count = 0;
+  for (uint8_t mask = observerMask(); mask; mask &= uint8_t(mask - 1)) ++count;
+  return count;
+}
+void UDPBridge::pumpObserver() {
+  // One observer frame per loop, only when no mesh fan-out is pending.
+  if (_tx_mask || !_observer || _observer->empty()) return;
+  const uint8_t mask = observerMask();
+  uint8_t frame[mesh::observer::MAX_PACKET_FRAME];
+  const size_t length = _observer->pop(frame, sizeof(frame));
+  if (!length || !mask) return;
+  bool ok = true;
+  for (uint8_t i = 0; i < udp::MAX_PEERS; ++i) {
+    if (!(mask & (1U << i))) continue;
+    const bool sent = sendFrame(i, udp::Kind::Observer, _sessions[i].remote, frame,
+                                static_cast<uint16_t>(length));
+    udp::increment(sent ? _observer_peer_sends : _observer_peer_fails);
+    ok = ok && sent;
+  }
+  _observer->noteSent(ok);
+}
 void UDPBridge::loop() {
-  if (_initialized) { drainReceive(); pumpReceive(); pumpTransmit(); pumpHello(); }
+  if (_initialized) { drainReceive(); pumpReceive(); pumpTransmit(); pumpObserver(); pumpHello(); }
   emitDebug();
 }
-void UDPBridge::resetStats() { _stats = Stats{}; _debug_dirty = true; }
+void UDPBridge::resetStats() {
+  _stats = Stats{}; _observer_peer_sends = _observer_peer_fails = 0; _debug_dirty = true;
+}
 void UDPBridge::formatStatus(char* out, size_t capacity) const {
   if (!out || !capacity) return;
   unsigned peers = 0, ready = 0;
@@ -323,7 +371,16 @@ void UDPBridge::formatStats(const char* page, char* out, size_t capacity) const 
   else if (!strcmp(page, "test")) snprintf(out, capacity, "> queued=%lu sent=%lu fail=%lu rx=%lu txid=%08lX rxid=%08lX",
       (unsigned long)s.probe_queued, (unsigned long)s.probe_sent, (unsigned long)s.probe_failed,
       (unsigned long)s.probe_received, (unsigned long)s.last_tx_nonce, (unsigned long)s.last_rx_nonce);
-  else snprintf(out, capacity, "Error: use get udp.stats [rx|tx|drops|test]");
+  else if (!strcmp(page, "obs")) {
+    const mesh::observer::OutboxStats none{};
+    const auto& o = _observer ? _observer->stats() : none;
+    snprintf(out, capacity, "> subs=%u queued=%lu ok=%lu fail=%lu rate=%lu preempt=%lu overflow=%lu peer.ok=%lu peer.fail=%lu",
+        unsigned(observerSubscribers()), (unsigned long)o.queued, (unsigned long)o.sent_ok,
+        (unsigned long)o.sent_fail, (unsigned long)o.rate_drops, (unsigned long)o.preempt_drops,
+        (unsigned long)o.overflow_drops, (unsigned long)_observer_peer_sends,
+        (unsigned long)_observer_peer_fails);
+  }
+  else snprintf(out, capacity, "Error: use get udp.stats [rx|tx|drops|test|obs]");
   out[capacity - 1] = 0;
 }
 void UDPBridge::emitDebug() {

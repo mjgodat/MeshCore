@@ -287,6 +287,13 @@ public:
   bool sendObserverFrame(const uint8_t* frame, size_t len);
   /** Drops queued observer frames (espnow.observer off; also done by end()). */
   void discardObserverFrames() { _observer.clear(); }
+  /**
+   * observer.transport fan-out (ObserverRateLimiter.h Fanout): the outbox the
+   * shared rate limiter offers admitted frames to, and whether mesh traffic
+   * is queued (packet records then yield). loop() context only.
+   */
+  mesh::observer::Outbox& observerOutbox() { return _observer; }
+  bool observerMeshPending();
   void resetStats();
 };
 

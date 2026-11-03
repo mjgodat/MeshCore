@@ -1326,10 +1326,90 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 }
 
 #if defined(WITH_ESPNOW_BRIDGE)
+bool MyMesh::EspNowObserverSink::observerActive() const {
+  return mesh::espnow::espNowObserverEnabled()
+      && mesh::observer::usesEspNow(mesh::espnow::observerTransport())
+      && self->isEspNowBridgeRunning();
+}
+bool MyMesh::EspNowObserverSink::observerMeshPending() const {
+  return self->diagnosticEspNowBridge().observerMeshPending();
+}
+mesh::observer::Outbox& MyMesh::EspNowObserverSink::observerOutbox() {
+  return self->diagnosticEspNowBridge().observerOutbox();
+}
+#ifdef WITH_UDP_BRIDGE
+bool MyMesh::UdpObserverSink::observerActive() const {
+  return mesh::espnow::espNowObserverEnabled()
+      && mesh::observer::usesUdp(mesh::espnow::observerTransport())
+      && self->isUDPBridgeRunning() && self->udp_bridge->observerSubscribers() > 0
+      && self->udp_bridge->ensureObserverOutbox();
+}
+bool MyMesh::UdpObserverSink::observerMeshPending() const {
+  return self->udp_bridge && self->udp_bridge->observerMeshPending();
+}
+mesh::observer::Outbox& MyMesh::UdpObserverSink::observerOutbox() {
+  return self->udp_bridge->observerOutbox();  // only reached while active
+}
+#endif
+
+bool MyMesh::observerFeedActive() {
+  _observer_espnow_sink.self = this;
+#ifdef WITH_UDP_BRIDGE
+  _observer_udp_sink.self = this;
+  if (_observer_udp_sink.observerActive()) return true;
+#endif
+  return _observer_espnow_sink.observerActive();
+}
+
+void MyMesh::offerObserverFrame(const uint8_t* frame, size_t len) {
+#ifdef WITH_UDP_BRIDGE
+  mesh::observer::FanoutSink* sinks[] = {&_observer_espnow_sink, &_observer_udp_sink};
+#else
+  mesh::observer::FanoutSink* sinks[] = {&_observer_espnow_sink};
+#endif
+  _observer_fanout.offer(frame, len, millis(), sinks, sizeof(sinks) / sizeof(sinks[0]));
+}
+
+void MyMesh::describeObserverTransport(void* ctx, char* out, size_t capacity) {
+  MyMesh* self = static_cast<MyMesh*>(ctx);
+  int used = snprintf(out, capacity, "(espnow ch %u %s", unsigned(self->_prefs.bridge_channel),
+                      self->isEspNowBridgeRunning() ? "running" : "stopped");
+#ifdef WITH_UDP_BRIDGE
+  if (used > 0 && size_t(used) < capacity) {
+    used += snprintf(out + used, capacity - used, "; udp %s subs=%u",
+        self->isUDPBridgeRunning() ? "ready" : "off",
+        unsigned(self->udp_bridge ? self->udp_bridge->observerSubscribers() : 0));
+  }
+  mesh::espnow::ObserverRuntime runtime;
+  self->getObserverRuntime(runtime);
+  if (used > 0 && size_t(used) < capacity
+      && mesh::observer::checkChannel(runtime.espnow_channel, runtime.ap_channel)
+          == mesh::observer::ChannelCheck::Mismatch) {
+    used += snprintf(out + used, capacity - used, "; WiFi on ch %u", unsigned(runtime.ap_channel));
+  }
+#endif
+  if (used > 0 && size_t(used) < capacity) snprintf(out + used, capacity - used, ")");
+  if (!mesh::espnow::espNowObserverEnabled() && used > 0 && size_t(used) + 1 < capacity) {
+    const size_t at = strlen(out);
+    snprintf(out + at, capacity - at, " observer off");
+  }
+}
+
+void MyMesh::getObserverRuntime(mesh::espnow::ObserverRuntime& runtime) {
+  runtime.espnow_channel = _prefs.bridge_channel;
+#ifdef WITH_UDP_BRIDGE
+  runtime.udp_available = true;
+  runtime.ap_channel = (WiFi.getMode() & WIFI_STA) && WiFi.status() == WL_CONNECTED
+      ? static_cast<uint8_t>(WiFi.channel()) : 0;
+#endif
+  runtime.describe = describeObserverTransport;
+  runtime.ctx = this;
+}
+
 void MyMesh::emitObserverPacket(float snr, float rssi, const uint8_t raw[], int len) {
   // Up to MAX_RAW (235) bytes are exact; longer packets send their first
   // MAX_RAW bytes with the record's truncated flag set.
-  if (raw == NULL || len <= 0 || !isEspNowBridgeRunning()) return;
+  if (raw == NULL || len <= 0 || !observerFeedActive()) return;
   mesh::observer::PacketRecord record;
   if (!mesh::observer::setPacketBytes(record, raw, (size_t)len)) return;
   record.rx_ms = millis();
@@ -1339,14 +1419,22 @@ void MyMesh::emitObserverPacket(float snr, float rssi, const uint8_t raw[], int 
   record.disp = mesh::observer::Disposition::Unknown;
   uint8_t frame[mesh::observer::MAX_PACKET_FRAME];
   const size_t frame_len = mesh::observer::encodePacket(record, frame, sizeof(frame));
-  if (frame_len) diagnosticEspNowBridge().sendObserverFrame(frame, frame_len);
+  if (frame_len) offerObserverFrame(frame, frame_len);
 }
 
 void MyMesh::serviceObserverVitals() {
   ObserverWindow& w = _observer_window;
-  if (!mesh::espnow::espNowObserverEnabled() || !isEspNowBridgeRunning()) {
-    // `set espnow.observer off` takes effect before the next bridge pump.
-    diagnosticEspNowBridge().discardObserverFrames();
+  observerFeedActive();  // binds the sinks
+  const bool espnow_on = _observer_espnow_sink.observerActive();
+  // `set observer off` (or a transport change) takes effect before the next pump.
+  if (!espnow_on) diagnosticEspNowBridge().discardObserverFrames();
+#ifdef WITH_UDP_BRIDGE
+  const bool udp_on = _observer_udp_sink.observerActive();
+  if (!udp_on && udp_bridge) udp_bridge->discardObserverFrames();
+#else
+  const bool udp_on = false;
+#endif
+  if (!espnow_on && !udp_on) {
     w.started = false;
     return;
   }
@@ -1396,7 +1484,7 @@ void MyMesh::serviceObserverVitals() {
 #endif
     uint8_t frame[mesh::observer::VITALS_FRAME];
     const size_t frame_len = mesh::observer::encodeVitals(v, frame, sizeof(frame));
-    if (frame_len) diagnosticEspNowBridge().sendObserverFrame(frame, frame_len);
+    if (frame_len) offerObserverFrame(frame, frame_len);
   }
   w.started = true;
   w.at_ms = now;

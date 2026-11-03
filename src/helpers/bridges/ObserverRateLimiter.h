@@ -64,11 +64,24 @@ enum class Offer : uint8_t { Queued, RateLimited, Preempted, Invalid };
 class Outbox {
 public:
   Offer offer(const uint8_t* frame, size_t len, uint32_t now_ms, bool mesh_pending) {
+    return offerImpl(frame, len, &now_ms, mesh_pending);
+  }
+
+  // Same as offer() without this outbox's own token bucket: the caller's
+  // shared Fanout bucket already admitted the record (observer.transport both).
+  Offer offerAdmitted(const uint8_t* frame, size_t len, bool mesh_pending) {
+    return offerImpl(frame, len, nullptr, mesh_pending);
+  }
+  // A packet record this transport would have taken, refused by the shared bucket.
+  void noteRateDrop() { ++_stats.rate_drops; }
+
+private:
+  Offer offerImpl(const uint8_t* frame, size_t len, const uint32_t* now_ms, bool mesh_pending) {
     if (!isObserverFrame(frame, len) || len > MAX_PACKET_FRAME) return Offer::Invalid;
     const bool vitals = frame[5] == (uint8_t)Kind::Vitals;
     if (!vitals) {
       if (mesh_pending) { ++_stats.preempt_drops; return Offer::Preempted; }
-      if (!_bucket.take(now_ms)) { ++_stats.rate_drops; return Offer::RateLimited; }
+      if (now_ms && !_bucket.take(*now_ms)) { ++_stats.rate_drops; return Offer::RateLimited; }
     }
     if (_count == kOutboxDepth) {
       uint8_t victim = 0;
@@ -84,6 +97,7 @@ public:
     return Offer::Queued;
   }
 
+public:
   bool empty() const { return _count == 0; }
   uint8_t size() const { return _count; }
 
@@ -111,6 +125,54 @@ private:
   uint8_t _count = 0;
   TokenBucket _bucket;
   OutboxStats _stats;
+};
+
+// One observer frame to every active transport (observer.transport espnow,
+// udp or both). Packet records pass ONE shared token bucket, so `both` sends
+// each admitted record on both transports and never doubles the rate. A
+// transport with mesh traffic waiting refuses the record (preempt, counted
+// there) without spending a token; when every active transport refuses, no
+// token is spent. A record the bucket refuses counts as a rate drop on each
+// transport that would have taken it. Vitals bypass the bucket. With a single
+// transport this is exactly Outbox::offer().
+class FanoutSink {
+public:
+  virtual bool observerActive() const = 0;
+  virtual bool observerMeshPending() const = 0;
+  virtual Outbox& observerOutbox() = 0;
+protected:
+  ~FanoutSink() {}
+};
+
+class Fanout {
+public:
+  // Returns how many transports queued the frame.
+  uint8_t offer(const uint8_t* frame, size_t len, uint32_t now_ms, FanoutSink* const* sinks, uint8_t count) {
+    if (!isObserverFrame(frame, len) || len > MAX_PACKET_FRAME) return 0;
+    const bool vitals = frame[5] == (uint8_t)Kind::Vitals;
+    uint8_t eligible = 0, queued = 0;
+    bool pending[kMaxSinks] = {};
+    if (count > kMaxSinks) count = kMaxSinks;
+    for (uint8_t i = 0; i < count; ++i) {
+      if (!sinks[i] || !sinks[i]->observerActive()) continue;
+      pending[i] = !vitals && sinks[i]->observerMeshPending();
+      if (pending[i]) sinks[i]->observerOutbox().offerAdmitted(frame, len, true);  // counts the preempt
+      else ++eligible;
+    }
+    if (!eligible) return 0;
+    const bool admitted = vitals || _bucket.take(now_ms);
+    for (uint8_t i = 0; i < count; ++i) {
+      if (!sinks[i] || !sinks[i]->observerActive() || pending[i]) continue;
+      if (!admitted) { sinks[i]->observerOutbox().noteRateDrop(); continue; }
+      if (sinks[i]->observerOutbox().offerAdmitted(frame, len, false) == Offer::Queued) ++queued;
+    }
+    return queued;
+  }
+  void reset() { _bucket.reset(); }
+  static const uint8_t kMaxSinks = 2;
+
+private:
+  TokenBucket _bucket;
 };
 
 // Events per minute over a measured window; saturates at 0xFFFF.
