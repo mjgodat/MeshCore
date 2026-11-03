@@ -41,24 +41,26 @@ typedef chats::ChatRow ChatRow;
 
 // Logical 240x148, 6 px per character, 10 px lines (the CYD/Freenove rule).
 struct Text { int x, y; ColorVal c; std::string s; };
+struct Box { int x, y, w, h; };
 class RecDisplay : public DisplayDriver {
  public:
   RecDisplay() : DisplayDriver(240, 148) {}
   std::vector<Text> texts;
+  std::vector<Box> boxes;   // drawRect outlines
   int rects = 0;
   ColorVal colour = 0;
   int cx = 0, cy = 0;
   bool isOn() override { return true; }
   void turnOn() override {}
   void turnOff() override {}
-  void clear() override { texts.clear(); rects = 0; }
+  void clear() override { texts.clear(); boxes.clear(); rects = 0; }
   void startFrame(ColorVal) override { clear(); }
   void setTextSize(int) override {}
   void setColor(ColorVal c) override { colour = c; }
   void setCursor(int x, int y) override { cx = x; cy = y; }
   void print(const char* s) override { texts.push_back(Text{cx, cy, colour, s}); cx += 6 * (int)std::strlen(s); }
   void fillRect(int, int, int, int) override { rects++; }
-  void drawRect(int, int, int, int) override { rects++; }
+  void drawRect(int x, int y, int w, int h) override { rects++; boxes.push_back(Box{x, y, w, h}); }
   void drawXbm(int, int, const uint8_t*, int, int) override {}
   uint16_t getTextWidth(const char* s) override { return (uint16_t)(6 * std::strlen(s)); }
   int textLineHeight() override { return 10; }
@@ -289,6 +291,71 @@ static void open_thread_of_incoming() {
   if (!failures) std::printf("PASS open_thread_of_incoming\n");
 }
 
+// The conversation list's scroll hints: up / down tiles in a column right
+// of the rows, shown only where there are more conversations, drawn where
+// they are hit; a tap scrolls a page; the rows never reach the column.
+static bool drawnBox(const RecDisplay& d, int x, int y, int w, int h) {
+  for (size_t i = 0; i < d.boxes.size(); i++)
+    if (d.boxes[i].x == x && d.boxes[i].y == y && d.boxes[i].w == w && d.boxes[i].h == h) return true;
+  return false;
+}
+
+static void list_hints() {
+  History h;
+  for (int i = 0; i < 12; i++) {
+    char from[40];
+    std::snprintf(from, sizeof(from), "Peer%d [direct]:", i);
+    h.add(1000 + (uint64_t)i * 1000, -1, nullptr, from, "hello");
+  }
+  View v;
+  RecDisplay d;
+  v.showList();
+  v.render(d, h, kSrc, 90000, true, always);
+  CHECK(v.maxScroll() > 0);
+  int x, y, w, hh;
+  // Top: no up tile; a down tile, drawn exactly where it is hit.
+  CHECK(!v.listHint(false, x, y, w, hh));
+  CHECK(v.listHint(true, x, y, w, hh));
+  CHECK(drawnBox(d, x, y, w, hh) && x + w <= 240 && y + hh <= 148);
+  const int column = x;
+  for (size_t i = 0; i < d.boxes.size(); i++) {   // rows stay left of the column
+    const Box& b = d.boxes[i];
+    if (b.w > 40 && b.y >= View::kHeaderH) CHECK(b.x + b.w <= column);
+  }
+  // The empty top of the column is not a control: nothing happens.
+  CHECK(tap(v, column + 2, View::kHeaderH + 4) == View::Action::None && !v.inThread() && v.scroll() == 0);
+  // Down tile: a page down (middle: both tiles).
+  CHECK(tap(v, x + w / 2, y + hh / 2) == View::Action::Changed && v.scroll() > 0 && !v.inThread());
+  d.clear();
+  v.render(d, h, kSrc, 90100, true, always);
+  int ux, uy, uw, uh;
+  CHECK(v.listHint(false, ux, uy, uw, uh) && drawnBox(d, ux, uy, uw, uh));
+  if (v.scroll() < v.maxScroll()) CHECK(v.listHint(true, x, y, w, hh) && drawnBox(d, x, y, w, hh));
+  // To the bottom: the down tile goes, the up tile stays.
+  for (int i = 0; i < 20 && v.listHint(true, x, y, w, hh); i++) {
+    tap(v, x + w / 2, y + hh / 2);
+    d.clear();
+    v.render(d, h, kSrc, 90200, true, always);
+  }
+  CHECK(v.scroll() == v.maxScroll() && !v.listHint(true, x, y, w, hh) && v.listHint(false, ux, uy, uw, uh));
+  CHECK(!drawnBox(d, x, y, w, hh));
+  // Up tile: back up a page.
+  const int bottom = v.scroll();
+  CHECK(tap(v, ux + uw / 2, uy + uh / 2) == View::Action::Changed && v.scroll() < bottom);
+  // A short list: no column, no tiles, rows full width.
+  History few;
+  few.add(1000, -1, nullptr, "Bob [direct]:", "hi");
+  View s;
+  RecDisplay ds;
+  s.showList();
+  s.render(ds, few, kSrc, 90000, true, always);
+  CHECK(!s.listHint(false, x, y, w, hh) && !s.listHint(true, x, y, w, hh));
+  bool wide = false;
+  for (size_t i = 0; i < ds.boxes.size(); i++) wide |= ds.boxes[i].w == 240;
+  CHECK(wide);
+  if (!failures) std::printf("PASS list_hints\n");
+}
+
 int main(int argc, char** argv) {
   const std::string name = argc > 1 ? argv[1] : "";
   if (name == "split_sender") split_sender();
@@ -296,6 +363,7 @@ int main(int argc, char** argv) {
   else if (name == "wrap_lines") wrap_lines();
   else if (name == "list_then_thread") list_then_thread();
   else if (name == "open_thread_of_incoming") open_thread_of_incoming();
+  else if (name == "list_hints") list_hints();
   else { std::printf("unknown %s\n", name.c_str()); return 2; }
   return failures ? 1 : 0;
 }
@@ -346,6 +414,9 @@ class HeadChatsTest(unittest.TestCase):
 
     def test_open_thread_of_incoming(self):
         self.run_scenario('open_thread_of_incoming')
+
+    def test_list_hints(self):
+        self.run_scenario('list_hints')
 
     def test_wiring_is_freenove_only(self):
         # The chat list replaces the one-message swipe view only where

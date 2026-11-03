@@ -25,6 +25,8 @@
 #include <helpers/ui/DisplayDriver.h>
 #include <helpers/ui/HeadChatList.h>
 
+#include "GestureHints.h"
+
 template <class History>
 class HeadChatsView {
  public:
@@ -51,6 +53,19 @@ class HeadChatsView {
     _mode = Mode::List;
     _listScroll = 0;
     _down = _drag = false;
+    _hintMoved = true;
+  }
+
+  // The conversation list's scroll hints (GestureHints.h): when the list is
+  // longer than the screen, a column right of the rows holds an up tile at
+  // its top and a down tile at its bottom, each drawn only where there are
+  // more conversations that way. The last render() decides; a tap acts on
+  // exactly the tiles it drew. False: that tile is not on the screen.
+  static constexpr int kHintW = 14, kHintH = 16;
+  bool listHint(bool down, int& x, int& y, int& w, int& h) const {
+    const gesture_hints::Rect& r = down ? _hintDown : _hintUp;
+    x = r.x; y = r.y; w = r.w; h = r.h;
+    return _mode == Mode::List && (down ? _hintDownOn : _hintUpOn);
   }
 
   void openThread(const ChatRow& row) {
@@ -136,6 +151,7 @@ class HeadChatsView {
     int& cur = _mode == Mode::Thread ? _scroll : _listScroll;
     if (s == cur) return false;
     cur = s;
+    _hintMoved = true;
     if (_mode == Mode::Thread) _pinBottom = s >= maxScroll();
     return true;
   }
@@ -156,6 +172,13 @@ class HeadChatsView {
       return Action::None;
     }
     if (_mode == Mode::List) {
+      // The hint column: its drawn tiles scroll a page; the rest of it is
+      // not a control.
+      if (_hintColumn && x >= _hintUp.x) {
+        if (_hintUpOn && _hintUp.contains(x, y)) return setScroll(_listScroll - pageStep()) ? Action::Changed : Action::None;
+        if (_hintDownOn && _hintDown.contains(x, y)) return setScroll(_listScroll + pageStep()) ? Action::Changed : Action::None;
+        return Action::None;
+      }
       if (_rowH <= 0) return Action::None;
       const int i = (y - kHeaderH - 1 + _listScroll) / _rowH;
       if (i < 0 || i >= _rowCount) return Action::None;
@@ -228,12 +251,47 @@ class HeadChatsView {
       return;
     }
     const int top = kHeaderH + 1;
+    // A list longer than the screen gets the hint column; the rows end left
+    // of it.
+    _hintColumn = _content > _view;
+    const int rowW = _hintColumn ? W - kHintW - 2 : W;
     for (int i = 0; i < _rowCount; i++) {
       const int y = top + i * _rowH - _listScroll;
       if (y < top || y + _rowH > H) continue;   // whole rows only
-      drawRow(d, h, _rows[i], y, W, lh, now_ms);
+      drawRow(d, h, _rows[i], y, rowW, lh, now_ms);
     }
-    drawScrollMark(d, W, top, _view, _listScroll);
+    _hintUpOn = _hintDownOn = false;
+    if (!_hintColumn) {
+      drawScrollMark(d, W, top, _view, _listScroll);
+      return;
+    }
+    gesture_hints::listTiles(W - kHintW, kHintW, top, top + _view, kHintH, _hintUp, _hintDown);
+    _hintUpOn = _listScroll > 0;
+    _hintDownOn = _listScroll < maxScroll();
+    if (_hintMoved) {
+      _hintMs = (uint32_t)now_ms;
+      _hintMoved = false;
+    }
+    const gesture_hints::Level lv = gesture_hints::level(true, (uint32_t)now_ms, _hintMs);
+    // The scroll mark between the tiles, then the tiles.
+    if (_content > _view) {
+      const int markTop = top + kHintH + 2, markH = _view - 2 * (kHintH + 2);
+      int mh = markH * _view / _content;
+      if (mh < 6) mh = 6;
+      const int my = markTop + (markH - mh) * _listScroll / (_content - _view);
+      d.setColor(UIColor::corp_blue);
+      d.fillRect(W - kHintW / 2 - 1, my, 2, mh);
+    }
+    for (int k = 0; k < 2; k++) {
+      if (!(k == 0 ? _hintUpOn : _hintDownOn)) continue;
+      const gesture_hints::Rect& r = k == 0 ? _hintUp : _hintDown;
+      d.setColor(UIColor::secondary_txt);
+      d.drawRect(r.x, r.y, r.w, r.h);
+      d.setColor(lv == gesture_hints::kBright ? UIColor::corp_blue : UIColor::secondary_txt);
+      const char* chevron = k == 0 ? "^" : "v";
+      d.setCursor(r.x + (r.w - d.getTextWidth(chevron)) / 2, r.y + (r.h - 8) / 2);
+      d.print(chevron);
+    }
   }
 
   void drawRow(DisplayDriver& d, const History& h, const ChatRow& r, int y, int W, int lh, uint64_t now_ms) const {
@@ -423,6 +481,9 @@ class HeadChatsView {
   int _rowH = 26;
   ChatRow _thread = {};
   int _scroll = 0, _listScroll = 0;
+  bool _hintColumn = false, _hintUpOn = false, _hintDownOn = false, _hintMoved = true;
+  gesture_hints::Rect _hintUp = {0, 0, 0, 0}, _hintDown = {0, 0, 0, 0};
+  uint32_t _hintMs = 0;
   int _content = 0, _view = 1;
   bool _pinBottom = true;
   bool _down = false, _drag = false;
