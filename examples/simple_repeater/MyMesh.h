@@ -77,6 +77,7 @@
 
 #ifdef WITH_ESPNOW_BRIDGE
 #include "helpers/bridges/ESPNowBridge.h"
+#include "helpers/bridges/ObserverRateLimiter.h"
 #define WITH_BRIDGE
 #endif
 
@@ -1006,6 +1007,18 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
                                         const TransportKey* fallback_scope,
                                         bool allow_redundant_copies = true);
   void servicePostMeshLoop();
+#if defined(WITH_ESPNOW_BRIDGE)
+  // espnow.observer: per-packet LoRa records and ~5 s vitals for a visual head.
+  void emitObserverPacket(float snr, float rssi, const uint8_t raw[], int len);
+  void serviceObserverVitals();
+  struct ObserverWindow {
+    uint32_t at_ms;
+    mesh::observer::VitalsWindow rates;   // per-minute rates over the last minute
+    float freq, bw;
+    uint8_t sf, cr, preset_slot;
+    bool started;
+  } _observer_window = {};
+#endif
 #if MESH_ENABLE_TELEMETRY_HISTORY
   void sampleTelemetryHistory();
   void sampleNoiseFloorHistory();

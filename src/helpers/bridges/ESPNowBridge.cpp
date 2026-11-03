@@ -4,6 +4,7 @@
 #include <esp_wifi.h>
 #include <helpers/esp32/WiFiRadioPolicy.h>
 #include <helpers/ESPNowPeerSettings.h>
+#include <helpers/bridges/ObserverFrame.h>
 #include <stdio.h>
 
 #ifdef WITH_ESPNOW_BRIDGE
@@ -348,6 +349,8 @@ void ESPNowBridge::end() {
   _rx_count = 0;
   portEXIT_CRITICAL(&_rx_mux);
   _raw_reassembler.reset();
+  // Stale observer frames never go out late or to a newly configured peer.
+  _observer.clear();
 
   // queueTransmitFrames() marks packets seen at admission so the same bridge
   // loop cannot enqueue duplicates. Undo that mark for entries which never
@@ -481,18 +484,24 @@ void ESPNowBridge::pumpTransmitQueue() {
   const uint32_t now = millis();
   bool timed_out = false;
   bool original_start = false, copy_start = false;
+  bool observer_completed = false, observer_start = false;
 
   portENTER_CRITICAL(&_tx_mux);
   timed_out = _tx_waiting && !_tx_callback_done
       && static_cast<uint32_t>(now - _tx_started_at) >= TX_CALLBACK_TIMEOUT_MS;
-  if (timed_out) {
+  const bool observer_timed_out = timed_out && _observer_in_flight;
+  if (timed_out && !observer_timed_out) {
     if (_tx_count > 0 && _tx_queue[_tx_tail].diagnostic)
       mesh::bridge::diag::increment(_stats.probe.tx_timeout);
     else mesh::bridge::diag::increment(_stats.tx.callback_timeout);
   }
   portEXIT_CRITICAL(&_tx_mux);
   if (timed_out) {
-    recordError(mesh::bridge::diag::Stage::TxTimeout, ESP_ERR_TIMEOUT);
+    // An observer timeout is counted by the observer, never blamed on mesh
+    // traffic. The session restart below is still required: a late callback
+    // carries no frame identity and would complete the next (mesh) frame.
+    if (observer_timed_out) _observer.noteTimeout();
+    else recordError(mesh::bridge::diag::Stage::TxTimeout, ESP_ERR_TIMEOUT);
     // A completion carries no frame identity. Continuing after timeout could
     // mistake a late callback for the next fragment. Tear down that SDK session
     // before accepting another frame; never transmit an orphan sibling.
@@ -512,7 +521,11 @@ void ESPNowBridge::pumpTransmitQueue() {
     _tx_waiting = false;
     _tx_callback_done = false;
 
-    if (_tx_count > 0) {
+    if (_observer_in_flight) {
+      // Observer frames are never retried; the mesh queue is untouched.
+      _observer_in_flight = false;
+      observer_completed = true;
+    } else if (_tx_count > 0) {
       QueuedTransmit& queued_tx = _tx_queue[_tx_tail];
       if (queued_tx.repeat_copy) {
         // A copy is never retried; its second fragment follows only success.
@@ -586,16 +599,36 @@ void ESPNowBridge::pumpTransmitQueue() {
       _tx_callback_done = false;
       _tx_started_at = now;
       _tx_retry_at = 0;
+      _observer_in_flight = false;
     }
   }
+  const bool observer_slot = frame_len == 0 && !_tx_waiting && _tx_count == 0;
   portEXIT_CRITICAL(&_tx_mux);
+
+  if (observer_completed)
+    _observer.noteSent(completed_status == ESP_NOW_SEND_SUCCESS);
+  // espnow.observer: only into an idle link. Only loop() queues mesh frames,
+  // so the queue cannot gain an entry between this check and the start below.
+  if (observer_slot && !_observer.empty()) {
+    frame_len = static_cast<uint16_t>(_observer.pop(frame, sizeof(frame)));
+    if (frame_len > 0) {
+      observer_start = true;
+      portENTER_CRITICAL(&_tx_mux);
+      _tx_waiting = true;
+      _tx_callback_done = false;
+      _tx_started_at = now;
+      _tx_retry_at = 0;
+      _observer_in_flight = true;
+      portEXIT_CRITICAL(&_tx_mux);
+    }
+  }
 
   if (dropped != _tx_dropped_reported) {
     BRIDGE_DEBUG_PRINTLN("TX queue full, dropped=%lu\n",
                          (unsigned long)dropped);
     _tx_dropped_reported = dropped;
   }
-  if (completed && completed_status != ESP_NOW_SEND_SUCCESS) {
+  if (completed && !observer_completed && completed_status != ESP_NOW_SEND_SUCCESS) {
     recordError(mesh::bridge::diag::Stage::TxCallback, completed_status);
     BRIDGE_DEBUG_PRINTLN("TX callback failed, status=%d\n",
                          completed_status);
@@ -604,6 +637,17 @@ void ESPNowBridge::pumpTransmitQueue() {
 
   const esp_err_t result = esp_now_send(
       _active_peer, frame, frame_len);
+  if (observer_start) {
+    if (result != ESP_OK) {
+      portENTER_CRITICAL(&_tx_mux);
+      _tx_waiting = false;
+      _tx_callback_done = false;
+      _observer_in_flight = false;
+      portEXIT_CRITICAL(&_tx_mux);
+      _observer.noteSent(false);
+    }
+    return;  // Observer frames touch no mesh counters or repeat state.
+  }
   if (result != ESP_OK) {
     recordError(mesh::bridge::diag::Stage::TxStart, result);
     portENTER_CRITICAL(&_tx_mux);
@@ -699,6 +743,13 @@ void ESPNowBridge::queueReceivedFrame(const uint8_t *mac, const uint8_t *data,
     return;
   }
   if (mac != nullptr) _nodes.note(mac, millis());
+
+  // Another repeater's espnow.observer feed is for visual heads, never mesh.
+  if (mesh::observer::isObserverFrame(data, static_cast<size_t>(len))) {
+    mesh::bridge::diag::increment(_stats.rx.foreign);
+    portEXIT_CRITICAL(&_rx_mux);
+    return;
+  }
 
   // Wrapped deployments share the WiFi channel with unrelated ESP-NOW users.
   // Reject obvious foreign traffic before it can occupy a queue slot.
@@ -811,7 +862,9 @@ void ESPNowBridge::onDataSent(const uint8_t *mac_addr, esp_now_send_status_t sta
   if (_tx_waiting && !_tx_callback_done) {
     _tx_callback_status = static_cast<int>(status);
     _tx_callback_done = true;
-    if (_tx_count > 0 && _tx_queue[_tx_tail].repeat_copy) {
+    if (_observer_in_flight) {
+      // Observer frames are counted by loop(), never as mesh traffic.
+    } else if (_tx_count > 0 && _tx_queue[_tx_tail].repeat_copy) {
       // Copies are reported by tx.repeats only; logical counters stay exact.
     } else if (_tx_count > 0 && _tx_queue[_tx_tail].diagnostic) {
       if (status == ESP_NOW_SEND_SUCCESS) mesh::bridge::diag::increment(_stats.probe.tx_ok);
@@ -994,6 +1047,14 @@ bool ESPNowBridge::sendTest(uint32_t nonce) {
   _stats.probe.last_tx_nonce = nonce;
   portEXIT_CRITICAL(&_tx_mux);
   return true;
+}
+
+bool ESPNowBridge::sendObserverFrame(const uint8_t* frame, size_t len) {
+  if (!_initialized) return false;
+  portENTER_CRITICAL(&_tx_mux);
+  const bool mesh_pending = _tx_count > 0;
+  portEXIT_CRITICAL(&_tx_mux);
+  return _observer.offer(frame, len, millis(), mesh_pending) == mesh::observer::Offer::Queued;
 }
 
 void ESPNowBridge::formatStatus(char* reply, size_t reply_size) {

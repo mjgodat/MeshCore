@@ -6698,6 +6698,40 @@ node without the bridge answers `get espnow.stats` with `> repeat=<copies>`.
 A missing setting means `1`; an unreadable saved setting also falls back to `1`
 and `get espnow.repeat` reports an error until the setting is saved again.
 
+#### Observer feed for a visual head (`espnow.observer`)
+
+```text
+get espnow.observer
+set espnow.observer on|off
+```
+
+Repeaters with the ESP-NOW bridge only. Default `off`; while off nothing
+changes on air or on the bridge. When `on` (and the bridge is running), every
+received LoRa packet is sent as an observer record (raw bytes, SNR, RSSI,
+receive time, disposition `unknown`). Packets up to 235 bytes are sent whole;
+longer ones (up to 255) send their first 235 bytes with the truncated flag
+(bit 7 of the disposition byte) set. A vitals frame follows
+every 5 seconds: uptime, noise floor, RX/TX/duplicate packets per minute, TX
+airtime per mille, ESP-NOW nodes heard, battery mV, the saved position, the
+saved radio frequency/bandwidth/SF/CR and the matching preset slot (`0` =
+custom or presets not built); a temporary radio setting is not reflected. Frames use the 4-byte magic `B0 42 53 4F` (format in
+`src/helpers/bridges/ObserverFrame.h`), go to broadcast or the `espnow.peer`
+destination, and are never repeated (`espnow.repeat`), retried, deduplicated or
+relayed as mesh packets. Bridges ignore observer frames they receive.
+
+Turning the observer off, or stopping or restarting the bridge (for example
+after `set espnow.peer`), discards observer frames still queued.
+
+Mesh frames always go first. A packet record is dropped while mesh traffic is
+queued on the bridge; records are limited to 20 per second (bursts of 40), and
+the oldest record is dropped when the 4-frame queue is full. Vitals bypass the
+rate limit. Nothing waits in the main loop.
+
+The setting is saved immediately and survives reboot; a missing or unreadable
+record means `off`, and `get espnow.observer` reports an error until it is saved
+again. Over LoRa only full admins can read or change it (it is not in the region
+or filter manager allow lists).
+
 Status reports local state (`off`, `teardown-error`, `driver-error`,
 `channel-mismatch` or `ready`), then these compact fields:
 

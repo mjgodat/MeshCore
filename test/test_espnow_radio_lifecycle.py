@@ -183,6 +183,8 @@ class EspNowLifecycleTests(unittest.TestCase):
         # state, callbacks, queues, fragmentation, and method bodies are production.
         header=header[:header.index('#if ESPNOW_DEBUG_LOGGING')]
         header=re.sub(r'^\s*#(?:include|pragma).*$', '', header, flags=re.MULTILINE)
+        # ESPNOWRadio.h needs the observer demux types (visual head).
+        header='#include <helpers/bridges/ObserverDemux.h>\n'+header
         header=header.replace(' : public mesh::Radio','').replace(' override','')
         source=re.sub(r'^\s*#include.*$', '', source, flags=re.MULTILINE)
         with tempfile.TemporaryDirectory() as tmp:
@@ -249,6 +251,7 @@ public:
  uint32_t _tx_started_at=0,_tx_retry_at=0;bool _sdk_teardown_failed=false;
  uint8_t _previous_wifi_sleep=0;bool _wifi_sleep_preference_owned=false;
  mesh::espnow::ESPNowRawReassembler _raw_reassembler;
+ struct { void clear() {} } _observer;  // ESPNowBridge::end() discards observer frames
  mesh::espnow::EspNowRepeatScheduler _repeat;
  struct QueuedTransmit {bool started=false,diagnostic=false;int seen_key=0;};
  static constexpr int TX_QUEUE_DEPTH=2;

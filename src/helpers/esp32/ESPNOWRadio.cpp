@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <helpers/ESPNowRawFragmentation.h>
+#include <helpers/bridges/ObserverDemux.h>
 #include <helpers/esp32/EspNowRepeatScheduler.h>
 #include <helpers/RadioDirectionPolicy.h>
 #include <helpers/esp32/WiFiRadioPolicy.h>
@@ -48,6 +49,16 @@ static uint32_t rx_dropped_reported = 0;
 static portMUX_TYPE rx_mux = portMUX_INITIALIZER_UNLOCKED;
 static mesh::espnow::ESPNowRawReassembler rx_reassembler;
 static std::atomic<bool> accepting_packets{false};
+// Visual head observer feed (setObserverHandler). The context is published
+// before the handler (release) and read after it (acquire).
+static std::atomic<mesh::observer::FrameHandler> observer_handler{nullptr};
+static std::atomic<void*> observer_ctx{nullptr};
+
+void ESPNOWRadio::setObserverHandler(mesh::observer::FrameHandler handler,
+                                     void* ctx) {
+  observer_ctx.store(ctx, std::memory_order_release);
+  observer_handler.store(handler, std::memory_order_release);
+}
 
 // callback when data is sent
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
@@ -73,6 +84,15 @@ static void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
 #endif
   if (!accepting_packets.load()) return;
   ESPNOW_DEBUG_PRINTLN("Recv: len = %d", len);
+  // Observer frames go to the visual head; MeshCore/WiChat never see them.
+  // Without a handler every frame takes the path below, as before.
+  if (data != nullptr && len > 0
+      && mesh::observer::demuxObserverFrame(
+          data, static_cast<size_t>(len),
+          observer_handler.load(std::memory_order_acquire),
+          observer_ctx.load(std::memory_order_acquire))) {
+    return;
+  }
   portENTER_CRITICAL(&rx_mux);
   if (data != nullptr && len > 0 && len <= RX_FRAME_MAX
       && rx_count < RX_QUEUE_DEPTH) {

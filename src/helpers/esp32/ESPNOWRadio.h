@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Mesh.h>
+#include <helpers/bridges/ObserverDemux.h>
 
 class ESPNOWRadio : public mesh::Radio {
 protected:
@@ -33,6 +34,11 @@ public:
 
   void init();
   void end();
+  // Visual head: observer frames (ObserverFrame.h) skip the MeshCore receive
+  // queue and go to `handler`, called on the WiFi task (copy and return).
+  // Null (the default) leaves them on the normal path. Register once, before
+  // or after init(); to change it, clear it first.
+  static void setObserverHandler(mesh::observer::FrameHandler handler, void* ctx);
   bool isEnabled() const { return initialized_; }
   int recvRaw(uint8_t* bytes, int sz) override;
   uint32_t getEstAirtimeFor(int len_bytes) override;

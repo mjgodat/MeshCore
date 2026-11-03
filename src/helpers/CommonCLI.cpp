@@ -29,6 +29,7 @@
 #include "ESPNowPeerSettings.h"
 #endif
 #include "ESPNowRepeatSettings.h"
+#include "ObserverSettings.h"
 #include "RadioDirectionSettings.h"
 #if defined(ESP32_PLATFORM)
 #include "BootSlot.h"
@@ -1088,6 +1089,9 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #endif
 #if defined(MESH_ESPNOW_REPEAT_SETTINGS)
   mesh::espnow::loadEspNowRepeatSettings(fs);
+#endif
+#if defined(MESH_ESPNOW_OBSERVER_SETTINGS)
+  mesh::espnow::loadEspNowObserverSettings(fs);
 #endif
 #if MESH_ENABLE_RADIO_DIRECTION
   mesh::radioDirection::loadDirectionSettings(fs);
@@ -3731,6 +3735,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #endif
 #if defined(MESH_ESPNOW_REPEAT_SETTINGS)
     if (mesh::espnow::handleEspNowRepeatCommand(command, reply, 157)) return;
+#endif
+#if defined(MESH_ESPNOW_OBSERVER_SETTINGS)
+    // Reached remotely only by full admins: not in the manager allow lists.
+    if (mesh::espnow::handleEspNowObserverCommand(command, reply, 157)) return;
 #endif
 #if defined(WITH_ESPNOW_BRIDGE)
     if (handleEspNowPeerCommand(command, reply)) return;

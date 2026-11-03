@@ -10,6 +10,7 @@
 #include "helpers/bridges/ESPNowBridgeFormat.h"
 #include "helpers/bridges/ESPNowBridgeDiagnostics.h"
 #include "helpers/bridges/ESPNowNodeTable.h"
+#include "helpers/bridges/ObserverRateLimiter.h"
 #include <atomic>
 
 #ifdef WITH_ESPNOW_BRIDGE
@@ -140,6 +141,16 @@ private:
   /** Owed espnow.repeat copies of the head entry; loop() context only. */
   mesh::espnow::EspNowRepeatScheduler _repeat;
 
+  /**
+   * espnow.observer frames, loop() context only. They never enter _tx_queue:
+   * a frame starts only when no mesh entry is queued or on air, is never
+   * retried or repeated, and bypasses the seen table. _observer_in_flight
+   * (guarded by _tx_mux) is meaningful only while _tx_waiting is set; every
+   * mesh frame start clears it.
+   */
+  mesh::observer::Outbox _observer;
+  volatile bool _observer_in_flight = false;
+
   /** Raw-mode fragment assemblies, keyed by source MAC. */
   mesh::espnow::ESPNowRawReassembler _raw_reassembler;
   /** Directly heard ESP-NOW stations; guarded by _rx_mux. */
@@ -267,6 +278,15 @@ public:
   uint8_t activeNodeCount();
   void formatNodes(char* reply, size_t reply_size);
   bool sendTest(uint32_t nonce);
+  /**
+   * Queues one encoded observer frame (mesh::observer) for broadcast, or for
+   * the espnow.peer destination when one is configured. Returns false when the
+   * bridge is stopped, the frame is malformed, a packet record is rate limited,
+   * or mesh traffic is pending (mesh frames always win). Never blocks.
+   */
+  bool sendObserverFrame(const uint8_t* frame, size_t len);
+  /** Drops queued observer frames (espnow.observer off; also done by end()). */
+  void discardObserverFrames() { _observer.clear(); }
   void resetStats();
 };
 

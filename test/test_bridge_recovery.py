@@ -21,6 +21,7 @@ MOCKS = r'''
 #include <helpers/bridges/RS232BridgeDiagnostics.h>
 #include <helpers/bridges/ESPNowBridgeDiagnostics.h>
 #include <helpers/bridges/ESPNowNodeTable.h>
+#include <helpers/bridges/ObserverRateLimiter.h>
 #include <helpers/BridgeIngressProfile.h>
 #define MAX_TRANS_UNIT 255
 #define PAYLOAD_TYPE_OTA 0x0c

@@ -482,6 +482,8 @@ class EspNowRepeatRadioTests(unittest.TestCase):
         source = (ROOT / "src/helpers/esp32/ESPNOWRadio.cpp").read_text()
         header = header[:header.index("#if ESPNOW_DEBUG_LOGGING")]
         header = re.sub(r"^\s*#(?:include|pragma).*$", "", header, flags=re.MULTILINE)
+        # ESPNOWRadio.h needs the observer demux types (visual head).
+        header = "#include <helpers/bridges/ObserverDemux.h>\n" + header
         header = header.replace(" : public mesh::Radio", "").replace(" override", "")
         source = re.sub(r"^\s*#include.*$", "", source, flags=re.MULTILINE)
         stubs = STUBS.replace("uint32_t millis(){return 1234;}",

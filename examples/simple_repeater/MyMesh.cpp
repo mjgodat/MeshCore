@@ -41,6 +41,11 @@ mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertSlowBank() {
 #include <esp_wifi.h>
 #endif
 #endif
+#if defined(WITH_ESPNOW_BRIDGE)
+#include <helpers/ObserverSettings.h>
+#include <helpers/bridges/ObserverFrame.h>
+#include <helpers/bridges/ObserverRateLimiter.h>
+#endif
 #if defined(WITH_UDP_BRIDGE)
 #include <helpers/esp32/WiFiCredentials.h>
 #include <helpers/esp32/WiFiStationPolicy.h>
@@ -1314,7 +1319,88 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
     if (mqtt_bridge) mqtt_bridge->storeRawRadioData(raw, len, snr, rssi);
   }
 #endif
+#if defined(WITH_ESPNOW_BRIDGE)
+  if (mesh::espnow::espNowObserverEnabled()) emitObserverPacket(snr, rssi, raw, len);
+#endif
 }
+
+#if defined(WITH_ESPNOW_BRIDGE)
+void MyMesh::emitObserverPacket(float snr, float rssi, const uint8_t raw[], int len) {
+  // Up to MAX_RAW (235) bytes are exact; longer packets send their first
+  // MAX_RAW bytes with the record's truncated flag set.
+  if (raw == NULL || len <= 0 || !isEspNowBridgeRunning()) return;
+  mesh::observer::PacketRecord record;
+  if (!mesh::observer::setPacketBytes(record, raw, (size_t)len)) return;
+  record.rx_ms = millis();
+  record.snr_q4 = mesh::observer::snrQuarterDb(snr);
+  record.rssi = mesh::observer::clampRssi(rssi);
+  // Forward/duplicate is decided later by Mesh; the head decodes the bytes.
+  record.disp = mesh::observer::Disposition::Unknown;
+  uint8_t frame[mesh::observer::MAX_PACKET_FRAME];
+  const size_t frame_len = mesh::observer::encodePacket(record, frame, sizeof(frame));
+  if (frame_len) diagnosticEspNowBridge().sendObserverFrame(frame, frame_len);
+}
+
+void MyMesh::serviceObserverVitals() {
+  ObserverWindow& w = _observer_window;
+  if (!mesh::espnow::espNowObserverEnabled() || !isEspNowBridgeRunning()) {
+    // `set espnow.observer off` takes effect before the next bridge pump.
+    diagnosticEspNowBridge().discardObserverFrames();
+    w.started = false;
+    return;
+  }
+  const uint32_t now = millis();
+  const SimpleMeshTables* tables = static_cast<const SimpleMeshTables*>(getTables());
+  const uint32_t rx = getNumRecvFlood() + getNumRecvDirect();
+  const uint32_t tx = getNumSentFlood() + getNumSentDirect();
+  const uint32_t dup = tables->getNumFloodDups() + tables->getNumDirectDups();
+  const unsigned long airtime = getTotalAirTime();
+  const uint32_t elapsed = now - w.at_ms;
+  if (w.started && elapsed < mesh::observer::kVitalsIntervalMs) return;
+  if (!w.started) {
+    w.rates.reset();
+    w.sf = 0;  // Re-read the preset slot after every (re)start.
+  }
+  const mesh::observer::VitalsCounters counters = {now, rx, tx, dup, (uint32_t)airtime};
+  mesh::observer::VitalsRates rates = {};
+  if (w.rates.sample(counters, rates)) {
+    mesh::observer::Vitals v = {};
+    v.uptime_s = (uint32_t)(uptime_millis / 1000);
+    v.noise_floor = (int16_t)_radio->getNoiseFloor();
+    v.rx_per_min = rates.rx_per_min;
+    v.tx_per_min = rates.tx_per_min;
+    v.dup_per_min = rates.dup_per_min;
+    v.airtime_permille = rates.airtime_permille;
+    v.espnow_nodes = espNowActiveNodeCount();
+    v.batt_mv = board.getBattMilliVolts();
+    v.lat_e6 = (int32_t)(_prefs.node_lat * 1e6 + (_prefs.node_lat < 0 ? -0.5 : 0.5));
+    v.lon_e6 = (int32_t)(_prefs.node_lon * 1e6 + (_prefs.node_lon < 0 ? -0.5 : 0.5));
+    v.has_pos = v.lat_e6 != 0 || v.lon_e6 != 0;
+    v.freq = _prefs.freq;
+    v.bw = _prefs.bw;
+    v.sf = _prefs.sf;
+    v.cr = _prefs.cr;
+#if MESH_ENABLE_RADIO_PRESETS
+    // activeSlot() may read the preset file; only look again when the tuple moves.
+    if (w.freq != _prefs.freq || w.bw != _prefs.bw || w.sf != _prefs.sf || w.cr != _prefs.cr) {
+      w.preset_slot = _cli.radioPresets().activeSlot();
+      w.freq = _prefs.freq;
+      w.bw = _prefs.bw;
+      w.sf = _prefs.sf;
+      w.cr = _prefs.cr;
+    }
+    v.preset_slot = w.preset_slot;
+#else
+    v.preset_slot = 0;
+#endif
+    uint8_t frame[mesh::observer::VITALS_FRAME];
+    const size_t frame_len = mesh::observer::encodeVitals(v, frame, sizeof(frame));
+    if (frame_len) diagnosticEspNowBridge().sendObserverFrame(frame, frame_len);
+  }
+  w.started = true;
+  w.at_ms = now;
+}
+#endif
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #ifdef WITH_UDP_BRIDGE
@@ -14023,6 +14109,7 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
   if (mqtt_bridge) mqtt_bridge->loop();
 #endif
 #if defined(WITH_ESPNOW_BRIDGE)
+  serviceObserverVitals();
   // ESP-NOW remains cooperative, including in the
   // combined Full image where both transports share the WiFi station radio.
   #if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
