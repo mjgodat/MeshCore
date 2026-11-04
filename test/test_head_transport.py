@@ -287,6 +287,15 @@ class HeadTransportWiringTests(unittest.TestCase):
         for blocking in ("beginStation(", "WiFi.begin(", "scanNetworks(", "setAutoReconnect(true"):
             self.assertNotIn(blocking, self.radio)
 
+    def test_link_teardown_drops_any_association(self):
+        # stop() disconnects even an adopted link while Idle (StationJoin.h);
+        # the head owns its WiFi, so leaving UDP always leaves the network.
+        dtor = self.radio[self.radio.index("~HeadUdpLink()"):]
+        dtor = dtor[:dtor.index("}")]
+        self.assertIn("_join.stop(_driver);", dtor)
+        join = (ROOT / "src/helpers/StationJoin.h").read_text()
+        self.assertIn("if (_state != JoinState::Idle || d.linkUp()) { d.disconnect(); d.restoreChannel(); }", join)
+
     def test_wifi_task_reads_the_mode_under_the_lock(self):
         deliver = method(self.radio, "void HeadLinkRadio::deliverObserver(")
         self.assertNotIn("_cfg.", deliver)
