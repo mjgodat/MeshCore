@@ -116,6 +116,8 @@ namespace mesh { namespace espnow {
 // receive callback: the secret is written before `wrapped` is published.
 struct ActiveLink {
   std::atomic<bool> wrapped{false};
+  // Bumped by every activateLink(): the radio drops what it queued before.
+  std::atomic<uint32_t> generation{0};
   char secret[mesh::bridge::WRAPPED_SECRET_SIZE] = {};
 };
 
@@ -129,7 +131,9 @@ inline ActiveLink& activeLink() {
 inline bool activateLink(bool wrapped, const char* secret) {
   ActiveLink& link = activeLink();
   if (!wrapped) {
-    link.wrapped.store(false, std::memory_order_release);
+    // Raw stays raw: nothing queued so far is in another format.
+    if (link.wrapped.exchange(false, std::memory_order_acq_rel))
+      link.generation.fetch_add(1, std::memory_order_acq_rel);
     return true;
   }
   const size_t n = mesh::bridge::wrappedSecretLength(secret, mesh::bridge::WRAPPED_SECRET_SIZE);
@@ -138,6 +142,7 @@ inline bool activateLink(bool wrapped, const char* secret) {
   memset(link.secret, 0, sizeof(link.secret));
   memcpy(link.secret, secret, n);
   link.wrapped.store(true, std::memory_order_release);
+  link.generation.fetch_add(1, std::memory_order_acq_rel);
   return true;
 }
 
