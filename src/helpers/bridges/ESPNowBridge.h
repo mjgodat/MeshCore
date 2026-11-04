@@ -9,6 +9,7 @@
 #include "helpers/bridges/BridgeBase.h"
 #include "helpers/bridges/ESPNowBridgeFormat.h"
 #include "helpers/bridges/ESPNowWrappedFrame.h"
+#include "helpers/bridges/DiscoveryFrame.h"
 #include "helpers/bridges/ESPNowBridgeDiagnostics.h"
 #include "helpers/bridges/ESPNowNodeTable.h"
 #include "helpers/bridges/ObserverRateLimiter.h"
@@ -151,6 +152,20 @@ private:
    */
   mesh::observer::Outbox _observer;
   volatile bool _observer_in_flight = false;
+
+  /**
+   * One pending discovery announce (DiscoveryFrame.h), loop() context only.
+   * Like observer frames it goes out only into an idle link, never queued
+   * behind or retried; a newer announce replaces one not yet sent. It shares
+   * _observer_in_flight; _aux_in_flight tells the two apart.
+   */
+  uint8_t _aux[mesh::discovery::MAX_FRAME];
+  uint8_t _aux_len = 0;
+  volatile bool _aux_in_flight = false;
+  uint32_t _aux_sent = 0, _aux_failed = 0, _discovery_rx = 0;
+  mesh::discovery::FrameSink _discovery_sink = nullptr;
+  void* _discovery_ctx = nullptr;
+  void deliverDiscovery(const uint8_t* frame, size_t len);
 
   /**
    * Modem sleep watch: while the bridge runs the radio stays awake
@@ -296,6 +311,19 @@ public:
    * or mesh traffic is pending (mesh frames always win). Never blocks.
    */
   bool sendObserverFrame(const uint8_t* frame, size_t len);
+  /**
+   * Queues one discovery frame (announce) for the idle link; replaces one
+   * not yet sent. Wrapped when the bridge format is wrapped. False when the
+   * bridge is stopped or the frame is not a discovery frame.
+   */
+  bool sendAuxFrame(const uint8_t* frame, size_t len);
+  /** Received discovery frames (replies) go to `sink` from loop(). */
+  void setDiscoverySink(mesh::discovery::FrameSink sink, void* ctx) {
+    _discovery_sink = sink;
+    _discovery_ctx = ctx;
+  }
+  uint32_t auxSent() const { return _aux_sent; }
+  uint32_t discoveryReceived() const { return _discovery_rx; }
   /** Drops queued observer frames (espnow.observer off; also done by end()). */
   void discardObserverFrames() { _observer.clear(); }
   /**

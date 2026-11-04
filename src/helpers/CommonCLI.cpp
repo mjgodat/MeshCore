@@ -1100,6 +1100,9 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #if defined(MESH_ESPNOW_OBSERVER_SETTINGS)
   mesh::espnow::loadEspNowObserverSettings(fs);
 #endif
+#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)
+  mesh::discovery::loadBridgeDiscoverySettings(fs);
+#endif
 #if MESH_ENABLE_RADIO_DIRECTION
   mesh::radioDirection::loadDirectionSettings(fs);
 #endif
@@ -3778,6 +3781,14 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       mesh::espnow::ObserverRuntime observer_runtime;
       _callbacks->getObserverRuntime(observer_runtime);
       if (mesh::espnow::handleEspNowObserverCommand(command, reply, 157, &observer_runtime)) return;
+    }
+#endif
+#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)
+    // Reached remotely only by full admins: not in the manager allow lists.
+    if (strstr(command, "bridge.") != nullptr) {
+      mesh::discovery::DiscoveryRuntime discovery_runtime;
+      _callbacks->getDiscoveryRuntime(discovery_runtime);
+      if (mesh::discovery::handleBridgeDiscoveryCommand(command, reply, 157, &discovery_runtime)) return;
     }
 #endif
 #if defined(WITH_ESPNOW_BRIDGE)

@@ -264,7 +264,7 @@ def bridge_source():
     return source + BRIDGE_DRIVER
 
 
-def radio_source():
+def radio_source(driver=None):
     from test_espnow_radio_lifecycle import STUBS
     header = (ROOT / "src/helpers/esp32/ESPNOWRadio.h").read_text()
     source = (ROOT / "src/helpers/esp32/ESPNOWRadio.cpp").read_text()
@@ -279,7 +279,7 @@ def radio_source():
         "int esp_now_send(const uint8_t* d,const uint8_t* b,size_t n){assert(sdk_active);"
         "(void)d;++send_calls;air_log.emplace_back(b,b+n);return 0;}")
     assert "air_log" in stubs
-    return stubs + header + source + RADIO_DRIVER
+    return stubs + header + source + (RADIO_DRIVER if driver is None else driver)
 
 
 class Programs:

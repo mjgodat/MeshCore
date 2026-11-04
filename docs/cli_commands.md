@@ -6766,6 +6766,59 @@ record means `off`, and `get espnow.observer` reports an error until it is saved
 again. Over LoRa only full admins can read or change it (it is not in the region
 or filter manager allow lists).
 
+#### Discovery and auto-pairing for visual heads (`bridge.announce`, `bridge.autopeers`)
+
+```text
+get bridge.announce
+set bridge.announce on|off
+get bridge.autopeers
+```
+
+Repeaters with the ESP-NOW and/or the UDP bridge. Default `on`: the repeater
+announces itself every 5 s over the ESP-NOW bridge (raw, or wrapped when
+`bridge.format` is `wrapped`) and every 10 s over the UDP bridge (to the subnet
+broadcast address on `udp.port` and to every UDP peer). An announce carries the
+repeater's name, the first 6 bytes of its public key, its ESP-NOW channel and
+format, its UDP address and port, and what it offers (bridge, UDP, observer
+feed). It never carries WiFi credentials or secrets. It is authenticated with an
+8-byte tag (HMAC-SHA256 keyed with `bridge.secret`); a node without the secret
+ignores it. Frame format: `src/helpers/bridges/DiscoveryFrame.h` (magic
+`B0 42 44 43`, which today's MeshCore rejects as a packet).
+
+A visual head that has the secret (`udp.secret`) learns the repeater's UDP
+address from the announce, so its `udp.peer` can stay `off`. It answers over UDP
+with its own address (also authenticated, echoing one of the repeater's last 12
+announces, about a minute). The repeater then adds that head as a UDP peer at run
+time: at most 4 heads, each kept for 5 minutes after its last answer (heads answer
+every 30 s), at most 4 new heads per minute, and only into a free `udp.peer`
+slot. A head listed in `udp.peer.1..8` is never added twice: manual peers always
+win. Auto peers are never saved; after a reboot or UDP restart the heads are
+added again within a minute. `get bridge.autopeers` lists them
+(`> 1 192.168.1.77:4404/A1B2/290s replies=12 bad=0 stale=0 full=0 limited=0`: address, the head's key
+prefix, seconds left; `bad` = tag did not verify, `stale` = echoed an old
+announce). `get udp.status` shows `auto=<n>`.
+
+`set bridge.announce off` stops the announces; heads must then use `udp.peer`
+and the repeater `udp.peer.N` (manual pairing, as before). Over LoRa only full
+admins can read or change these settings.
+
+#### Rate limit for packets from the bridges (`bridge.rxlimit`)
+
+```text
+get bridge.rxlimit
+set bridge.rxlimit <0-6000>
+```
+
+Packets per minute admitted from the ESP-NOW and UDP bridges into the repeater
+(and so towards its LoRa airtime), one shared budget. Default `120`, with bursts
+of a quarter of that (30); `0` = no limit. Excess packets are dropped and counted
+(`get bridge.rxlimit`: `> 120/min (burst 30) passed=812 dropped=0`; they also
+show as filtered in `get espnow.stats drops` / `get udp.stats drops`). Nothing
+changes on the wire. The limit protects the LoRa channel against a flood from a
+misbehaving or hostile ESP-NOW/UDP node; raise it for a busy bridge-to-bridge
+link. Saved with `bridge.announce` in `/bridge_discovery`; a missing or damaged
+record means `on` / `120`.
+
 #### Observer feed transport (`observer`, `observer.transport`)
 
 ```text

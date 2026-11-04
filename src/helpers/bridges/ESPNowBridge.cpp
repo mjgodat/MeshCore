@@ -404,6 +404,7 @@ void ESPNowBridge::end() {
   _raw_reassembler.reset();
   // Stale observer frames never go out late or to a newly configured peer.
   _observer.clear();
+  _aux_len = 0;
 
   // queueTransmitFrames() marks packets seen at admission so the same bridge
   // loop cannot enqueue duplicates. Undo that mark for entries which never
@@ -569,11 +570,13 @@ void ESPNowBridge::pumpTransmitQueue() {
   bool timed_out = false;
   bool original_start = false, copy_start = false;
   bool observer_completed = false, observer_start = false;
+  bool aux_completed = false, aux_start = false;
 
   portENTER_CRITICAL(&_tx_mux);
   timed_out = _tx_waiting && !_tx_callback_done
       && static_cast<uint32_t>(now - _tx_started_at) >= TX_CALLBACK_TIMEOUT_MS;
   const bool observer_timed_out = timed_out && _observer_in_flight;
+  const bool aux_timed_out = observer_timed_out && _aux_in_flight;
   if (timed_out && !observer_timed_out) {
     if (_tx_count > 0 && _tx_queue[_tx_tail].diagnostic)
       mesh::bridge::diag::increment(_stats.probe.tx_timeout);
@@ -584,7 +587,8 @@ void ESPNowBridge::pumpTransmitQueue() {
     // An observer timeout is counted by the observer, never blamed on mesh
     // traffic. The session restart below is still required: a late callback
     // carries no frame identity and would complete the next (mesh) frame.
-    if (observer_timed_out) _observer.noteTimeout();
+    if (aux_timed_out) ++_aux_failed;
+    else if (observer_timed_out) _observer.noteTimeout();
     else recordError(mesh::bridge::diag::Stage::TxTimeout, ESP_ERR_TIMEOUT);
     // A completion carries no frame identity. Continuing after timeout could
     // mistake a late callback for the next fragment. Tear down that SDK session
@@ -609,6 +613,8 @@ void ESPNowBridge::pumpTransmitQueue() {
       // Observer frames are never retried; the mesh queue is untouched.
       _observer_in_flight = false;
       observer_completed = true;
+      aux_completed = _aux_in_flight;
+      _aux_in_flight = false;
     } else if (_tx_count > 0) {
       QueuedTransmit& queued_tx = _tx_queue[_tx_tail];
       if (queued_tx.repeat_copy) {
@@ -684,16 +690,41 @@ void ESPNowBridge::pumpTransmitQueue() {
       _tx_started_at = now;
       _tx_retry_at = 0;
       _observer_in_flight = false;
+      _aux_in_flight = false;
     }
   }
   const bool observer_slot = frame_len == 0 && !_tx_waiting && _tx_count == 0;
   portEXIT_CRITICAL(&_tx_mux);
 
-  if (observer_completed)
+  if (aux_completed) ++(completed_status == ESP_NOW_SEND_SUCCESS ? _aux_sent : _aux_failed);
+  else if (observer_completed)
     _observer.noteSent(completed_status == ESP_NOW_SEND_SUCCESS);
   // espnow.observer: only into an idle link. Only loop() queues mesh frames,
   // so the queue cannot gain an entry between this check and the start below.
-  if (observer_slot && !_observer.empty()) {
+  if (observer_slot && _aux_len > 0) {
+    // A discovery announce goes before observer frames (one every 5 s).
+    frame_len = _aux_len;
+    memcpy(frame, _aux, _aux_len);
+    _aux_len = 0;
+    if (_active_format == mesh::bridge::ESPNOW_FORMAT_WRAPPED) {
+      uint8_t plain[mesh::discovery::MAX_FRAME];
+      memcpy(plain, frame, frame_len);
+      frame_len = static_cast<uint16_t>(wrapFrame(plain, frame_len, frame, sizeof(frame)));
+    }
+    if (frame_len > 0) {
+      aux_start = observer_start = true;
+      portENTER_CRITICAL(&_tx_mux);
+      _tx_waiting = true;
+      _tx_callback_done = false;
+      _tx_started_at = now;
+      _tx_retry_at = 0;
+      _observer_in_flight = true;
+      _aux_in_flight = true;
+      portEXIT_CRITICAL(&_tx_mux);
+    } else {
+      ++_aux_failed;
+    }
+  } else if (observer_slot && !_observer.empty()) {
     frame_len = static_cast<uint16_t>(_observer.pop(frame, sizeof(frame)));
     if (frame_len > 0 && _active_format == mesh::bridge::ESPNOW_FORMAT_WRAPPED) {
       // Wrapped links carry the observer feed wrapped too (bridge.secret),
@@ -736,8 +767,10 @@ void ESPNowBridge::pumpTransmitQueue() {
       _tx_waiting = false;
       _tx_callback_done = false;
       _observer_in_flight = false;
+      _aux_in_flight = false;
       portEXIT_CRITICAL(&_tx_mux);
-      _observer.noteSent(false);
+      if (aux_start) ++_aux_failed;
+      else _observer.noteSent(false);
     }
     return;  // Observer frames touch no mesh counters or repeat state.
   }
@@ -871,6 +904,10 @@ bool ESPNowBridge::processReceivedFrame(mesh::Packet* packet_slot, const uint8_t
   }
 
   if (_active_format == mesh::bridge::ESPNOW_FORMAT_RAW) {
+    if (mesh::discovery::isDiscoveryFrame(data, len)) {
+      deliverDiscovery(data, len);
+      return false;
+    }
     uint8_t packet[MAX_TRANS_UNIT];
     size_t packet_len = 0;
     const mesh::espnow::ESPNowRawReassemblyResult result =
@@ -922,6 +959,10 @@ bool ESPNowBridge::processReceivedFrame(mesh::Packet* packet_slot, const uint8_t
     BRIDGE_DEBUG_PRINTLN("RX checksum mismatch\n");
     return false;
   }
+  if (mesh::discovery::isDiscoveryFrame(decrypted, payloadLen)) {
+    deliverDiscovery(decrypted, payloadLen);
+    return false;
+  }
   // A wrapped observer feed (another repeater's) is for visual heads only.
   if (mesh::observer::isObserverFrame(decrypted, payloadLen)) {
     noteRx(&mesh::bridge::diag::RxStats::foreign);
@@ -930,6 +971,19 @@ bool ESPNowBridge::processReceivedFrame(mesh::Packet* packet_slot, const uint8_t
 
   BRIDGE_DEBUG_PRINTLN("RX, payload_len=%u\n", (unsigned)payloadLen);
   receiveMeshPacket(packet_slot, decrypted, payloadLen);
+  return true;
+}
+
+void ESPNowBridge::deliverDiscovery(const uint8_t* frame, size_t len) {
+  // Not mesh traffic: counted apart, handed to the role from loop().
+  ++_discovery_rx;
+  if (_discovery_sink) _discovery_sink(_discovery_ctx, frame, len, nullptr, 0);
+}
+
+bool ESPNowBridge::sendAuxFrame(const uint8_t* frame, size_t len) {
+  if (!_initialized || !mesh::discovery::isDiscoveryFrame(frame, len) || len > sizeof(_aux)) return false;
+  memcpy(_aux, frame, len);
+  _aux_len = static_cast<uint8_t>(len);
   return true;
 }
 
@@ -1049,6 +1103,12 @@ void ESPNowBridge::sendPacket(mesh::Packet *packet) {
 }
 
 void ESPNowBridge::onPacketReceived(mesh::Packet *packet) {
+  // bridge.rxlimit: one shared budget for packets entering from the bridges.
+  if (packet && !mesh::discovery::rxLimiter().admit(millis())) {
+    _mgr->free(packet);
+    onIngressResult(IngressResult::Filtered);
+    return;
+  }
   handleReceivedPacket(packet);
 }
 

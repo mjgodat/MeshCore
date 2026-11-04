@@ -6,6 +6,7 @@
 #include <helpers/ESPNowRawFragmentation.h>
 #include <helpers/bridges/ObserverDemux.h>
 #include <helpers/bridges/ESPNowWrappedFrame.h>
+#include <helpers/bridges/DiscoveryFrame.h>
 #include <helpers/esp32/EspNowRepeatScheduler.h>
 #include <helpers/RadioDirectionPolicy.h>
 #include <helpers/esp32/WiFiRadioPolicy.h>
@@ -60,6 +61,14 @@ static std::atomic<bool> accepting_packets{false};
 // before the handler (release) and read after it (acquire).
 static std::atomic<mesh::observer::FrameHandler> observer_handler{nullptr};
 static std::atomic<void*> observer_ctx{nullptr};
+// Visual head: repeater discovery announces (DiscoveryFrame.h), same contract.
+static std::atomic<mesh::observer::FrameHandler> discovery_handler{nullptr};
+static std::atomic<void*> discovery_ctx{nullptr};
+
+void ESPNOWRadio::setDiscoveryHandler(mesh::observer::FrameHandler handler, void* ctx) {
+  discovery_ctx.store(ctx, std::memory_order_release);
+  discovery_handler.store(handler, std::memory_order_release);
+}
 
 void ESPNOWRadio::linkRejects(uint32_t& foreign, uint32_t& checksum) {
   portENTER_CRITICAL(&rx_mux);
@@ -145,6 +154,15 @@ static void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
           observer_handler.load(std::memory_order_acquire),
           observer_ctx.load(std::memory_order_acquire))) {
     return;
+  }
+  // Discovery frames likewise, only while a handler is registered.
+  if (data != nullptr && len > 0
+      && mesh::discovery::isDiscoveryFrame(data, static_cast<size_t>(len))) {
+    const mesh::observer::FrameHandler handler = discovery_handler.load(std::memory_order_acquire);
+    if (handler != nullptr) {
+      handler(data, static_cast<size_t>(len), discovery_ctx.load(std::memory_order_acquire));
+      return;
+    }
   }
   portENTER_CRITICAL(&rx_mux);
   if (data != nullptr && len > 0 && len <= RX_FRAME_MAX
