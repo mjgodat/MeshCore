@@ -1975,18 +1975,11 @@ public:
       return true;
     }
     if (key == KEY_ENTER && _page == HomePage::SCREEN) {
-      // Next timeout for both power profiles, saved (display_prefs).
-      const int next = head_screen::nextChoice(head_screen::choiceOf(mesh::ui::displayPowerPrefs().usb));
-      bool ok = true;
-      for (int usb = 0; usb < 2; usb++) {
-        char cmds[2][40], reply[48];
-        const int n = head_screen::commands(next, usb != 0, cmds);
-        for (int i = 0; i < n; i++) {
-          reply[0] = 0;
-          mesh::ui::handleDisplayPowerCommand(cmds[i], reply, sizeof(reply));
-          ok = ok && strcmp(reply, "OK") == 0;
-        }
-      }
+      // Next timeout for both power profiles, saved once (display_prefs).
+      const auto& prefs = mesh::ui::displayPowerPrefs();
+      const int next = head_screen::nextChoice(head_screen::choiceOf(prefs.usb));
+      const bool ok = mesh::ui::setDisplayPowerProfiles(head_screen::applied(prefs.battery, next),
+                                                        head_screen::applied(prefs.usb, next));
       char off[16], msg[40];
       head_screen::label(off, sizeof(off), next);
       snprintf(msg, sizeof(msg), ok ? "Screen off: %s" : "Not saved: %s", off);

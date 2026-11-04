@@ -150,6 +150,20 @@ void migrateLegacyDisplayTimeout(uint16_t seconds) {
 #endif
 }
 
+bool setDisplayPowerProfiles(const DisplayPowerProfile& battery, const DisplayPowerProfile& usb) {
+  if (!validDisplayProfile(battery) || !validDisplayProfile(usb)) return false;
+  if (displayModeSupportsPairing(battery.mode) && !pairing_available) return false;
+  if (displayModeSupportsPairing(usb.mode) && !pairing_available) return false;
+  auto candidate = displayPowerPrefs();
+  candidate.battery = battery;
+  candidate.usb = usb;
+#ifdef MESHCORE_HAS_REAL_DISPLAY
+  if (!savePrefs(candidate)) return false;
+#endif
+  displayPowerPrefs() = candidate;
+  return true;
+}
+
 bool handleDisplayPowerCommand(const char* command, char* reply, size_t reply_size,
                                bool inbox_supported) {
   if (handleDisplayNightCommand(command, reply, reply_size)) return true;

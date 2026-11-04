@@ -47,6 +47,14 @@ int main() {
   CHECK(commands(0, true, cmd) == 2);
   CHECK(std::strcmp(cmd[0], "set display.usb.mode button") == 0 && std::strcmp(cmd[1], "set display.usb.timeout 30") == 0);
   CHECK(commands(4, true, cmd) == 1 && std::strcmp(cmd[0], "set display.usb.mode on") == 0);
+  // A choice applied to a profile.
+  p.mode = DisplayMode::Button; p.seconds = 15;
+  DisplayPowerProfile q = applied(p, 4);
+  CHECK(q.mode == DisplayMode::On && q.seconds == 15);
+  q = applied(q, 0);
+  CHECK(q.mode == DisplayMode::Button && q.seconds == 30);
+  p.mode = DisplayMode::Automatic; q = applied(p, 3);
+  CHECK(q.mode == DisplayMode::Button && q.seconds == 300);
   // Migration: only a timed profile shorter than 2 min.
   p.mode = DisplayMode::Button; p.seconds = 15; CHECK(needsMigration(p));
   p.seconds = 120; CHECK(!needsMigration(p));
@@ -97,8 +105,10 @@ class ScreenTimeoutTest(unittest.TestCase):
         ui = strip_comments((UI_NEW / 'UITask.cpp').read_text(encoding='utf-8'))
         self.assertIn('HomePage::SCREEN', ui)
         self.assertIn('head_screen::nextChoice(', ui)
-        self.assertIn('head_screen::commands(', ui)
-        self.assertIn('handleDisplayPowerCommand(', ui)
+        # One save for both profiles (a write per command blocked the UI loop
+        # for seconds on the Freenove).
+        self.assertIn('head_screen::applied(', ui)
+        self.assertIn('setDisplayPowerProfiles(', ui)
         # One-time migration on the visual heads (NVS flag).
         task = strip_comments((ROOT / 'examples' / 'companion_radio' / 'ui-freenove' / 'FreenoveUITask.cpp').read_text(encoding='utf-8'))
         self.assertIn('head_screen::needsMigration(', task)

@@ -181,15 +181,11 @@ void migrateScreenTimeout() {
     const mesh::ui::DisplayPowerPrefs& d = mesh::ui::displayPowerPrefs();
     prefs.putUShort("from", d.usb.seconds);   // what was there (diagnostics)
     prefs.putUChar("frommode", (uint8_t)d.usb.mode);
-    bool ok = true;
-    for (int usb = 0; usb < 2; usb++) {
-      if (!head_screen::needsMigration(usb ? d.usb : d.battery)) continue;
-      char cmd[40], reply[48] = "";
-      snprintf(cmd, sizeof(cmd), "set %s.timeout %u", usb ? "display.usb" : "display",
-               (unsigned)head_screen::kDefaultSeconds);
-      mesh::ui::handleDisplayPowerCommand(cmd, reply, sizeof(reply));
-      ok = ok && strcmp(reply, "OK") == 0;
-    }
+    mesh::ui::DisplayPowerProfile battery = d.battery, usb = d.usb;
+    if (head_screen::needsMigration(battery)) battery.seconds = head_screen::kDefaultSeconds;
+    if (head_screen::needsMigration(usb)) usb.seconds = head_screen::kDefaultSeconds;
+    const bool ok = (!head_screen::needsMigration(d.battery) && !head_screen::needsMigration(d.usb)) ||
+                    mesh::ui::setDisplayPowerProfiles(battery, usb);   // one write
     if (ok) prefs.putBool("mig1", true);
   }
   prefs.end();
