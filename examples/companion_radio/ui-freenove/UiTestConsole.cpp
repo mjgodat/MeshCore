@@ -504,6 +504,14 @@ void cmdInject(char* rest) {
 }
 
 void run(char* line) {
+  // Test-only: one line for the companion text terminal (the USB terminal of
+  // the product build, e.g. `get transport`, `set espnow.channel 2`); the
+  // reply lands in the terminal log (`log`), never echoed here.
+  if (strncmp(line, "term ", 5) == 0) {
+    the_mesh.handleTerminalCommand(line + 5);
+    reply("OK term");
+    return;
+  }
   if (strncmp(line, "inject ", 7) == 0) {
     cmdInject(line + 7);
     return;
