@@ -91,8 +91,9 @@ struct StationJoinDriver {
 
   bool begin(const char* ssid, const char* password, uint8_t channel, const uint8_t* bssid) {
     if (!prepare()) return false;
-    (void)WiFi.setSleep(power_save);
-    applyStationPowerSave(power_save);
+    const wifi_ps_type_t mode = pinned_channel || bridgeEspNowChannel().load() != 0 ? WIFI_PS_NONE : power_save;
+    (void)WiFi.setSleep(mode);
+    applyStationPowerSave(mode);
     beginStationDiagnostics(ssid);
     const wl_status_t r = beginStationWithSecurity(ssid, password, channel, bssid);
     if (after_begin) after_begin();

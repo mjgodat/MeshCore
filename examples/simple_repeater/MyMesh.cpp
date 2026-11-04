@@ -1385,7 +1385,9 @@ void MyMesh::describeObserverTransport(void* ctx, char* out, size_t capacity) {
   if (used > 0 && size_t(used) < capacity
       && mesh::observer::checkChannel(runtime.espnow_channel, runtime.ap_channel)
           == mesh::observer::ChannelCheck::Mismatch) {
-    used += snprintf(out + used, capacity - used, "; WiFi on ch %u", unsigned(runtime.ap_channel));
+    const bool joined = (WiFi.getMode() & WIFI_STA) && WiFi.status() == WL_CONNECTED;
+    used += snprintf(out + used, capacity - used, joined ? "; WiFi on ch %u" : "; AP seen on ch %u",
+                     unsigned(runtime.ap_channel));
   }
 #endif
   if (used > 0 && size_t(used) < capacity) snprintf(out + used, capacity - used, ")");
@@ -15254,6 +15256,9 @@ void MyMesh::loadUDPStationCredentials() {
            (int)sizeof(credentials.password), credentials.password);
   const uint8_t power_save = mesh::wifi::effectivePowerSave(credentials.power_save, false,
       mesh::wifi::espNowChannelConstrained());
+  // The station's own preference; StationJoinDriver and applyStationPowerSave
+  // replace it with WIFI_PS_NONE while the ESP-NOW bridge is enabled, which
+  // at boot is often decided only after these credentials are loaded.
   udp_join_driver.power_save = power_save == mesh::wifi::kPowerSaveNone ? WIFI_PS_NONE
       : power_save == mesh::wifi::kPowerSaveMax ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM;
   memset(&credentials, 0, sizeof(credentials));

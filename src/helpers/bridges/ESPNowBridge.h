@@ -151,6 +151,16 @@ private:
   mesh::observer::Outbox _observer;
   volatile bool _observer_in_flight = false;
 
+  /**
+   * Modem sleep watch: while the bridge runs the radio stays awake
+   * (WIFI_PS_NONE) whoever else owns the station. Checked every
+   * kAwakeCheckMs from loop(); repairs count in _awake_repairs.
+   */
+  static constexpr uint32_t kAwakeCheckMs = 250;
+  uint32_t _awake_check_at = 0;
+  uint32_t _awake_repairs = 0;
+  void keepRadioAwake();
+
   /** Raw-mode fragment assemblies, keyed by source MAC. */
   mesh::espnow::ESPNowRawReassembler _raw_reassembler;
   /** Directly heard ESP-NOW stations; guarded by _rx_mux. */

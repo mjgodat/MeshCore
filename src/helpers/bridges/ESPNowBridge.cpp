@@ -323,6 +323,14 @@ void ESPNowBridge::begin() {
     }
   }
 
+  // A shared station (MQTT, WebConfig, UDP) may have chosen modem sleep; the
+  // bridge needs the radio awake whichever started first. Arduino's cached
+  // preference is moved too, so a later STA_START cannot restore sleep.
+  if (shared_wifi) {
+    (void)WiFi.setSleep(WIFI_PS_NONE);
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);
+  }
+
   // Range: transmit at the radio's maximum (20 dBm; the SDK clamps per chip).
   // Staying awake for heads and relays is handled above: a dedicated bridge
   // disables modem sleep (WIFI_PS_NONE), and the repeater's manual light
@@ -406,8 +414,21 @@ void ESPNowBridge::end() {
   emitDebug();
 }
 
+void ESPNowBridge::keepRadioAwake() {
+  wifi_ps_type_t power_save = WIFI_PS_NONE;
+  if (esp_wifi_get_ps(&power_save) != ESP_OK || power_save == WIFI_PS_NONE) return;
+  // Someone (an owner's reconnect, Arduino's STA_START replaying its cached
+  // preference) enabled modem sleep behind the bridge: undo it.
+  (void)WiFi.setSleep(WIFI_PS_NONE);
+  if (esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK) ++_awake_repairs;
+}
+
 void ESPNowBridge::loop() {
   if (!_initialized) { emitDebug(); return; }
+  if (static_cast<int32_t>(millis() - _awake_check_at) >= 0) {
+    _awake_check_at = millis() + kAwakeCheckMs;
+    keepRadioAwake();
+  }
   pumpTransmitQueue();
   if (!_initialized) { emitDebug(); return; }
 
