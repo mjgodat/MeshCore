@@ -19,5 +19,8 @@ bool handleDisplayPowerCommand(const char* command, char* reply, size_t reply_si
                                bool inbox_supported = false);
 bool displayPairingSupported();
 void migrateLegacyDisplayTimeout(uint16_t seconds);
+// Both power profiles at once (a head's Screen page): validated, saved in
+// one write, then applied. False (nothing changed) if invalid or not saved.
+bool setDisplayPowerProfiles(const DisplayPowerProfile& battery, const DisplayPowerProfile& usb);
 
 } }

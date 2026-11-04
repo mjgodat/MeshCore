@@ -59,6 +59,20 @@ inline int commands(int choice, bool usb, char (*out)[40]) {
   return 2;
 }
 
+// A profile with `choice` applied: Never = mode on (the timeout kept);
+// a timeout = button mode (from on / automatic too) and that timeout.
+inline mesh::ui::DisplayPowerProfile applied(const mesh::ui::DisplayPowerProfile& p, int choice) {
+  mesh::ui::DisplayPowerProfile out = p;
+  const uint16_t s = kSeconds[choice < 0 || choice >= kChoices ? 2 : choice];
+  if (s == 0) {
+    out.mode = mesh::ui::DisplayMode::On;
+  } else {
+    if (out.mode != mesh::ui::DisplayMode::Off) out.mode = mesh::ui::DisplayMode::Button;
+    out.seconds = s;
+  }
+  return out;
+}
+
 // One-time move of an older head's short timeout (the companion default of
 // 15 s) to kDefaultSeconds: only a timed profile below it, never one the
 // owner set to on / off / a longer time.
