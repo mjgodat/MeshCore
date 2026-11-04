@@ -353,8 +353,8 @@ the end.
 | 5 LoRa receive throughout | PASS |
 | 6 Clear with `off`, roll back | PASS: Full image back with the ESP-NOW bridge on by itself |
 
-Finding from step 4, fixed since (host-tested, not yet re-tested on
-hardware): after a reboot with UDP saved on while the access point was not
+Finding from step 4, fixed since (confirmed on hardware in the third
+test below): after a reboot with UDP saved on while the access point was not
 on the bridge channel, the bridge ran with WiFi modem sleep
 (`ps=1 awake=0`). Now, whenever the ESP-NOW bridge runs, the radio stays
 awake (`WIFI_PS_NONE`) in any order of events: every station owner's
@@ -369,6 +369,24 @@ and refusals. `get wifi.powersave` shows the saved setting and that it is
 effectively `none` while the bridge runs. When a bridge that started on a
 shared station stops, the station owner's own preference is restored at
 once.
+
+### Results of the third supervised test, 2026-11-04 (espnow-head 671b684b7)
+
+ThinkNode M5 (`_udp` image) + CYD, router on channel 2, both devices back on
+channel 6 at the end. No reset other than the deliberate ones; LoRa receive
+climbing throughout.
+
+| Step | Result |
+|------|--------|
+| `ver` | PASS: `v1.17.1-dev-671b684b (Build: 04-Nov-2026)` |
+| Join with no `udp.peer` set | PASS: `udp.enabled on` alone joins (`ready ... peers=0`) |
+| UDP enabled at runtime; off/on twice | PASS: `off` leaves the network (`wifi.status` idle, `udp.status off ip=0.0.0.0`), `on` rejoins, no reset |
+| both (no duplicates) / auto (fail-over, fail-back) | PASS |
+| Radio awake: runtime enable, off/on, bridge channel change, reboot with UDP on (AP on and off the bridge channel), bridge off/on | PASS: `ps=0 awake=1` and `get espnow.stats awake` `ps=0 repairs=0 refused=0` every time |
+| `set wifi.powersave min` while the bridge runs | PASS: `OK - saved (radio kept awake while the ESP-NOW bridge runs)`; `get` `min (saved; effective none while the ESP-NOW bridge runs)` |
+| Head: no all-channel scan while ESP-NOW is healthy | PASS: only scans of the ESP-NOW channel |
+| Head: all-channel diagnosis when ESP-NOW is silent | **FAIL**: the scan runs but its result is lost, so `get transport` shows `udp joining` instead of `udp wrong-channel (AP on ch N)` (see Known limits) |
+| Clear with `off`, roll back | PASS |
 
 ### Known limits
 
@@ -385,7 +403,13 @@ once.
 - The upstream `ThinkNode_M5_Repeater_bridge_espnow` env keeps upstream's
   partition table (`min_spiffs.csv`), unlike the owner's M5; the
   `_udp` env matches it.
-- The fixes since the second supervised test (radio kept awake, join without
-  peers, leaving on `udp.enabled off`, the `esp_wifi_set_ps` wrap, the
-  version string, the head's diagnosis gate, the power-save hand-back and
-  refusal back-off) still need a hardware run.
+- The head's all-channel diagnosis does not report yet: Arduino 2.0.17
+  gives up on an asynchronous scan after 20 x the per-channel time
+  (2.2 s here) and reports it failed, but on the CYD the all-channel scan
+  took longer: the head drops it as failed and the late result is lost. The head still never leaves its
+  channel while ESP-NOW is healthy, and joining is unaffected.
+- The M5 UDP station itself asks for no modem sleep while the bridge is
+  enabled, so when the bridge stops the radio stays awake until the next
+  join; the saved `wifi.powersave` applies from then on.
+- The refusal back-off (`refused=`) is host-tested only: the M5 repeater has
+  no Bluetooth to make the driver refuse.
