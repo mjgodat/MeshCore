@@ -25,6 +25,13 @@
 //   never goes deaf for a scan.
 // - With no ESP-NOW channel to protect (espNowChannel() == 0) the join is a
 //   plain WiFi.begin() without a scan.
+// - A scan still running is never deleted (a timeout, reset() or stop()
+//   leaves it to finish; its results are dropped then, before any new scan).
+// - Only an association this machine made is ever disconnected by poll().
+//   A station joined by another owner (MQTT, WebConfig) that is off the
+//   ESP-NOW channel is reported (ap-moved) and not used, never dropped: that
+//   owner keeps its own channel policy. stop() drops any association (it is
+//   called only where WiFi belongs to this transport, e.g. a head).
 
 #include <stddef.h>
 #include <stdint.h>
@@ -80,23 +87,27 @@ public:
 
   explicit StationJoin(uint32_t diagnose_interval_ms = 0) : _diagnose_interval(diagnose_interval_ms) {}
 
-  void reset(uint32_t now) {
+  // Fresh start (settings changed). Cancels an own scan first (abandon()).
+  void reset(Driver& d, uint32_t now) {
+    abandon(d);
     _state = JoinState::Idle; _reason = JoinReason::None;
     _retry_at = now; _backoff = kFirstBackoffMs; _ap_channel = 0;
   }
 
   // Leaves the radio as it is (an association belongs to whoever made it);
-  // only an own scan is cancelled.
+  // only an own scan is cancelled (left to finish if it is still running).
   void abandon(Driver& d) {
-    if (_state == JoinState::Scanning || _state == JoinState::Diagnosing) { d.scanDelete(); d.restoreChannel(); }
+    if (_state == JoinState::Scanning || _state == JoinState::Diagnosing) cancelScan(d);
     if (_state != JoinState::Connected) _state = JoinState::Idle;
   }
 
-  // Drops this node's association too (transport switched off).
+  // Drops this node's association, whoever made it, and any own scan
+  // (transport switched off where WiFi belongs to it).
   void stop(Driver& d) {
-    if (_state == JoinState::Scanning || _state == JoinState::Diagnosing) d.scanDelete();
-    if (_state != JoinState::Idle) { d.disconnect(); d.restoreChannel(); }
+    if (_state == JoinState::Scanning || _state == JoinState::Diagnosing) cancelScan(d);
+    if (_state != JoinState::Idle || d.linkUp()) { d.disconnect(); d.restoreChannel(); }
     _state = JoinState::Idle;
+    _owned = false;
   }
 
   // True when poll() will need the credentials on its next call (they can be
@@ -105,26 +116,34 @@ public:
 
   void poll(Driver& d, uint32_t now, const char* ssid, const char* password) {
     const uint8_t channel = d.espNowChannel();
+    if (_scan_pending) {   // an earlier scan was left running: drop its results once done
+      if (d.scanResult() == -1) {
+        if (_state == JoinState::Idle && !d.linkUp()) return;   // no new scan until it ends
+      } else {
+        d.scanDelete(); d.restoreChannel(); _scan_pending = false;
+      }
+    }
     switch (_state) {
       case JoinState::Idle: {
         if (d.linkUp()) {   // joined by another owner, or a disconnect still settling
           const uint8_t at = d.linkChannel();
-          if (channel && at != channel) {   // never stay off the ESP-NOW channel
+          if (channel && at != channel) {   // never use a link off the ESP-NOW channel
             if (at) _ap_channel = at;
-            d.disconnect();
-            d.restoreChannel();
             if (_reason == JoinReason::None) _reason = JoinReason::ApMoved;
+            if (_owned) { d.disconnect(); d.restoreChannel(); }   // ours only
             return;
           }
           _state = JoinState::Connected;
           checkConnected(d, now, channel);
           return;
         }
+        _owned = false;
         if (!due(now, _retry_at)) return;
         if (!ssid || !ssid[0]) { _reason = JoinReason::NoCredentials; fail(now); return; }
         if (!d.mutationAllowed()) { _reason = JoinReason::Busy; _retry_at = now + kBusyRetryMs; return; }
         if (!channel) {
           if (!d.begin(ssid, password, 0, nullptr)) { _reason = JoinReason::ScanFailed; fail(now); return; }
+          _owned = true;
           _state = JoinState::Joining; _deadline = now + kJoinTimeoutMs;
           return;
         }
@@ -136,7 +155,9 @@ public:
         const int n = d.scanResult();
         if (n < 0) {
           if (n == -1 && !due(now, _deadline)) return;   // still running
-          d.scanDelete(); d.restoreChannel(); _reason = JoinReason::ScanFailed; _state = JoinState::Idle; fail(now);
+          if (n == -1) _scan_pending = true;               // timed out: never delete a running scan
+          else { d.scanDelete(); d.restoreChannel(); }
+          _reason = JoinReason::ScanFailed; _state = JoinState::Idle; fail(now);
           return;
         }
         uint8_t bssid[6] = {0, 0, 0, 0, 0, 0};
@@ -160,6 +181,7 @@ public:
           d.restoreChannel(); _reason = JoinReason::ScanFailed; _state = JoinState::Idle; fail(now);
           return;
         }
+        _owned = true;
         _state = JoinState::Joining; _deadline = now + kJoinTimeoutMs;
         return;
       }
@@ -169,8 +191,8 @@ public:
         uint8_t bssid[6]; uint8_t strongest = 0;
         if (n > 0) d.pick(ssid, 0, bssid, strongest);
         if (strongest) _ap_channel = strongest;
-        d.scanDelete();
-        d.restoreChannel();
+        if (n == -1) _scan_pending = true;   // timed out: never delete a running scan
+        else { d.scanDelete(); d.restoreChannel(); }
         _state = JoinState::Idle;
         fail(now);
         return;
@@ -178,13 +200,14 @@ public:
       case JoinState::Joining:
         if (d.linkUp()) { _state = JoinState::Connected; checkConnected(d, now, channel); return; }
         if (due(now, _deadline)) {
-          d.disconnect(); d.restoreChannel();
+          d.disconnect(); d.restoreChannel(); _owned = false;
           _reason = JoinReason::JoinTimeout; _state = JoinState::Idle; fail(now);
         }
         return;
       case JoinState::Connected:
         if (!d.linkUp()) {   // lost: try again soon, from the start of the back-off
           _state = JoinState::Idle; _retry_at = now + kFirstBackoffMs; _backoff = kFirstBackoffMs;
+          _owned = false;
           return;
         }
         checkConnected(d, now, channel);
@@ -199,6 +222,8 @@ public:
   uint8_t apChannel() const { return _ap_channel; }
   uint32_t backoffMs() const { return _backoff; }
   uint32_t retryAt() const { return _retry_at; }
+  // The current association was made by this machine.
+  bool owned() const { return _owned; }
 
 private:
   static bool due(uint32_t now, uint32_t at) { return (int32_t)(now - at) >= 0; }
@@ -208,13 +233,19 @@ private:
     _backoff = _backoff >= kMaxBackoffMs / 2 ? kMaxBackoffMs : _backoff * 2;
   }
 
+  void cancelScan(Driver& d) {
+    if (d.scanResult() == -1) { _scan_pending = true; return; }   // never delete a running scan
+    d.scanDelete();
+    d.restoreChannel();
+  }
+
   void checkConnected(Driver& d, uint32_t now, uint8_t channel) {
     const uint8_t at = d.linkChannel();
     if (at) _ap_channel = at;
     if (channel && at != channel) {
-      // Never follow the access point off the ESP-NOW channel.
-      d.disconnect();
-      d.restoreChannel();
+      // Never follow the access point off the ESP-NOW channel. Only an own
+      // association is dropped; another owner's is just not used.
+      if (_owned) { d.disconnect(); d.restoreChannel(); _owned = false; }
       _reason = JoinReason::ApMoved;
       _state = JoinState::Idle;
       fail(now);
@@ -229,6 +260,7 @@ private:
   uint32_t _retry_at = 0, _deadline = 0, _backoff = kFirstBackoffMs;
   uint32_t _diagnose_interval, _diagnosed_at = 0;
   uint8_t _ap_channel = 0;
+  bool _owned = false, _scan_pending = false;
 };
 
 }}  // namespace mesh::wifi

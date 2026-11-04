@@ -32,6 +32,7 @@ struct Sim {
   // radio
   uint8_t radio_channel = 6;
   bool scanning = false; uint8_t scan_channel = 0; uint32_t scan_done_at = 0; bool scan_fails = false;
+  uint32_t scan_ms = 300;        // a stuck driver: longer than the 5 s timeout
   std::vector<Ap> results; bool have_results = false;
   bool joining = false; uint32_t join_at = 0; uint8_t join_channel = 0; uint8_t join_bssid = 0;
   bool linked = false; uint8_t link_channel = 0; uint8_t link_bssid = 0; bool join_never = false;
@@ -46,7 +47,7 @@ struct Sim {
     cost += 2.0; ++scans; if (!ch) ++all_channel_scans;
     if (scanning) return false;
     scanning = true; scan_channel = ch; have_results = false;
-    scan_done_at = now + (ch ? 300 : 1500);
+    scan_done_at = now + (ch ? scan_ms : 1500);
     return true;
   }
   int scanResult() {
@@ -74,7 +75,11 @@ struct Sim {
     memset(bssid, 0, 6); bssid[5] = results[(size_t)best].bssid;
     return true;
   }
-  void scanDelete() { cost += 0.1; results.clear(); have_results = false; scanning = false; }
+  void scanDelete() {
+    cost += 0.1;
+    assert(!(scanning && (int32_t)(now - scan_done_at) < 0));   // never delete a running scan
+    results.clear(); have_results = false; scanning = false;
+  }
   bool begin(const char* ssid, const char*, uint8_t ch, const uint8_t* bssid) {
     cost += 3.0; ++begins;
     // the station only ever targets the ESP-NOW channel when constrained
@@ -119,7 +124,7 @@ static void run(Sim& s, StationJoin<Sim>& j, uint32_t ms, uint32_t step = 10) {
 int main() {
   // 1) AP on the ESP-NOW channel: joins via async scan, pinned BSSID
   {
-    Sim s; s.aps = {{"Home", 6, -50, 1}, {"Other", 6, -40, 2}}; StationJoin<Sim> j; j.reset(0);
+    Sim s; s.aps = {{"Home", 6, -50, 1}, {"Other", 6, -40, 2}}; StationJoin<Sim> j; j.reset(s, 0);
     run(s, j, 5000);
     assert(j.connected() && s.linked && s.link_channel == 6 && s.begins == 1 && s.scans == 1);
     assert(j.reason() == JoinReason::None && j.apChannel() == 6);
@@ -128,7 +133,7 @@ int main() {
   }
   // 2) AP absent: back-off 15, 30, 60, 120, 120 s; never joins, never blocks
   {
-    Sim s; StationJoin<Sim> j; j.reset(0);
+    Sim s; StationJoin<Sim> j; j.reset(s, 0);
     std::vector<uint32_t> starts; int last = 0;
     for (int i = 0; i < 14000; ++i) {
       run(s, j, 50, 50);
@@ -145,14 +150,14 @@ int main() {
   // 3) AP only on another channel: never joined, ESP-NOW never leaves ch 6;
   //    repeaters (no diagnosis) never scan other channels
   {
-    Sim s; s.aps = {{"Home", 11, -40, 1}}; StationJoin<Sim> j; j.reset(0);
+    Sim s; s.aps = {{"Home", 11, -40, 1}}; StationJoin<Sim> j; j.reset(s, 0);
     run(s, j, 400000, 20);
     assert(!j.connected() && s.begins == 0 && s.all_channel_scans == 0 && s.off_channel_ms == 0);
     assert(j.reason() == JoinReason::NotOnChannel && j.apChannel() == 0);
   }
   // 4) heads: diagnosis finds the AP's channel, at most once per interval
   {
-    Sim s; s.aps = {{"Home", 11, -40, 1}}; StationJoin<Sim> j(600000); j.reset(0);
+    Sim s; s.aps = {{"Home", 11, -40, 1}}; StationJoin<Sim> j(600000); j.reset(s, 0);
     run(s, j, 30000, 20);
     assert(s.all_channel_scans == 1 && j.apChannel() == 11 && !j.connected());
     run(s, j, 500000, 20);
@@ -163,7 +168,7 @@ int main() {
   // 5) F1: joined on ch 6, router moves to ch 11: dropped at once, reported,
   //    rejoined only when the AP is back on ch 6
   {
-    Sim s; s.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> j; j.reset(0);
+    Sim s; s.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> j; j.reset(s, 0);
     run(s, j, 5000);
     assert(j.connected());
     s.aps[0].channel = 11;
@@ -178,16 +183,47 @@ int main() {
     assert(j.connected() && s.linked && s.link_channel == 6 && j.reason() == JoinReason::None);
     assert(s.off_channel_ms <= 10);
   }
-  // 6) association made by another owner on the wrong channel is dropped too
+  // 6) an association made by another owner (MQTT, WebConfig) is never
+  //    dropped; off the ESP-NOW channel it is reported and not used
   {
-    Sim s; s.aps = {{"Home", 11, -50, 1}}; StationJoin<Sim> j; j.reset(0);
+    Sim s; s.aps = {{"Home", 11, -50, 1}}; StationJoin<Sim> j; j.reset(s, 0);
     s.linked = true; s.link_channel = 11; s.link_bssid = 1; s.radio_channel = 11;
-    run(s, j, 20, 10);
-    assert(!s.linked && s.radio_channel == 6 && j.reason() == JoinReason::ApMoved);
+    run(s, j, 5000, 10);
+    assert(s.linked && s.disconnects == 0 && !j.connected() && !j.owned());
+    assert(j.reason() == JoinReason::ApMoved && j.apChannel() == 11 && s.begins == 0);
+    // on the ESP-NOW channel it is used, still not owned, and not dropped when it moves
+    Sim t; t.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> k; k.reset(t, 0);
+    t.linked = true; t.link_channel = 6; t.link_bssid = 1;
+    run(t, k, 50, 10);
+    assert(k.connected() && !k.owned());
+    t.aps[0].channel = 11; run(t, k, 50, 10);
+    assert(t.linked && t.disconnects == 0 && !k.connected() && k.reason() == JoinReason::ApMoved);
+    // stop() (a head switching UDP off) drops any association, even in Idle
+    k.stop(t); assert(!t.linked && t.disconnects == 1 && t.radio_channel == 6);
+  }
+  // 11) reset() and stop() during a scan, and the scan timeout, never delete a
+  //     running scan (the Sim asserts it); no new scan starts before it ends
+  {
+    Sim s; s.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> j; j.reset(s, 0);
+    run(s, j, 100);
+    assert(j.state() == JoinState::Scanning && s.scans == 1);
+    j.reset(s, s.now);                       // settings changed mid-scan
+    run(s, j, 150);                          // old scan still running: no new one
+    assert(s.scans == 1 && j.state() == JoinState::Idle);
+    run(s, j, 5000);                         // old one ends, dropped, fresh scan joins
+    assert(s.scans == 2 && j.connected() && j.owned());
+    Sim t; t.scan_ms = 8000; t.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> k; k.reset(t, 0);
+    run(t, k, 5100);                         // 5 s timeout while the scan still runs
+    assert(k.reason() == JoinReason::ScanFailed && t.scanning);
+    run(t, k, 3500);                         // it ends at 8 s: dropped, no crash
+    assert(!t.have_results);
+    Sim u; u.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> m; m.reset(u, 0);
+    run(u, m, 100); m.stop(u);   // the running scan is left to finish
+    assert(!u.linked && u.begins == 0 && u.scanning && m.state() == JoinState::Idle);
   }
   // 7) link lost: retry after 15 s, back-off reset
   {
-    Sim s; s.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> j; j.reset(0);
+    Sim s; s.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> j; j.reset(s, 0);
     run(s, j, 5000);
     assert(j.connected());
     s.aps.clear(); run(s, j, 100);
@@ -198,32 +234,32 @@ int main() {
   }
   // 8) join timeout, scan failure, busy owner, no credentials
   {
-    Sim s; s.aps = {{"Home", 6, -50, 1}}; s.join_never = true; StationJoin<Sim> j; j.reset(0);
+    Sim s; s.aps = {{"Home", 6, -50, 1}}; s.join_never = true; StationJoin<Sim> j; j.reset(s, 0);
     run(s, j, 23000);
     assert(!j.connected() && j.reason() == JoinReason::JoinTimeout && s.disconnects >= 1);
-    Sim f; f.scan_fails = true; StationJoin<Sim> k; k.reset(0);
+    Sim f; f.scan_fails = true; StationJoin<Sim> k; k.reset(f, 0);
     run(f, k, 1000); assert(k.reason() == JoinReason::ScanFailed);
-    Sim b; b.allowed = false; StationJoin<Sim> m; m.reset(0);
+    Sim b; b.allowed = false; StationJoin<Sim> m; m.reset(b, 0);
     run(b, m, 5000); assert(m.reason() == JoinReason::Busy && b.scans == 0);
-    Sim c; StationJoin<Sim> n; n.reset(0);
+    Sim c; StationJoin<Sim> n; n.reset(c, 0);
     c.cost = 0; n.poll(c, 1, "", ""); assert(n.reason() == JoinReason::NoCredentials && c.scans == 0);
     c.cost = 0; n.poll(c, 2, nullptr, nullptr); assert(c.scans == 0);
   }
   // 9) no ESP-NOW to protect: plain async begin, no scan
   {
-    Sim s; s.espnow = 0; s.aps = {{"Home", 11, -50, 1}}; StationJoin<Sim> j; j.reset(0);
+    Sim s; s.espnow = 0; s.aps = {{"Home", 11, -50, 1}}; StationJoin<Sim> j; j.reset(s, 0);
     run(s, j, 5000);
     assert(j.connected() && s.scans == 0 && s.begins == 1 && s.link_channel == 11);
   }
   // 10) needsCredentials only when a join attempt is due; stop() drops our link
   {
-    Sim s; s.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> j; j.reset(0);
+    Sim s; s.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> j; j.reset(s, 0);
     assert(j.needsCredentials(0));
     run(s, j, 5000);
     assert(!j.needsCredentials(s.now));
     j.stop(s); assert(!s.linked && !j.connected());
     // millis() wrap
-    Sim w; w.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> x; w.now = 0xFFFFF000u; x.reset(w.now);
+    Sim w; w.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> x; w.now = 0xFFFFF000u; x.reset(w, w.now);
     run(w, x, 10000); assert(x.connected());
   }
   std::printf("worst poll %.2f ms\n", worst);
@@ -245,6 +281,9 @@ class StationJoinWiringTests(unittest.TestCase):
         self.assertNotIn("scanNetworks(", body)
         self.assertIn("udp_join.poll(udp_join_driver, now, udp_station_ssid, udp_station_password);", body)
         self.assertIn("const bool station_ready = linked && udp_join.connected();", body)
+        # The WiFi password is wiped once WiFi.begin() has it (end of the scan).
+        poll = body.index("udp_join.poll(")
+        self.assertIn("memset(udp_station_password, 0, sizeof(udp_station_password));", body[poll:])
 
     def test_driver_scans_asynchronously(self):
         driver = (ROOT / "src/helpers/esp32/StationJoinDriver.h").read_text()
