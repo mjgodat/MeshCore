@@ -1,19 +1,27 @@
-"""ESP32 station join on a radio the ESP-NOW bridge already started (StationJoinDriver.h).
+"""ESP32 station join next to the ESP-NOW bridge (StationJoinDriver.h, ESPNowBridge.cpp).
 
-Root cause of the 2026-11-03 M5 panic: the bridge starts the WiFi driver via
-ESP-IDF (no netif); Arduino's WiFi.mode(WIFI_STA) then creates the default
-STA netif on the already started driver, whose STA_START event has passed,
-so the netif is never started and DHCP / lwIP input fail. The fakes below
-model exactly that Arduino 2.0.17 / IDF 4.4 behaviour and check that the
-driver brings the station up on the existing radio init, once: the netif is
-started before any join/DHCP, and the radio is never stopped, de-initialised
-or restarted.
+Root cause of the 2026-11-03 M5 panic: the bridge started the WiFi driver
+through ESP-IDF (no netif); Arduino's WiFi.mode(WIFI_STA) then created the
+default STA netif after STA_START had passed, so the netif was never started
+(no lwIP input; "dhcp client start failed"; null call in esp_netif_receive).
+
+Fix: in UDP builds the bridge starts the driver through Arduino's facade (as
+the heads do), so the netif exists before esp_wifi_start; the station driver
+refuses a driver started without the facade instead of creating a late netif.
+
+The fakes model Arduino 2.0.17 / IDF 4.4 closely enough to catch the earlier
+attempts: events are queued and delivered in order by an event task, the
+default STA netif has no AUTOUP (it is "up" only after association), the
+IDF default STA_START handler starts the netif (a second start of a started
+netif is a fault), and Arduino's own handler sets STA_STARTED_BIT.
 """
 from pathlib import Path
+import re
 import tempfile
 import unittest
 
 from test_espnow_repeat import build_and_run
+from test_radio_receive_contract import method
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,28 +31,22 @@ FAKES = {
 #include <cstdint>
 #include <cstring>
 #include <string>
-#include <vector>
 #include "esp_wifi.h"
-#include "esp_netif.h"
 enum wl_status_t { WL_IDLE_STATUS = 0, WL_NO_SSID_AVAIL = 1, WL_CONNECTED = 3, WL_CONNECT_FAILED = 4 };
 #define WIFI_SCAN_RUNNING (-1)
 #define WIFI_OFF WIFI_MODE_NULL
 #define WIFI_STA WIFI_MODE_STA
 struct IPAddress { uint32_t v = 0; operator uint32_t() const { return v; } };
 struct FakeArduinoWiFi {
-  bool low_level = false, started_flag = false;   // Arduino's private caches
-  int mode_calls = 0;
-  wl_status_t status_v = WL_IDLE_STATUS;
-  uint32_t ip = 0;
   wifi_mode_t getMode();
   bool mode(wifi_mode_t m);
   void persistent(bool) {}
   bool setSleep(wifi_ps_type_t) { return true; }
-  wl_status_t status() { return status_v; }
-  IPAddress localIP() { IPAddress a; a.v = ip; return a; }
+  wl_status_t status();
+  IPAddress localIP() { IPAddress a; return a; }
   int32_t channel() { return 6; }
   int16_t scanComplete() { return -2; }
-  int16_t scanNetworks(bool, bool, bool, uint32_t, uint8_t, const char*, const uint8_t*) { return WIFI_SCAN_RUNNING; }
+  int16_t scanNetworks(bool, bool, bool, uint32_t, uint8_t, const char*, const uint8_t*);
   void scanDelete() {}
   std::string SSID(int) { return ""; }
   int32_t RSSI(int) { return 0; }
@@ -69,25 +71,6 @@ esp_err_t esp_wifi_get_mode(wifi_mode_t* m);
 esp_err_t esp_wifi_get_channel(uint8_t* c, wifi_second_chan_t* s);
 esp_err_t esp_wifi_set_channel(uint8_t c, wifi_second_chan_t s);
 ''',
-    'esp_netif.h': r'''
-#pragma once
-struct esp_netif_obj;
-typedef struct esp_netif_obj esp_netif_t;
-esp_netif_t* esp_netif_get_handle_from_ifkey(const char* key);
-bool esp_netif_is_netif_up(esp_netif_t* n);
-''',
-    'esp_event.h': r'''
-#pragma once
-#include <cstddef>
-#include <cstdint>
-#include "esp_wifi.h"
-typedef const char* esp_event_base_t;
-extern esp_event_base_t WIFI_EVENT;
-enum { WIFI_EVENT_STA_START = 2 };
-esp_err_t esp_event_post(esp_event_base_t base, int32_t id, const void* data, size_t size, uint32_t ticks);
-''',
-    'freertos/FreeRTOS.h': '#pragma once\n#include <cstdint>\n#define pdMS_TO_TICKS(x) (x)\n',
-    'freertos/task.h': '#pragma once\nvoid vTaskDelay(uint32_t);\n',
     'helpers/esp32/WiFiRadioPolicy.h': r'''
 #pragma once
 #include "esp_wifi.h"
@@ -119,63 +102,89 @@ CHECKS = r'''
 #define ESP32 1
 #include <cassert>
 #include <cstdio>
+#include <deque>
 #include <string>
 #include <vector>
 #include <helpers/esp32/StationJoinDriver.h>
 
-// ---- the radio: IDF driver + netif + event loop, as on the M5 ------------
-static std::vector<std::string> calls;
-static bool driver_init = false, driver_started = false;
-static wifi_mode_t driver_mode = WIFI_MODE_NULL;
-static bool netif_created = false, netif_started = false;
+// ---------------------------------------------------------------- the radio
+enum Event { STA_START, STA_STOP, STA_CONNECTED };
+static std::deque<Event> queue;          // the default event loop (FIFO)
+static std::vector<std::string> log_;
+static bool drv_init = false, drv_started = false, associated = false;
+static wifi_mode_t drv_mode = WIFI_MODE_NULL;
+static bool netif = false, netif_started = false, netif_up = false;   // no AUTOUP
+static int faults = 0;                   // double start, DHCP on a stopped netif
+static bool sta_started_bit = false;     // Arduino STA_STARTED_BIT
+static bool ard_low_level = false, ard_started = false;   // Arduino caches
 static uint8_t radio_channel = 6;
-esp_event_base_t WIFI_EVENT = "WIFI_EVENT";
+static int posts_by_driver_code = 0;
 FakeArduinoWiFi WiFi;
-static void ev(const std::string& c) { calls.push_back(c); }
+static void L(const std::string& s) { log_.push_back(s); }
 
-static esp_err_t idf_init() {   // esp_wifi_init: OK if already initialised
-  ev("esp_wifi_init"); driver_init = true; return ESP_OK;
+static void deliver(Event e) {
+  switch (e) {
+    case STA_START:
+      if (netif) {   // IDF default handler: esp_netif_action_start
+        if (netif_started) { ++faults; L("FAULT netif started twice"); }
+        netif_started = true;
+      }
+      sta_started_bit = true;   // Arduino handler
+      break;
+    case STA_STOP:
+      if (netif) { netif_started = false; netif_up = false; }
+      sta_started_bit = false;
+      break;
+    case STA_CONNECTED:
+      if (!netif_started) { ++faults; L("FAULT dhcp client start failed"); }
+      else { netif_up = true; L("dhcp"); }
+      break;
+  }
 }
-static void post_sta_start() { if (netif_created) netif_started = true; }   // default handler
+static void pump() { while (!queue.empty()) { Event e = queue.front(); queue.pop_front(); deliver(e); } }
+
+// ESP-IDF
+static esp_err_t idf_init() { L("esp_wifi_init"); drv_init = true; return ESP_OK; }
 static esp_err_t idf_start() {
-  ev("esp_wifi_start");
-  if (!driver_started) { driver_started = true; post_sta_start(); }   // event only on a real start
+  L("esp_wifi_start");
+  if (!drv_started) { drv_started = true; queue.push_back(STA_START); }
   return ESP_OK;
 }
-esp_err_t esp_wifi_get_mode(wifi_mode_t* m) {
-  if (!driver_init) return ESP_ERR_WIFI_NOT_INIT;
-  *m = driver_mode; return ESP_OK;
-}
+static esp_err_t idf_stop() { L("esp_wifi_stop"); if (drv_started) { drv_started = false; queue.push_back(STA_STOP); } return ESP_OK; }
+static esp_err_t idf_deinit() { L("esp_wifi_deinit"); drv_init = false; return ESP_OK; }
+esp_err_t esp_wifi_get_mode(wifi_mode_t* m) { if (!drv_init) return ESP_ERR_WIFI_NOT_INIT; *m = drv_mode; return ESP_OK; }
 esp_err_t esp_wifi_get_channel(uint8_t* c, wifi_second_chan_t*) { *c = radio_channel; return ESP_OK; }
-esp_err_t esp_wifi_set_channel(uint8_t c, wifi_second_chan_t) { ev("set_channel"); radio_channel = c; return ESP_OK; }
-esp_netif_t* esp_netif_get_handle_from_ifkey(const char*) {
-  return netif_created ? reinterpret_cast<esp_netif_t*>(&netif_created) : nullptr;
-}
-bool esp_netif_is_netif_up(esp_netif_t*) { return netif_started; }
-esp_err_t esp_event_post(esp_event_base_t, int32_t id, const void*, size_t, uint32_t) {
-  ev("post_sta_start");
-  if (id == WIFI_EVENT_STA_START) post_sta_start();
-  return ESP_OK;
-}
-void vTaskDelay(uint32_t) {}
+esp_err_t esp_wifi_set_channel(uint8_t c, wifi_second_chan_t) { radio_channel = c; return ESP_OK; }
 
-// Arduino 2.0.17 WiFiGenericClass::mode()/getMode(), reduced to what matters.
+// Arduino 2.0.17 WiFiGenericClass::getMode()/mode()
 wifi_mode_t FakeArduinoWiFi::getMode() {
-  if (!low_level || !started_flag) return WIFI_MODE_NULL;
-  return driver_mode;
+  if (!ard_low_level || !ard_started) return WIFI_MODE_NULL;
+  wifi_mode_t m; return esp_wifi_get_mode(&m) == ESP_OK ? m : WIFI_MODE_NULL;
 }
 bool FakeArduinoWiFi::mode(wifi_mode_t m) {
-  ++mode_calls;
-  if (getMode() == m) return true;
-  if (!low_level) {                      // wifiLowLevelInit
-    low_level = true;
-    if (!netif_created) { netif_created = true; ev("create_default_sta_netif"); }
-    if (idf_init() != ESP_OK) return false;
+  const wifi_mode_t cm = getMode();
+  if (cm == m) return true;
+  if (!cm && m) {
+    if (!ard_low_level) {
+      ard_low_level = true;
+      if (!netif) { netif = true; L("create_default_sta_netif"); }
+      idf_init();
+    }
+  } else if (cm && !m) {   // espWiFiStop + low-level deinit
+    ard_started = false; idf_stop(); ard_low_level = false; idf_deinit(); return true;
   }
-  ev("esp_wifi_set_mode"); driver_mode = m;
-  if (!started_flag) { started_flag = true; idf_start(); }   // espWiFiStart
+  drv_mode = m; L("esp_wifi_set_mode");
+  if (!ard_started) { ard_started = true; idf_start(); }
   return true;
 }
+wl_status_t FakeArduinoWiFi::status() { return associated && netif_up ? WL_CONNECTED : WL_IDLE_STATUS; }
+int16_t FakeArduinoWiFi::scanNetworks(bool, bool, bool, uint32_t, uint8_t, const char*, const uint8_t*) {
+  L("scan"); return WIFI_SCAN_RUNNING;
+}
+
+// the bridge's two ways of starting the radio
+static void bridge_start_raw() { idf_init(); drv_mode = WIFI_MODE_STA; idf_start(); }
+static void bridge_start_arduino() { WiFi.mode(WIFI_STA); }
 
 namespace mesh { namespace wifi {
 bool espNowChannelConstrained() { return true; }
@@ -186,70 +195,78 @@ esp_err_t restoreEspNowChannel() { return ESP_OK; }
 void setStationAutoReconnect(bool) {}
 void beginStationDiagnostics(const char*) {}
 wl_status_t beginStationWithSecurity(const char*, const char*, int32_t, const uint8_t*) {
-  ev("join");
-  // Association, then DHCP on the station netif.
-  if (!netif_started) { ev("dhcp client start failed"); return WL_CONNECT_FAILED; }
-  ev("dhcp_start");
-  return WL_IDLE_STATUS;
+  L("join"); associated = true; queue.push_back(STA_CONNECTED); return WL_IDLE_STATUS;
 }
 esp_err_t applyStationPowerSave(wifi_ps_type_t) { return ESP_OK; }
 }}
 
-static int index(const char* c) {
-  for (size_t i = 0; i < calls.size(); ++i) if (calls[i] == c) return (int)i;
-  return -1;
+static void reset_all() {
+  queue.clear(); log_.clear(); drv_init = drv_started = associated = false; drv_mode = WIFI_MODE_NULL;
+  netif = netif_started = netif_up = false; faults = 0; sta_started_bit = false;
+  ard_low_level = ard_started = false; radio_channel = 6; posts_by_driver_code = 0;
 }
-static void reset_radio() {
-  calls.clear(); driver_init = driver_started = false; driver_mode = WIFI_MODE_NULL;
-  netif_created = netif_started = false; WiFi = FakeArduinoWiFi(); radio_channel = 6;
-}
+static int count(const char* what) { int n = 0; for (auto& s : log_) n += s == what; return n; }
 
-int main(int argc, char** argv) {
-  const std::string mode = argc > 1 ? argv[1] : "";
-  // 1) The M5 case: the ESP-NOW bridge started the driver through IDF.
-  reset_radio();
-  driver_init = true; driver_started = true; driver_mode = WIFI_MODE_STA;
-  mesh::wifi::StationJoinDriver d;
-  assert(d.startScan(6, "net"));
-  assert(netif_created && netif_started);                     // the late netif is started
-  assert(index("post_sta_start") > index("create_default_sta_netif"));
+int main() {
   uint8_t bssid[6] = {1, 2, 3, 4, 5, 6};
-  assert(d.begin("net", "pw", 6, bssid));
-  assert(index("dhcp_start") > index("post_sta_start") && index("dhcp client start failed") < 0);
-  // never stops / de-initialises / restarts the radio; STA_START replayed once
-  int posts = 0; for (auto& c : calls) posts += c == "post_sta_start";
-  assert(posts == 1);
-  for (auto& c : calls) assert(c != "esp_wifi_stop" && c != "esp_wifi_deinit");
-  // a later prepare (facade now consistent) does nothing more
-  const size_t before = calls.size();
-  assert(d.startScan(6, "net"));
-  for (size_t i = before; i < calls.size(); ++i) assert(calls[i] != "post_sta_start" && calls[i] != "esp_wifi_init");
-  // 2) Without the replay the old code path fails exactly like the M5 did.
-  reset_radio();
-  driver_init = true; driver_started = true; driver_mode = WIFI_MODE_STA;
-  assert(WiFi.mode(WIFI_STA));
-  assert(netif_created && !netif_started);
-  assert(mesh::wifi::beginStationWithSecurity("net", "pw", 6, bssid) == WL_CONNECT_FAILED);
-  // 3) A head / plain station: Arduino starts the driver itself; the netif
-  //    starts from the real event and nothing is replayed.
-  reset_radio();
-  mesh::wifi::StationJoinDriver h;
-  assert(h.startScan(6, "net") && netif_started && index("post_sta_start") < 0);
-  assert(h.begin("net", "pw", 6, bssid) && index("dhcp_start") >= 0);
-  // 4) pinned channel: the repeater's configured bridge channel wins while
+  // 1) UDP build: the bridge starts the radio through Arduino. The netif
+  //    exists before esp_wifi_start and is started by the queued STA_START.
+  reset_all();
+  bridge_start_arduino();
+  pump();
+  assert(netif && netif_started && sta_started_bit && !netif_up);   // no AUTOUP: not up yet
+  {
+    mesh::wifi::StationJoinDriver d;
+    assert(d.startScan(6, "net"));            // prepare: facade already STA -> nothing to do
+    assert(d.begin("net", "pw", 6, bssid));
+    pump();
+    assert(faults == 0 && count("dhcp") == 1 && netif_up);
+    assert(count("esp_wifi_init") == 1 && count("esp_wifi_start") == 1);
+    assert(count("esp_wifi_stop") == 0 && count("esp_wifi_deinit") == 0);
+  }
+  // 2) A driver started through ESP-IDF alone (non-UDP bridge image): the
+  //    station driver refuses it; no late netif, no event replay, no join.
+  reset_all();
+  bridge_start_raw();
+  pump();
+  {
+    mesh::wifi::StationJoinDriver d;
+    const size_t queued_before = queue.size();
+    assert(!d.startScan(6, "net"));
+    assert(!d.begin("net", "pw", 6, bssid));
+    assert(!netif && queue.size() == queued_before && count("join") == 0 && faults == 0);
+    assert(count("esp_wifi_stop") == 0 && count("esp_wifi_deinit") == 0 && count("esp_wifi_init") == 1);
+  }
+  // 3) The facade started WiFi earlier (WebConfig/OTA), stopped it, and the
+  //    radio was then restarted through ESP-IDF: the netif exists and was
+  //    started by the raw STA_START. A join must neither start it twice nor
+  //    join on a radio Arduino does not own.
+  reset_all();
+  WiFi.mode(WIFI_STA); pump();
+  WiFi.mode(WIFI_OFF); pump();
+  bridge_start_raw(); pump();
+  assert(netif && netif_started && !netif_up);
+  {
+    mesh::wifi::StationJoinDriver d;
+    (void)d.startScan(6, "net"); pump();
+    (void)d.begin("net", "pw", 6, bssid); pump();
+    assert(faults == 0);
+  }
+  // 4) pinned channel (repeater): the configured bridge channel wins while
   //    the bridge is momentarily stopped; restore puts the radio there.
-  reset_radio();
-  mesh::wifi::StationJoinDriver r; r.pinned_channel = 2; radio_channel = 11;
-  assert(r.espNowChannel() == 2);
-  r.restoreChannel(); assert(radio_channel == 2);
-  const size_t n = calls.size(); r.restoreChannel(); assert(calls.size() == n);   // no rewrite when already there
+  reset_all();
+  {
+    mesh::wifi::StationJoinDriver r; r.pinned_channel = 2; radio_channel = 11;
+    assert(r.espNowChannel() == 2);
+    r.restoreChannel(); assert(radio_channel == 2);
+  }
   return 0;
 }
 '''
 
 
 class StationJoinDriverTests(unittest.TestCase):
-    def test_station_comes_up_on_the_bridge_radio_without_restart(self):
+    def test_station_netif_is_started_once_and_before_dhcp(self):
         with tempfile.TemporaryDirectory(prefix="station-join-driver-") as tmp:
             folder = Path(tmp)
             for name, text in FAKES.items():
@@ -258,14 +275,24 @@ class StationJoinDriverTests(unittest.TestCase):
                 path.write_text(text)
             build_and_run(self, CHECKS, includes=[folder], strict=False)
 
-    def test_join_path_has_no_radio_restart(self):
+    def test_join_path_has_no_radio_restart_and_no_event_replay(self):
         driver = (ROOT / "src/helpers/esp32/StationJoinDriver.h").read_text()
-        for call in ("esp_wifi_stop(", "esp_wifi_deinit(", "esp_wifi_init(", "esp_now_deinit(", "WiFi.mode(WIFI_OFF"):
+        for call in ("esp_wifi_stop(", "esp_wifi_deinit(", "esp_wifi_init(", "esp_now_deinit(",
+                     "WiFi.mode(WIFI_OFF", "esp_event_post(", "esp_netif_is_netif_up("):
             self.assertNotIn(call, driver)
-        prepare = driver[driver.index("bool prepare()"):driver.index("static bool startLateStationNetif()")]
-        self.assertLess(prepare.index("WiFi.mode(WIFI_STA)"), prepare.index("startLateStationNetif()"))
         begin = driver[driver.index("bool begin("):]
         self.assertLess(begin.index("prepare()"), begin.index("beginStationWithSecurity("))
+
+    def test_udp_bridge_starts_the_radio_through_arduino(self):
+        source = (ROOT / "src/helpers/bridges/ESPNowBridge.cpp").read_text()
+        begin = method(source, "void ESPNowBridge::begin()")
+        udp = begin[begin.index("#if defined(WITH_UDP_BRIDGE)\n    // UDP builds"):]
+        udp_branch, raw_branch = udp.split("#else", 1)
+        raw_branch = raw_branch[:raw_branch.index("#endif")]
+        self.assertIn("WiFi.mode(WIFI_STA)", udp_branch)
+        for call in ("esp_wifi_init(", "esp_wifi_start(", "esp_wifi_set_mode("):
+            self.assertNotIn(call, udp_branch)
+            self.assertIn(call, raw_branch)   # non-UDP images unchanged
 
 
 if __name__ == "__main__":

@@ -191,6 +191,23 @@ void ESPNowBridge::begin() {
     // raw IDF startup. Prepare it first so a late event cannot undo SDK NONE.
     // setSleep returns false when the cache is already correct.
     (void)WiFi.setSleep(WIFI_PS_NONE);
+#if defined(WITH_UDP_BRIDGE)
+    // UDP builds: start the driver through Arduino's facade (as the visual
+    // heads' ESPNOWRadio does). Its first-time init creates the default
+    // station netif BEFORE esp_wifi_start, so STA_START starts that netif and
+    // a later UDP station join (Arduino WiFi.begin, DHCP) finds it ready. A
+    // raw-IDF start here left the netif to be created after STA_START: never
+    // started, "dhcp client start failed" and a null lwIP input in
+    // esp_netif_receive (the M5 panic of 2026-11-03).
+    (void)wifi_config;
+    WiFi.persistent(false);
+    if (!WiFi.mode(WIFI_STA)) {
+      (void)failed(ESP_FAIL, Stage::WiFiInit);
+      return;
+    }
+    if (failed(esp_wifi_set_storage(WIFI_STORAGE_RAM), Stage::WiFiStorage)
+        || failed(esp_wifi_set_ps(WIFI_PS_NONE), Stage::WiFiPowerSave)) return;
+#else
     if (failed(esp_wifi_init(&wifi_config), Stage::WiFiInit)
         || failed(esp_wifi_set_storage(WIFI_STORAGE_RAM), Stage::WiFiStorage)
         || failed(esp_wifi_set_mode(WIFI_MODE_STA), Stage::WiFiMode)
@@ -198,6 +215,7 @@ void ESPNowBridge::begin() {
         // A dedicated ESP-NOW receiver must listen continuously. Associated
         // infrastructure WiFi retains its own saved modem-sleep policy.
         || failed(esp_wifi_set_ps(WIFI_PS_NONE), Stage::WiFiPowerSave)) return;
+#endif
   }
 
   if (raw_format) {

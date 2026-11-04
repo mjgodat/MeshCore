@@ -8,10 +8,6 @@
 #include <string.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
-#include <esp_event.h>
-#include <esp_netif.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #include <helpers/StationJoin.h>
 #include <helpers/esp32/WiFiRadioPolicy.h>
 #include <helpers/esp32/WiFiStationPolicy.h>
@@ -36,40 +32,28 @@ struct StationJoinDriver {
   // Station mode with the shared protocol mask; auto-reconnect stays off
   // while ESP-NOW is constrained (only this machine rejoins, on-channel).
   //
-  // The ESP-NOW bridge starts the WiFi driver through ESP-IDF directly
-  // (esp_wifi_init/start, no network interface). Arduino's facade cannot see
-  // that, so WiFi.mode(WIFI_STA) runs its first-time init: it creates the
-  // default station netif, finds the driver already initialised and
-  // started, and returns. The driver's WIFI_EVENT_STA_START was posted
-  // before the netif existed, so the netif is never started: no lwIP input
-  // hook, "dhcp client start failed" at association, and the first received
-  // frame jumps through a null pointer in esp_netif_receive (the M5 panic
-  // of 2026-11-03). The driver is never stopped or re-initialised here;
-  // instead STA_START is replayed once for the late netif, exactly as the
-  // driver would have announced it, before any join or DHCP.
+  // The driver must have been started through Arduino's facade (the heads'
+  // ESPNOWRadio and, in UDP builds, the ESP-NOW bridge do): then the
+  // station netif existed before STA_START and is started. A driver started
+  // through ESP-IDF alone is refused here instead of letting WiFi.mode()
+  // create a netif after STA_START, which is never started (no lwIP input;
+  // "dhcp client start failed" and the 2026-11-03 panic in
+  // esp_netif_receive). Never stops, re-initialises or restarts the radio.
   bool prepare() {
     WiFi.persistent(false);
     if (WiFi.getMode() != WIFI_STA) {
-      wifi_mode_t sdk_mode = WIFI_MODE_NULL;
-      const bool sdk_started_without_facade = WiFi.getMode() == WIFI_OFF
-          && esp_wifi_get_mode(&sdk_mode) == ESP_OK && sdk_mode != WIFI_MODE_NULL;
+      if (sdkStartedWithoutFacade()) return false;   // see above: no late netif
       if (!WiFi.mode(WIFI_STA)) return false;
-      if (sdk_started_without_facade && !startLateStationNetif()) return false;
     }
     if (applyProtocolMask(WIFI_IF_STA) != ESP_OK) return false;
     setStationAutoReconnect(true);
     return true;
   }
 
-  static bool startLateStationNetif() {
-    esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (!sta) return false;
-    if (esp_netif_is_netif_up(sta)) return true;
-    if (esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_START, nullptr, 0, pdMS_TO_TICKS(50)) != ESP_OK)
-      return false;
-    // The event task starts the netif; wait for it (once per boot, a few ms).
-    for (int i = 0; i < 50 && !esp_netif_is_netif_up(sta); ++i) vTaskDelay(1);
-    return esp_netif_is_netif_up(sta);
+  static bool sdkStartedWithoutFacade() {
+    wifi_mode_t sdk_mode = WIFI_MODE_NULL;
+    return WiFi.getMode() == WIFI_OFF && esp_wifi_get_mode(&sdk_mode) == ESP_OK
+        && sdk_mode != WIFI_MODE_NULL;
   }
 
   bool startScan(uint8_t channel, const char* ssid) {
