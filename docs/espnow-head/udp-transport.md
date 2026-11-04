@@ -355,8 +355,9 @@ awake (`WIFI_PS_NONE`) in any order of events: every station owner's
 modem-sleep request (UDP station, MQTT, WebConfig) is replaced by "awake"
 while the bridge runs, the bridge sets it when it starts on a shared
 station, and the bridge checks every 250 ms and undoes sleep set by any
-other path (counted). The owner's own preference applies again once the
-bridge stops.
+other path (counted). After the bridge stops the radio stays awake until
+the station's owner next applies its own preference (its next join or
+setting change).
 
 ### Known limits
 
