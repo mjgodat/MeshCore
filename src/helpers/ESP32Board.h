@@ -348,6 +348,9 @@ public:
 
   virtual void shutdownPeripherals();
   virtual void powerOff() override;
+  // Bounded waits outside loop() (RadioLib CAD, ...) call this: it feeds the
+  // loop watchdog when the calling task is the watched loop (LoopWatchdog.h).
+  void serviceWatchdog() override;
   virtual void enterDeepSleep(uint32_t secs) override;
 #if MESH_ENABLE_EMERGENCY_POWER
   bool supportsEmergencySleep() const override { return true; }

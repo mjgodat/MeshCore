@@ -69,6 +69,12 @@ int main() {
   assert(!saved.prev_exact && saved.prev_uptime_s == 1200 && saved.abnormal_ends == 1);
   format(saved, out, sizeof(out), mesh::observer::resetReasonName);
   assert(strstr(out, "alive clock unset"));
+  // a run that died before its first checkpoint, then a power-on reset:
+  // says so instead of "0m0s" (review L4)
+  { Record early = saved; RtcCopy lost; memset(&lost, 0, sizeof(lost));
+    onBoot(early, true, lost, PowerOn);       // alive fields were cleared at the previous boot
+    format(early, out, sizeof(out), mesh::observer::resetReasonName);
+    assert(strstr(out, "\r\nPrev run <1m, not checkpointed\r\nBoots ") == out); }
   // brownout and panic count; deep sleep and software resets do not
   Record b = saved;
   onBoot(b, true, rtc, Brownout); assert(b.abnormal_ends == 2 && b.last_abnormal_reason == Brownout);
@@ -176,10 +182,16 @@ class LoopWatchdogTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_m5_builds_enable_a_30_s_loop_watchdog(self):
+    def test_m5_repeater_builds_enable_a_30_s_loop_watchdog(self):
         ini = text("variants/thinknode_m5/platformio.ini")
         base = ini[ini.index("[ThinkNode_M5]"):ini.index("[env:ThinkNode_M5_Repeater]")]
-        self.assertRegex(base, r"-D MESH_LOOP_WATCHDOG_SECS=30\b")
+        self.assertNotIn("MESH_LOOP_WATCHDOG_SECS", base)   # only the repeater acts on it (review L3)
+        for env in ("[env:ThinkNode_M5_Repeater]", "[env:ThinkNode_M5_Repeater_bridge_espnow]"):
+            section = ini[ini.index(env) + 1:]
+            section = section[:section.index("\n[")]
+            self.assertRegex(section, r"-D MESH_LOOP_WATCHDOG_SECS=30\b")
+        udp = ini[ini.index("[env:ThinkNode_M5_Repeater_bridge_espnow_udp]") + 1:]
+        self.assertIn("${env:ThinkNode_M5_Repeater_bridge_espnow.build_flags}", udp[:udp.index("\n[")])
         self.assertIn("#define MESH_LOOP_WATCHDOG_SECS 0", text("src/helpers/esp32/LoopWatchdog.h"))
 
     def test_repeater_main(self):
@@ -203,7 +215,14 @@ class WiringTests(unittest.TestCase):
         self.assertIn("mesh::esp32::LoopWatchdogPause watchdog_pause;", body[:body.index("st = ApplyState();")])
         board = text("src/helpers/ESP32Board.cpp")
         wait = board[board.index("bool ESP32Board::otaFromManifest("):]
-        self.assertLess(wait.index("LoopWatchdogPause watchdog_pause;"), wait.index("while (!args.done)"))
+        wait = wait[wait.index("while (!args.done)"):]
+        # review M1: fed while waiting and bounded (test_observer_ota_channel runs it)
+        self.assertIn("mesh::esp32::feedLoopWatchdog();", wait[:wait.index("delay(50)")])
+        self.assertNotIn("LoopWatchdogPause", board[board.index("// ota worker begin"):board.index("// ota worker end")])
+        # review L1: bounded waits outside loop() feed through serviceWatchdog()
+        self.assertIn("void serviceWatchdog() override;", text("src/helpers/ESP32Board.h"))
+        sw = board[board.index("void ESP32Board::serviceWatchdog() {"):]
+        self.assertIn("mesh::esp32::feedLoopWatchdog();", sw[:sw.index("}")])
         mesh_cpp = text("examples/simple_repeater/MyMesh.cpp")
         fmt = mesh_cpp[mesh_cpp.index("bool MyMesh::formatFileSystem() {"):]
         self.assertLess(fmt.index("LoopWatchdogPause watchdog_pause;"), fmt.index("return SPIFFS.format();"))

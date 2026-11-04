@@ -35,6 +35,17 @@
   #define MESHCORE_TECHO_LITE_DISPLAY_DETECTION 1
 #endif
 
+#include "EinkBusyWatch.h"
+
+// ESP32 GxEPD2 panels (the ThinkNode M5): a stuck BUSY line must not trip
+// the repeater's loop watchdog (EinkBusyWatch.h). Other platforms and the
+// pocket GUI panel keep GxEPD2's plain waits.
+#if defined(ESP32) && !UI_POCKET_GUI
+  #define GXEPD_BUSY_WATCH 1
+#else
+  #define GXEPD_BUSY_WATCH 0
+#endif
+
 class GxEPDDisplay : public DisplayDriver {
 
 #if UI_POCKET_GUI
@@ -68,6 +79,10 @@ class GxEPDDisplay : public DisplayDriver {
 #endif
 #if UI_POCKET_GUI
   bool _full_frame = false;
+#endif
+#if GXEPD_BUSY_WATCH
+  mesh::ui::EinkBusyWatch _busy_watch;
+  static void onPanelBusy(const void* self);
 #endif
 
 public:

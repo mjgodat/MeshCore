@@ -922,6 +922,9 @@ static bool ota_fetchManifest(Client& client, const char* url, bool require_tls,
   return true;
 }
 
+// Set by otaFromManifest() when it abandons a hung `ota update` worker.
+static volatile bool ota_worker_abort = false;
+
 static bool ota_streamFirmware(Client& client, size_t content_length, char reply[]) {
   if (content_length == 0) {
     strcpy(reply, "ERR: empty firmware image");
@@ -973,6 +976,11 @@ static bool ota_streamFirmware(Client& client, size_t content_length, char reply
       continue;
     }
     deadline = millis() + 20000;
+    if (ota_worker_abort) {   // the loop gave up waiting (otaFromManifest)
+      strcpy(reply, "ERR: OTA aborted");
+      Update.abort();
+      return false;
+    }
     compat.consume(buffer, (size_t)received);
     if (Update.write(buffer, (size_t)received) != (size_t)received) {
       snprintf(reply, 160, "ERR: OTA write: %s", Update.errorString());
@@ -1089,20 +1097,31 @@ static void ota_partitionSignature(char* out, size_t out_sz) {
 
 // Parameters handed to the worker task; lives on otaFromManifest()'s stack,
 // which stays valid because that function blocks until the worker signals done.
+// ota worker begin
+// The `ota update` worker. Its arguments, reply and state are static, not on
+// the caller's stack: a worker that hangs (TLS/HTTP stall) may be abandoned
+// by otaFromManifest() after kOtaWorkerTimeoutMs, and must still find valid
+// memory when (if) it returns. While an abandoned worker runs, a new
+// `ota update` is refused; ota_worker_abort makes its download stop at the
+// next chunk without committing.
 struct OtaTaskArgs {
   ESP32Board* self;
-  const char* manifest_base;
-  const char* current_ver;
+  char manifest_base[192];
+  char current_ver[48];
   bool dry_run;
-  char* reply;
+  char reply[160];
   volatile bool result;
   volatile bool done;
 };
+static OtaTaskArgs ota_worker_args;
+static volatile bool ota_worker_busy = false;
+static const uint32_t kOtaWorkerTimeoutMs = 10UL * 60UL * 1000UL;
 
 static void ota_task_entry(void* param) {
   OtaTaskArgs* a = static_cast<OtaTaskArgs*>(param);
   a->result = a->self->otaFromManifestImpl(a->manifest_base, a->current_ver, a->dry_run, a->reply);
   a->done = true;        // on a successful `ota update` we reboot before reaching here
+  ota_worker_busy = false;
   vTaskDelete(nullptr);
 }
 
@@ -1110,27 +1129,56 @@ bool ESP32Board::otaFromManifest(const char* manifest_base, const char* current_
   // The TLS handshake (cert-bundle verify), JSON parse, and flash stream use far more
   // stack than the ~8 KB loop task offers - especially when reached via the deep
   // mesh-receive call chain (it overflows the loopTask canary). Run the work in a
-  // dedicated 24 KB-stack task and block here until it finishes. The big stack is
+  // dedicated 24 KB-stack task and wait here until it finishes. The big stack is
   // freed when the task exits; on a successful update the chip reboots inside it.
+  if (ota_worker_busy) {
+    strcpy(reply, "ERR: an earlier OTA worker is still running");
+    return false;
+  }
+  if (strlen(manifest_base) >= sizeof(ota_worker_args.manifest_base)
+      || strlen(current_ver) >= sizeof(ota_worker_args.current_ver)) {
+    strcpy(reply, "ERR: OTA manifest URL or version too long");
+    return false;
+  }
   struct NetworkSwitchGuard {
     NetworkLink& link;
     NetworkSwitchGuard() : link(activeNetworkLink()) { link.lockSwitching(); }
     ~NetworkSwitchGuard() { link.unlockSwitching(); }
   } network_guard;
-  OtaTaskArgs args = { this, manifest_base, current_ver, dry_run, reply, false, false };
+  OtaTaskArgs& args = ota_worker_args;
+  args.self = this;
+  strcpy(args.manifest_base, manifest_base);
+  strcpy(args.current_ver, current_ver);
+  args.dry_run = dry_run;
+  args.reply[0] = 0;
+  args.result = false;
+  args.done = false;
+  ota_worker_abort = false;
+  ota_worker_busy = true;
   TaskHandle_t handle = nullptr;
   BaseType_t ok = xTaskCreatePinnedToCore(ota_task_entry, "ota", 24576, &args, 5, &handle, 1);
   if (ok != pdPASS) {
+    ota_worker_busy = false;
     strcpy(reply, "ERR: OTA task spawn failed");
     return false;
   }
-  // A download takes as long as the network needs: not a loop hang.
-  mesh::esp32::LoopWatchdogPause watchdog_pause;
+  // The loop stays watched (LoopWatchdog.h): fed while the worker makes its
+  // own progress, but not forever. A worker silent for kOtaWorkerTimeoutMs is
+  // told to abort and abandoned; the repeater carries on.
+  const uint32_t started = millis();
   while (!args.done) {
+    mesh::esp32::feedLoopWatchdog();
+    if ((uint32_t)(millis() - started) >= kOtaWorkerTimeoutMs) {
+      ota_worker_abort = true;
+      strcpy(reply, "ERR: OTA timed out after 10 min; aborted");
+      return false;
+    }
     delay(50);  // Arduino delay() yields to other tasks
   }
+  memcpy(reply, args.reply, sizeof(args.reply));
   return args.result;
 }
+// ota worker end
 
 bool ESP32Board::otaFromManifestImpl(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]) {
 #if !defined(OTA_MANIFEST_BASE) || !defined(OTA_VARIANT)
@@ -1408,6 +1456,10 @@ void ESP32Board::shutdownPeripherals() {
   Serial.flush();
 #endif
   delay(100);
+}
+
+void ESP32Board::serviceWatchdog() {
+  mesh::esp32::feedLoopWatchdog();
 }
 
 void ESP32Board::powerOff() {
