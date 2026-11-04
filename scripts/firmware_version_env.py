@@ -27,8 +27,10 @@ tags = git("tag", "--list", prefix + "-v*", "--sort=-version:refname").splitline
 commit = git("rev-parse", "HEAD") or "00000000"
 now = datetime.datetime.now(datetime.timezone.utc)
 version, date, epoch = scheme.scheme(tags, commit, now, prefix, os.environ.get("FIRMWARE_VERSION"))
-existing = " ".join([os.environ.get("PLATFORMIO_BUILD_FLAGS", ""),
-                     " ".join(str(f) for f in env.GetProjectOption("build_flags", "").split())])  # noqa: F821
+project_flags = env.GetProjectOption("build_flags", "")  # noqa: F821  (a list or a string)
+if not isinstance(project_flags, str):
+    project_flags = " ".join(str(f) for f in project_flags)
+existing = " ".join([os.environ.get("PLATFORMIO_BUILD_FLAGS", ""), project_flags])
 flags = scheme.missing_flags(existing, version, date, epoch)
 if flags:
     env.Append(BUILD_FLAGS=flags)  # noqa: F821

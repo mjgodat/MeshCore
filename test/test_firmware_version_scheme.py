@@ -85,6 +85,41 @@ class FirmwareVersionSchemeTests(unittest.TestCase):
                          ["-DFIRMWARE_BUILD_DATE='\"d\"'", "-DFIRMWARE_BUILD_EPOCH=5"])
         self.assertEqual(len(scheme.missing_flags("-DFIRMWARE_VERSION_EXTRA=1", "v", "d", 5)), 3)
 
+    def run_pre_script(self, project_flags, environ_flags):
+        class FakeEnv:
+            def __init__(self):
+                self.appended = []
+            def subst(self, value):
+                return str(ROOT)
+            def GetProjectOption(self, name, default=None):
+                return {"custom_firmware_tag_prefix": "repeater", "build_flags": project_flags}.get(name, default)
+            def Append(self, **kwargs):
+                self.appended += kwargs.get("BUILD_FLAGS", [])
+        env = FakeEnv()
+        import os
+        saved = os.environ.get("PLATFORMIO_BUILD_FLAGS")
+        os.environ["PLATFORMIO_BUILD_FLAGS"] = environ_flags
+        try:
+            code = (ROOT / "scripts/firmware_version_env.py").read_text()
+            exec(compile(code, "firmware_version_env.py", "exec"),
+                 {"Import": lambda name: None, "env": env, "__name__": "SCons"})
+        finally:
+            if saved is None:
+                os.environ.pop("PLATFORMIO_BUILD_FLAGS", None)
+            else:
+                os.environ["PLATFORMIO_BUILD_FLAGS"] = saved
+        return env.appended
+
+    def test_pre_script_runs_with_platformio_option_types(self):
+        # PlatformIO returns build_flags as a list; a string must work too.
+        for project_flags in (["-D WITH_UDP_BRIDGE=1", "-Os"], "-D WITH_UDP_BRIDGE=1"):
+            with self.subTest(project_flags=project_flags):
+                flags = self.run_pre_script(project_flags, "")
+                self.assertEqual([f.split("=")[0] for f in flags],
+                                 ["-DFIRMWARE_VERSION", "-DFIRMWARE_BUILD_DATE", "-DFIRMWARE_BUILD_EPOCH"])
+        build_sh = "-DFIRMWARE_VERSION='\"v\"' -DFIRMWARE_BUILD_DATE='\"d\"' -DFIRMWARE_BUILD_EPOCH=1"
+        self.assertEqual(self.run_pre_script(["-Os"], build_sh), [])
+
     def test_udp_env_uses_the_scheme(self):
         ini = configparser.ConfigParser(strict=False, interpolation=None)
         ini.read(ROOT / "variants/thinknode_m5/platformio.ini")
