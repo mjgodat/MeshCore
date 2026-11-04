@@ -77,6 +77,8 @@ public:
   void routeTx(mesh::Packet* pkt) {
     @ROUTE_TX@
   }
+  // The observer feed has its own tests (test_observer_feed, test_observer_transport).
+  void serviceObserverVitals() {}
   void serviceBridges() {
     @SERVICE@
   }
