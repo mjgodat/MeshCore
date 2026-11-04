@@ -32,6 +32,8 @@ struct Sim {
   // radio
   uint8_t radio_channel = 6;
   bool scanning = false; uint8_t scan_channel = 0; uint32_t scan_done_at = 0; bool scan_fails = false;
+  bool all_channel_fails = false;   // the all-channel scan reports failure (-2)
+  uint32_t all_channel_ms = 1500;
   uint32_t scan_ms = 300;        // a stuck driver: longer than the 5 s timeout
   std::vector<Ap> results; bool have_results = false;
   bool joining = false; uint32_t join_at = 0; uint8_t join_channel = 0; uint8_t join_bssid = 0;
@@ -47,7 +49,7 @@ struct Sim {
     cost += 2.0; ++scans; if (!ch) ++all_channel_scans;
     if (scanning) return false;
     scanning = true; scan_channel = ch; have_results = false;
-    scan_done_at = now + (ch ? scan_ms : 1500);
+    scan_done_at = now + (ch ? scan_ms : all_channel_ms);
     return true;
   }
   int scanResult() {
@@ -55,7 +57,7 @@ struct Sim {
     if (scanning && (int32_t)(now - scan_done_at) < 0) return -1;
     if (scanning) {
       scanning = false; results.clear();
-      if (scan_fails) { have_results = false; return -2; }
+      if (scan_fails || (!scan_channel && all_channel_fails)) { have_results = false; return -2; }
       for (auto& a : aps) if (!scan_channel || a.channel == scan_channel) results.push_back(a);
       have_results = true;
     }
@@ -176,6 +178,40 @@ int main() {
     run(s, j, 130000, 20);
     assert(s.all_channel_scans == 1 && j.apChannel() == 11);
   }
+  // 4c) a failed diagnosis does not use up the interval: the next due retry
+  //     diagnoses again (bounded by the join back-off, never a hot loop)
+  {
+    Sim s; s.aps = {{"Home", 11, -40, 1}}; s.all_channel_fails = true;
+    StationJoin<Sim> j(600000); j.reset(s, 0);
+    run(s, j, 100000, 20);
+    assert(s.all_channel_scans >= 2 && s.all_channel_scans <= 4 && j.apChannel() == 0);
+    s.all_channel_fails = false;
+    run(s, j, 130000, 20);
+    assert(j.apChannel() == 11);
+    const int done = s.all_channel_scans;
+    run(s, j, 300000, 20);
+    assert(s.all_channel_scans == done);   // a completed one does use it up
+  }
+  // 4d) a diagnosis that outlives its 8 s timeout: its late result is read
+  //     when it lands (not dropped), and no new scan starts before that
+  {
+    Sim s; s.aps = {{"Home", 11, -40, 1}}; s.all_channel_ms = 9500;
+    StationJoin<Sim> j(600000); j.reset(s, 0);
+    run(s, j, 9000, 20);                     // started at ~0.3 s, timed out at ~8.3 s
+    assert(s.all_channel_scans == 1 && j.apChannel() == 0 && j.state() == JoinState::Idle);
+    run(s, j, 2000, 20);                     // lands at ~9.8 s: read, not dropped
+    assert(j.apChannel() == 11 && s.all_channel_scans == 1 && s.scans == 2);
+  }
+  // 4e) a diagnosis sees the AP back on the ESP-NOW channel: retry at once,
+  //     not after the back-off
+  {
+    Sim s; s.aps = {{"Home", 11, -40, 1}}; StationJoin<Sim> j(600000); j.reset(s, 0);
+    run(s, j, 1000, 20);                     // ch-6 scan failed, diagnosis running
+    assert(s.all_channel_scans == 1 && j.state() == JoinState::Diagnosing);
+    s.aps[0].channel = 6;                    // router back on the ESP-NOW channel
+    run(s, j, 6000, 20);
+    assert(j.connected() && s.link_channel == 6);
+  }
   // 5) F1: joined on ch 6, router moves to ch 11: dropped at once, reported,
   //    rejoined only when the AP is back on ch 6
   {
@@ -289,6 +325,31 @@ int main() {
     s.aps[0].channel = 2;                  // the router follows to channel 2
     run(s, j, 130000, 20);
     assert(j.connected() && s.link_channel == 2);
+  }
+  // 13) the ESP-NOW channel changes while the station is idle and backed off
+  //     (2026-11-04: bridge moved back to the router's channel after 24 min
+  //     off-channel; the next scan was up to 2 min away): retry promptly,
+  //     back-off reset; repeated changes never make it scan more than 1/s
+  {
+    Sim s; s.aps = {{"Home", 2, -50, 1}}; StationJoin<Sim> j; j.reset(s, 0);
+    run(s, j, 400000, 20);
+    assert(!j.connected() && j.backoffMs() == StationJoin<Sim>::kMaxBackoffMs);
+    s.espnow = 2;                            // bridge.channel 2 (no drop: not joined)
+    run(s, j, 4000, 20);
+    assert(j.connected() && s.link_channel == 2);
+    // a channel flapping every poll: bounded scan rate
+    Sim f; f.aps = {{"Home", 11, -50, 1}}; StationJoin<Sim> k; k.reset(f, 0);
+    run(f, k, 20000, 20);
+    const int before = f.scans;
+    for (int i = 0; i < 1000; ++i) { f.espnow = (i & 1) ? 6 : 7; run(f, k, 20, 20); }
+    assert(f.scans - before <= 21);         // 20 s: at most one scan per second (+1)
+    // dropForChannelChange while joined retries on the new channel promptly too
+    Sim g; g.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> m; m.reset(g, 0);
+    run(g, m, 5000); assert(m.connected());
+    g.espnow = 2; g.aps[0].channel = 2;
+    m.dropForChannelChange(g, g.now);
+    run(g, m, 4000, 20);
+    assert(m.connected() && g.link_channel == 2);
   }
   std::printf("worst poll %.2f ms\n", worst);
   return 0;
