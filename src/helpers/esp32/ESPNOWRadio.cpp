@@ -5,6 +5,8 @@
 #include <esp_wifi.h>
 #include <helpers/ESPNowRawFragmentation.h>
 #include <helpers/bridges/ObserverDemux.h>
+#include <helpers/bridges/ESPNowWrappedFrame.h>
+#include <helpers/bridges/DiscoveryFrame.h>
 #include <helpers/esp32/EspNowRepeatScheduler.h>
 #include <helpers/RadioDirectionPolicy.h>
 #include <helpers/esp32/WiFiRadioPolicy.h>
@@ -41,6 +43,12 @@ static uint8_t rx_frames[RX_QUEUE_DEPTH][RX_FRAME_MAX];
 static uint16_t rx_lengths[RX_QUEUE_DEPTH];
 static uint8_t rx_sources[RX_QUEUE_DEPTH]
                          [mesh::espnow::ESPNOW_RAW_SOURCE_MAC_SIZE];
+// espnow.format wrapped: entries are already unwrapped whole packets, never
+// raw-mode fragments.
+static bool rx_whole[RX_QUEUE_DEPTH];
+// Frames refused by the wrapped format (not wrapped / wrong secret).
+static volatile uint32_t rx_link_foreign = 0;
+static volatile uint32_t rx_link_checksum = 0;
 static volatile uint8_t rx_head = 0;
 static volatile uint8_t rx_tail = 0;
 static volatile uint8_t rx_count = 0;
@@ -53,6 +61,38 @@ static std::atomic<bool> accepting_packets{false};
 // before the handler (release) and read after it (acquire).
 static std::atomic<mesh::observer::FrameHandler> observer_handler{nullptr};
 static std::atomic<void*> observer_ctx{nullptr};
+// Visual head: repeater discovery announces (DiscoveryFrame.h), same contract.
+static std::atomic<mesh::observer::FrameHandler> discovery_handler{nullptr};
+static std::atomic<void*> discovery_ctx{nullptr};
+
+void ESPNOWRadio::setDiscoveryHandler(mesh::observer::FrameHandler handler, void* ctx) {
+  discovery_ctx.store(ctx, std::memory_order_release);
+  discovery_handler.store(handler, std::memory_order_release);
+}
+
+void ESPNOWRadio::linkRejects(uint32_t& foreign, uint32_t& checksum) {
+  portENTER_CRITICAL(&rx_mux);
+  foreign = rx_link_foreign;
+  checksum = rx_link_checksum;
+  portEXIT_CRITICAL(&rx_mux);
+}
+
+// One logical packet as ESP-NOW frames in this boot's format: raw (one or
+// two frames, ESPNowRawFragmentation.h) or wrapped (one frame, at most 246
+// payload bytes; longer packets are refused, as on the bridge).
+static bool encodeLinkFrames(const uint8_t* bytes, size_t len,
+                             mesh::espnow::ESPNowRawFrames& frames) {
+  mesh::espnow::ActiveLink& link = mesh::espnow::activeLink();
+  if (!link.wrapped.load(std::memory_order_acquire)) {
+    return mesh::espnow::encodeEspNowRawFrames(bytes, len, frames);
+  }
+  const size_t size = mesh::bridge::wrapFrame(bytes, len, link.secret, sizeof(link.secret),
+                                              frames.data[0], frames.data.capacity(0));
+  if (size == 0) return false;
+  frames.count = 1;
+  frames.lengths[0] = static_cast<uint16_t>(size);
+  return true;
+}
 
 void ESPNOWRadio::setObserverHandler(mesh::observer::FrameHandler handler,
                                      void* ctx) {
@@ -97,6 +137,28 @@ static void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
 #endif
   if (!accepting_packets.load()) return;
   ESPNOW_DEBUG_PRINTLN("Recv: len = %d", len);
+  // espnow.format wrapped: strict, like the bridge. Only frames wrapped with
+  // espnow.secret are accepted; everything after this sees the plaintext.
+  uint8_t plain[mesh::bridge::WRAPPED_MAX_PAYLOAD];
+  bool whole = false;
+  mesh::espnow::ActiveLink& link = mesh::espnow::activeLink();
+  if (link.wrapped.load(std::memory_order_acquire)) {
+    size_t plain_len = 0;
+    const mesh::bridge::Unwrap result = data == nullptr || len <= 0
+        ? mesh::bridge::Unwrap::TooShort
+        : mesh::bridge::unwrapFrame(data, static_cast<size_t>(len), link.secret,
+                                    sizeof(link.secret), plain, sizeof(plain), plain_len);
+    if (result != mesh::bridge::Unwrap::Ok) {
+      portENTER_CRITICAL(&rx_mux);
+      if (result == mesh::bridge::Unwrap::Checksum) rx_link_checksum++;
+      else rx_link_foreign++;
+      portEXIT_CRITICAL(&rx_mux);
+      return;
+    }
+    data = plain;
+    len = static_cast<int>(plain_len);
+    whole = true;
+  }
   // Observer frames go to the visual head; MeshCore/WiChat never see them.
   // Without a handler every frame takes the path below, as before.
   if (data != nullptr && len > 0
@@ -106,11 +168,21 @@ static void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
           observer_ctx.load(std::memory_order_acquire))) {
     return;
   }
+  // Discovery frames likewise, only while a handler is registered.
+  if (data != nullptr && len > 0
+      && mesh::discovery::isDiscoveryFrame(data, static_cast<size_t>(len))) {
+    const mesh::observer::FrameHandler handler = discovery_handler.load(std::memory_order_acquire);
+    if (handler != nullptr) {
+      handler(data, static_cast<size_t>(len), discovery_ctx.load(std::memory_order_acquire));
+      return;
+    }
+  }
   portENTER_CRITICAL(&rx_mux);
   if (data != nullptr && len > 0 && len <= RX_FRAME_MAX
       && rx_count < RX_QUEUE_DEPTH) {
     memcpy(rx_frames[rx_head], data, static_cast<size_t>(len));
     rx_lengths[rx_head] = static_cast<uint16_t>(len);
+    rx_whole[rx_head] = whole;
     if (mac != nullptr) {
       memcpy(rx_sources[rx_head], mac,
              mesh::espnow::ESPNOW_RAW_SOURCE_MAC_SIZE);
@@ -318,7 +390,7 @@ uint32_t ESPNOWRadio::intID() {
 // copy. Its second fragment, if any, follows its callback from loop().
 static bool submitRetainedPacket() {
   mesh::espnow::ESPNowRawFrames frames;
-  if (!mesh::espnow::encodeEspNowRawFrames(tx_repeat_packet, tx_repeat_length, frames)) {
+  if (!encodeLinkFrames(tx_repeat_packet, tx_repeat_length, frames)) {
     return false;
   }
   tx_second_pending = frames.count == 2;
@@ -339,8 +411,7 @@ bool ESPNOWRadio::startSendRaw(const uint8_t* bytes, int len) {
   if (!initialized_ || send_cancelled_) return false;
   mesh::espnow::ESPNowRawFrames frames;
   if (len < 0
-      || !mesh::espnow::encodeEspNowRawFrames(
-          bytes, static_cast<size_t>(len), frames)) {
+      || !encodeLinkFrames(bytes, static_cast<size_t>(len), frames)) {
     ESPNOW_DEBUG_PRINTLN("Invalid TX length: %d", len);
     return false;
   }
@@ -542,10 +613,12 @@ int ESPNOWRadio::recvRaw(uint8_t* bytes, int sz) {
     uint8_t frame[RX_FRAME_MAX];
     uint8_t source[mesh::espnow::ESPNOW_RAW_SOURCE_MAC_SIZE];
     uint16_t frame_len = 0;
+    bool whole = false;
 
     portENTER_CRITICAL(&rx_mux);
     if (rx_count > 0) {
       frame_len = rx_lengths[rx_tail];
+      whole = rx_whole[rx_tail];
       if (frame_len > 0 && frame_len <= sizeof(frame)) {
         memcpy(frame, rx_frames[rx_tail], frame_len);
         memcpy(source, rx_sources[rx_tail], sizeof(source));
@@ -558,6 +631,16 @@ int ESPNOWRadio::recvRaw(uint8_t* bytes, int sz) {
     portEXIT_CRITICAL(&rx_mux);
 
     if (frame_len == 0) break;
+    if (whole) {
+      // An unwrapped packet (espnow.format wrapped): never a fragment.
+      if (frame_len > static_cast<uint16_t>(sz)) {
+        n_recv_errors++;
+        continue;
+      }
+      memcpy(bytes, frame, frame_len);
+      n_recv++;
+      return static_cast<int>(frame_len);
+    }
     size_t packet_len = 0;
     const mesh::espnow::ESPNowRawReassemblyResult result =
         rx_reassembler.acceptFrame(

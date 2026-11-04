@@ -5,6 +5,7 @@
 #include "helpers/bridges/UDPBridgeProtocol.h"
 #include "helpers/UDPBridgePrefs.h"
 #include "helpers/bridges/ObserverRateLimiter.h"
+#include "helpers/bridges/DiscoveryFrame.h"
 
 // All methods run on the mesh loop. No WiFi callbacks own packet memory.
 // Network ownership belongs to the role; this class never starts/stops WiFi.
@@ -33,6 +34,18 @@ public:
   bool observerMeshPending() const { return _tx_mask != 0; }
   uint8_t observerSubscribers() const;
   void discardObserverFrames() { if (_observer) _observer->clear(); }
+  // Discovery (DiscoveryFrame.h). Announces go as plain datagrams to the
+  // subnet broadcast address on udp.port and to every configured peer.
+  // Received discovery frames (from any address) go to `sink`.
+  bool sendDiscovery(const uint8_t* frame, size_t len);
+  void setDiscoverySink(mesh::discovery::FrameSink sink, void* ctx) { _discovery_sink = sink; _discovery_ctx = ctx; }
+  // Auto-paired heads occupy free peer slots at run time (never saved).
+  // Returns the slot, -2 when a manual udp.peer.N already has the address,
+  // -1 when stopped, full or the address is unusable.
+  int addAutoPeer(const uint8_t ip[4], uint16_t port);
+  void removeAutoPeer(const uint8_t ip[4], uint16_t port);
+  uint8_t autoPeerCount() const;
+  bool localAddress(uint8_t ip[4], uint16_t& port) const;
 
 private:
   const mesh::bridge::udp::Prefs* _settings;
@@ -59,6 +72,9 @@ private:
   uint32_t _observer_peer_sends = 0, _observer_peer_fails = 0;
   uint16_t _rx_length = 0;
   uint8_t _rx_peer = 0;
+  uint8_t _auto_mask = 0;   // peers added by discovery, not from settings
+  mesh::discovery::FrameSink _discovery_sink = nullptr;
+  void* _discovery_ctx = nullptr;
   struct Stats {
     uint32_t frames = 0, authenticated = 0, delivered = 0;
     uint32_t malformed = 0, authentication = 0, foreign = 0, replay = 0;

@@ -76,6 +76,12 @@ void UDPBridge::begin() {
   if (bind(_socket, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) {
     const int code = errno; end(); error(code); return;
   }
+#if defined(SO_BROADCAST)
+  // Discovery announces go to the subnet broadcast address; not fatal.
+  const int broadcast = 1;
+  (void)setsockopt(_socket, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+#endif
+  _auto_mask = 0;
   _boot = randomNonce(); _sequence = 0;
   for (auto& session : _sessions) { session = udp::Session{}; session.next_hello = millis() + esp_random() % 1000; }
   _initialized = true; _last_error = 0; _debug_dirty = true;
@@ -83,6 +89,9 @@ void UDPBridge::begin() {
 void UDPBridge::end() {
   if (_socket >= 0) { close(_socket); _socket = -1; }
   _initialized = false; _tx_mask = 0; _tx_length = _rx_length = 0;
+  for (uint8_t i = 0; i < udp::MAX_PEERS; ++i)
+    if (_auto_mask & (1U << i)) _active.peers[i] = mesh::bridge::udp::Peer();
+  _auto_mask = 0;
   discardObserverFrames();
   for (auto& until : _observer_until) until = 0;
   _boot = 0; _sequence = 0;
@@ -228,6 +237,15 @@ void UDPBridge::pumpReceive() {
       return;
     }
     note(_stats.frames);
+    if (source_size == sizeof(source) && source.sin_family == AF_INET
+        && mesh::discovery::isDiscoveryFrame(bytes, static_cast<size_t>(length))) {
+      // Discovery from any address; the role verifies its tag.
+      if (_discovery_sink) {
+        uint8_t ip[4]; memcpy(ip, &source.sin_addr.s_addr, 4);
+        _discovery_sink(_discovery_ctx, bytes, static_cast<size_t>(length), ip, ntohs(source.sin_port));
+      }
+      continue;
+    }
     int peer = -1;
     for (uint8_t i = 0; i < udp::MAX_PEERS; ++i)
       if (_active.peers[i].port && source.sin_port == htons(_active.peers[i].port)
@@ -251,7 +269,15 @@ void UDPBridge::drainReceive() {
   onPacketReceived(packet);
 }
 void UDPBridge::onPacketReceived(mesh::Packet* packet) {
-  if (packet) { packet->udp_bridge_ingress = true; handleReceivedPacket(packet); }
+  if (!packet) return;
+  // bridge.rxlimit: one shared budget for packets entering from the bridges.
+  if (!mesh::discovery::rxLimiter().admit(millis())) {
+    _mgr->free(packet);
+    onIngressResult(IngressResult::Filtered);
+    return;
+  }
+  packet->udp_bridge_ingress = true;
+  handleReceivedPacket(packet);
 }
 void UDPBridge::onIngressResult(IngressResult result) {
   switch (result) {
@@ -329,6 +355,71 @@ void UDPBridge::pumpObserver() {
   }
   _observer->noteSent(ok);
 }
+bool UDPBridge::sendDiscovery(const uint8_t* frame, size_t len) {
+  if (!_initialized || !mesh::discovery::isDiscoveryFrame(frame, len)) return false;
+  bool ok = false;
+  sockaddr_in address{}; address.sin_family = AF_INET;
+  if (_local_address && _netmask && _netmask != 0xFFFFFFFFU) {
+    address.sin_port = htons(_active.port);
+    address.sin_addr.s_addr = _local_address | ~_netmask;
+    ok = sendto(_socket, frame, len, MSG_DONTWAIT, reinterpret_cast<const sockaddr*>(&address),
+                sizeof(address)) == static_cast<int>(len);
+  }
+  for (const auto& peer : _active.peers) {
+    if (!peer.port) continue;
+    address.sin_port = htons(peer.port);
+    memcpy(&address.sin_addr.s_addr, peer.ip, 4);
+    ok = (sendto(_socket, frame, len, MSG_DONTWAIT, reinterpret_cast<const sockaddr*>(&address),
+                 sizeof(address)) == static_cast<int>(len)) || ok;
+  }
+  return ok;
+}
+int UDPBridge::addAutoPeer(const uint8_t ip[4], uint16_t port) {
+  if (!_initialized || !port || !mesh::discovery::usableAddress(ip)) return -1;
+  uint32_t address; memcpy(&address, ip, 4);
+  if (_local_address && (address == _local_address
+      || (_netmask && (address == (_local_address | ~_netmask) || address == (_local_address & _netmask)))))
+    return -1;
+  mesh::bridge::udp::Peer wanted; memcpy(wanted.ip, ip, 4); wanted.port = port;
+  int free_slot = -1;
+  for (uint8_t i = 0; i < udp::MAX_PEERS; ++i) {
+    const auto& peer = _active.peers[i];
+    if (peer.port && mesh::bridge::udp::equalPeer(peer, wanted)) return (_auto_mask & (1U << i)) ? i : -2;
+    if (!peer.port && free_slot < 0) free_slot = i;
+  }
+  if (free_slot < 0) return -1;
+  _active.peers[free_slot] = wanted;
+  _sessions[free_slot] = udp::Session{};
+  _sessions[free_slot].next_hello = millis();
+  _observer_until[free_slot] = 0;
+  _auto_mask |= uint8_t(1U << free_slot);
+  _debug_dirty = true;
+  return free_slot;
+}
+void UDPBridge::removeAutoPeer(const uint8_t ip[4], uint16_t port) {
+  mesh::bridge::udp::Peer wanted; memcpy(wanted.ip, ip, 4); wanted.port = port;
+  for (uint8_t i = 0; i < udp::MAX_PEERS; ++i) {
+    if (!(_auto_mask & (1U << i)) || !mesh::bridge::udp::equalPeer(_active.peers[i], wanted)) continue;
+    _active.peers[i] = mesh::bridge::udp::Peer();
+    _sessions[i] = udp::Session{};
+    _observer_until[i] = 0;
+    _tx_mask &= uint8_t(~(1U << i));
+    if (!_tx_mask) _tx_length = 0;
+    _auto_mask &= uint8_t(~(1U << i));
+    _debug_dirty = true;
+  }
+}
+uint8_t UDPBridge::autoPeerCount() const {
+  uint8_t n = 0;
+  for (uint8_t m = _auto_mask; m; m &= uint8_t(m - 1)) ++n;
+  return n;
+}
+bool UDPBridge::localAddress(uint8_t ip[4], uint16_t& port) const {
+  if (!_initialized || !_local_address) return false;
+  memcpy(ip, &_local_address, 4);
+  port = _active.port;
+  return true;
+}
 void UDPBridge::loop() {
   if (_initialized) { drainReceive(); pumpReceive(); pumpTransmit(); pumpObserver(); pumpHello(); }
   emitDebug();
@@ -347,9 +438,9 @@ void UDPBridge::formatStatus(char* out, size_t capacity) const {
   const char* state = !_settings || !_settings->enabled ? "off" : !_network_ready ? "netwait"
       : !_initialized ? "retrying" : "ready";
   const uint8_t* ip = reinterpret_cast<const uint8_t*>(&_local_address);
-  snprintf(out, capacity, "> %s ip=%u.%u.%u.%u port=%u peers=%u ready=%u src=%s q=%u/%u last=%d", state,
+  snprintf(out, capacity, "> %s ip=%u.%u.%u.%u port=%u peers=%u auto=%u ready=%u src=%s q=%u/%u last=%d", state,
       unsigned(ip[0]), unsigned(ip[1]), unsigned(ip[2]), unsigned(ip[3]),
-      unsigned(_initialized ? _active.port : _settings ? _settings->port : 0), peers, ready,
+      unsigned(_initialized ? _active.port : _settings ? _settings->port : 0), peers, unsigned(autoPeerCount()), ready,
       _prefs->bridge_pkt_src ? "rx" : "tx", unsigned(_rx_length != 0), unsigned(_tx_mask != 0), _last_error);
   out[capacity - 1] = 0;
 }

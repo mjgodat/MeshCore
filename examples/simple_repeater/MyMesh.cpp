@@ -47,6 +47,9 @@ mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertSlowBank() {
 #include <helpers/esp32/WiFiRadioPolicy.h>
 #include <helpers/bridges/ObserverFrame.h>
 #include <helpers/bridges/ObserverRateLimiter.h>
+#include <helpers/bridges/DiscoveryFrame.h>
+#include <helpers/BridgeDiscoverySettings.h>
+#include <SHA256.h>
 #endif
 #if defined(WITH_UDP_BRIDGE)
 #include <helpers/esp32/WiFiCredentials.h>
@@ -1495,6 +1498,161 @@ void MyMesh::serviceObserverVitals() {
   }
   w.started = true;
   w.at_ms = now;
+}
+#endif
+
+#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)
+bool MyMesh::discoveryMac(void* ctx, const uint8_t* data, size_t len, uint8_t digest[32]) {
+  const MyMesh* self = static_cast<const MyMesh*>(ctx);
+  const char* secret = self->_prefs.bridge_secret;
+  const size_t n = mesh::bridge::wrappedSecretLength(secret, sizeof(self->_prefs.bridge_secret));
+  if (n == 0) return false;
+  SHA256 sha;
+  sha.resetHMAC(secret, n);
+  sha.update(mesh::discovery::kDomain, sizeof(mesh::discovery::kDomain));
+  sha.update(data, len);
+  sha.finalizeHMAC(secret, n, digest, 32);
+  return true;
+}
+
+// Bridges call this from loop() with every discovery frame they receive.
+void MyMesh::onDiscoveryFrame(void* ctx, const uint8_t* frame, size_t len, const uint8_t* ip, uint16_t port) {
+  MyMesh* self = static_cast<MyMesh*>(ctx);
+  DiscoveryState& d = self->_discovery;
+  if (!mesh::discovery::isReply(frame, len)) return;   // other repeaters' announces
+  mesh::discovery::Reply reply;
+  if (!mesh::discovery::decodeReply(frame, len, discoveryMac, self, reply)) { ++d.bad; return; }
+  if (!d.started || !mesh::discovery::freshReply(reply, d.boot, d.counter)) { ++d.stale; return; }
+  ++d.replies;
+#ifdef WITH_UDP_BRIDGE
+  // Over UDP the datagram's own source is the head's address.
+  if (ip != nullptr) { memcpy(reply.ip, ip, 4); reply.port = port; }
+  if (!self->isUDPBridgeRunning()) return;
+  mesh::bridge::udp::Peer wanted;
+  memcpy(wanted.ip, reply.ip, 4);
+  wanted.port = reply.port;
+  const auto* settings = &self->udp_bridge_settings.prefs();
+  for (const auto& manual : settings->peers) {
+    if (manual.port && mesh::bridge::udp::equalPeer(manual, wanted)) { ++d.manual; return; }  // manual wins
+  }
+  // A head that moved: drop its old address first.
+  for (uint8_t i = 0; i < mesh::discovery::kAutoPeerSlots; ++i) {
+    const mesh::discovery::AutoPeer& old = d.peers.slot(i);
+    if (old.used && !memcmp(old.prefix, reply.prefix, mesh::discovery::PREFIX_SIZE)
+        && (memcmp(old.ip, reply.ip, 4) || old.port != reply.port)) {
+      self->udp_bridge->removeAutoPeer(old.ip, old.port);
+    }
+  }
+  const mesh::discovery::PairResult result = d.peers.offer(reply, millis());
+  if (result == mesh::discovery::PairResult::Added || result == mesh::discovery::PairResult::Refreshed
+      || result == mesh::discovery::PairResult::Moved) {
+    self->udp_bridge->addAutoPeer(reply.ip, reply.port);
+  }
+#else
+  (void)ip; (void)port;
+#endif
+}
+
+void MyMesh::serviceDiscovery() {
+  DiscoveryState& d = _discovery;
+  const uint32_t now = millis();
+  if (!d.started) {
+    d.started = true;
+    do { d.boot = esp_random(); } while (d.boot == 0);
+    d.espnow_at = now + 2000;
+    d.udp_at = now + 3000;
+    d.refresh_at = now;
+  }
+#if defined(WITH_ESPNOW_BRIDGE)
+  const bool espnow_on = isEspNowBridgeRunning();
+  if (espnow_on) diagnosticEspNowBridge().setDiscoverySink(onDiscoveryFrame, this);
+#else
+  const bool espnow_on = false;
+#endif
+#ifdef WITH_UDP_BRIDGE
+  const bool udp_on = isUDPBridgeRunning();
+  if (udp_bridge) udp_bridge->setDiscoverySink(onDiscoveryFrame, this);
+  if (mesh::discovery::due(now, d.refresh_at)) {
+    d.refresh_at = now + 1000;
+    const uint8_t gone = d.peers.expire(now);
+    for (uint8_t i = 0; i < mesh::discovery::kAutoPeerSlots; ++i) {
+      const mesh::discovery::AutoPeer& p = d.peers.slot(i);
+      if ((gone & (1U << i)) && udp_bridge) udp_bridge->removeAutoPeer(p.ip, p.port);
+      // A bridge restart forgets run-time peers; put live ones back.
+      else if (p.used && udp_on) udp_bridge->addAutoPeer(p.ip, p.port);
+    }
+  }
+#else
+  const bool udp_on = false;
+#endif
+  if (!mesh::discovery::bridgeAnnounceEnabled()) return;
+  const bool espnow_due = espnow_on && mesh::discovery::due(now, d.espnow_at);
+  const bool udp_due = udp_on && mesh::discovery::due(now, d.udp_at);
+  if (!espnow_due && !udp_due) return;
+  mesh::discovery::Announce a;
+  a.boot = d.boot;
+  a.counter = ++d.counter;
+  memcpy(a.prefix, self_id.pub_key, mesh::discovery::PREFIX_SIZE);
+  strncpy(a.name, _prefs.node_name, mesh::discovery::NAME_SIZE);
+  a.name[mesh::discovery::NAME_SIZE] = 0;
+#if defined(WITH_ESPNOW_BRIDGE)
+  if (espnow_on) {
+    a.caps |= mesh::discovery::CAP_ESPNOW;
+    a.espnow_channel = _prefs.bridge_channel;
+    a.espnow_format = _prefs.bridge_format == mesh::bridge::ESPNOW_FORMAT_RAW ? 0 : 1;
+  }
+  if (mesh::espnow::espNowObserverEnabled()) {
+    a.caps |= mesh::discovery::CAP_OBSERVER;
+    if (mesh::observer::usesEspNow(mesh::espnow::observerTransport())) a.caps |= mesh::discovery::CAP_OBS_ESPNOW;
+    if (mesh::observer::usesUdp(mesh::espnow::observerTransport())) a.caps |= mesh::discovery::CAP_OBS_UDP;
+  }
+#endif
+#ifdef WITH_UDP_BRIDGE
+  if (udp_on && udp_bridge->localAddress(a.ip, a.port)) a.caps |= mesh::discovery::CAP_UDP | mesh::discovery::CAP_AUTOPAIR;
+#endif
+  uint8_t frame[mesh::discovery::MAX_FRAME];
+  const size_t n = mesh::discovery::encodeAnnounce(a, discoveryMac, this, frame, sizeof(frame));
+  if (n == 0) {
+    // No usable bridge.secret: nothing is announced.
+    d.espnow_at = now + mesh::discovery::kAnnounceEspNowMs;
+    d.udp_at = now + mesh::discovery::kAnnounceUdpMs;
+    return;
+  }
+#if defined(WITH_ESPNOW_BRIDGE)
+  if (espnow_due) {
+    diagnosticEspNowBridge().sendAuxFrame(frame, n);
+    d.espnow_at = now + mesh::discovery::kAnnounceEspNowMs;
+  }
+#endif
+#ifdef WITH_UDP_BRIDGE
+  if (udp_due) {
+    udp_bridge->sendDiscovery(frame, n);
+    d.udp_at = now + mesh::discovery::kAnnounceUdpMs;
+  }
+#endif
+}
+
+void MyMesh::describeAutoPeers(void* ctx, char* out, size_t capacity) {
+  MyMesh* self = static_cast<MyMesh*>(ctx);
+  const DiscoveryState& d = self->_discovery;
+  const uint32_t now = millis();
+  int used = snprintf(out, capacity, "> %u", unsigned(d.peers.count()));
+  for (uint8_t i = 0; i < mesh::discovery::kAutoPeerSlots && used > 0 && size_t(used) < capacity; ++i) {
+    const mesh::discovery::AutoPeer& p = d.peers.slot(i);
+    if (!p.used) continue;
+    used += snprintf(out + used, capacity - used, " %u.%u.%u.%u:%u/%02X%02X/%lus", p.ip[0], p.ip[1], p.ip[2],
+                     p.ip[3], unsigned(p.port), p.prefix[0], p.prefix[1],
+                     (unsigned long)((p.until - now) / 1000U));
+  }
+  if (used > 0 && size_t(used) < capacity)
+    snprintf(out + used, capacity - used, " replies=%lu bad=%lu stale=%lu full=%lu limited=%lu",
+             (unsigned long)d.replies, (unsigned long)d.bad, (unsigned long)d.stale,
+             (unsigned long)d.peers.full(), (unsigned long)d.peers.limited());
+}
+
+void MyMesh::getDiscoveryRuntime(mesh::discovery::DiscoveryRuntime& runtime) {
+  runtime.describe_peers = describeAutoPeers;
+  runtime.ctx = this;
 }
 #endif
 
@@ -14285,6 +14443,9 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
 #ifdef WITH_UDP_BRIDGE
   // The UDP socket belongs to this loop and follows station/OTA ownership.
   serviceUDPBridge();
+#endif
+#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)
+  serviceDiscovery();
 #endif
 #if defined(WITH_MQTT_BRIDGE)
   // MQTT owns TLS on Core 0; the radio loop only reaps an acknowledged stop.

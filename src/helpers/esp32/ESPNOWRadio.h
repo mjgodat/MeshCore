@@ -43,6 +43,12 @@ public:
   // interface gains B/G/N (a visual head joining WiFi for UDP). Returns false
   // when the SDK refused (ESP-NOW not running).
   static bool forceLongRangeRate();
+  // Repeater discovery announces (DiscoveryFrame.h) go to `handler` the same
+  // way (WiFi task, copy and return); null leaves them on the normal path.
+  static void setDiscoveryHandler(mesh::observer::FrameHandler handler, void* ctx);
+  // espnow.format wrapped: frames refused since boot because they were not
+  // wrapped (foreign) or failed the espnow.secret checksum.
+  static void linkRejects(uint32_t& foreign, uint32_t& checksum);
   bool isEnabled() const { return initialized_; }
   int recvRaw(uint8_t* bytes, int sz) override;
   uint32_t getEstAirtimeFor(int len_bytes) override;

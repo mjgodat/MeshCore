@@ -24,6 +24,7 @@ public:
  std::atomic<bool> _debug_dirty{false};
  mesh::espnow::ESPNowRawReassembler _raw_reassembler;
  struct { void clear() {} } _observer;  // ESPNowBridge::end() discards observer frames
+ uint8_t _aux_len = 0;
  mesh::espnow::EspNowRepeatScheduler _repeat;
  struct QueuedTransmit {bool started=false,diagnostic=false;int seen_key=0;};
  static constexpr int TX_QUEUE_DEPTH=2;
@@ -178,7 +179,7 @@ def build_and_run(scenario, *, mutation=None, full=True):
     radio_header = radio_header[:radio_header.index('#if ESPNOW_DEBUG_LOGGING')]
     radio_header = re.sub(r'^\s*#(?:include|pragma).*$', '', radio_header, flags=re.MULTILINE)
     # ESPNOWRadio.h needs the observer demux types (visual head).
-    radio_header = '#include <helpers/bridges/ObserverDemux.h>\n' + radio_header
+    radio_header = '#include <helpers/bridges/ObserverDemux.h>\n#include <helpers/bridges/ESPNowWrappedFrame.h>\n#include <helpers/bridges/DiscoveryFrame.h>\n' + radio_header
     radio_header = radio_header.replace(' : public mesh::Radio', '').replace(' override', '')
     radio = (ROOT / 'src/helpers/esp32/ESPNOWRadio.cpp').read_text()
     radio = re.sub(r'^\s*#include.*$', '', radio, flags=re.MULTILINE)
