@@ -15107,7 +15107,7 @@ bool MyMesh::isUDPBridgeNetworkEnabled() const {
 bool MyMesh::setUDPBridgeNetworkState(bool enabled) {
   udp_network_paused = !enabled;
   udp_station_retry_at = 0;
-  udp_join.reset(millis());
+  udp_join.reset(udp_join_driver, millis());
   if (!enabled) {
     if (udp_bridge) udp_bridge->serviceNetwork(false);
     mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::UdpBridge, false);
@@ -15135,7 +15135,7 @@ bool MyMesh::setUDPBridgePrefs(const mesh::bridge::udp::Prefs& value) {
   }
   udp_station_retry_at = 0;
   udp_network_paused = false;
-  udp_join.reset(millis());
+  udp_join.reset(udp_join_driver, millis());
   serviceUDPBridge();
   return true;
 }
@@ -15252,6 +15252,10 @@ void MyMesh::serviceUDPBridge() {
     const uint32_t now = millis();
     if (udp_join.needsCredentials(now)) loadUDPStationCredentials();
     udp_join.poll(udp_join_driver, now, udp_station_ssid, udp_station_password);
+    // The password is needed only until WiFi.begin() has taken it (the end of
+    // the scan); keep no copy in RAM otherwise.
+    if (udp_join.state() != mesh::wifi::JoinState::Scanning)
+      memset(udp_station_password, 0, sizeof(udp_station_password));
   }
   const bool station_ready = linked && udp_join.connected();
   udp_bridge->serviceNetwork(station_ready, static_cast<uint32_t>(WiFi.localIP()),
