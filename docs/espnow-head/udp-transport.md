@@ -161,10 +161,15 @@ so towards its LoRa airtime) can share one budget: `set bridge.rxlimit
 <0-6000>` packets per minute, bursts of a fifth of that. Default `0` = no
 limit, so an upgrade changes nothing; suggested `300` (bursts of 60). Only
 packets that pass the bridge's duplicate check count, so `espnow.repeat`
-copies and echoes from relays or another bridge never spend it. Excess
-packets are dropped and counted (`get bridge.rxlimit`, and `filter` in
-`get espnow.stats drops` / `get udp.stats drops`). Nothing changes on the
-wire. Raise it for a busy bridge-to-bridge link.
+copies and echoes from relays or another bridge never spend it. Each unique
+packet costs one token even when it arrives over both bridges (a head on
+`transport both`): the limiter remembers the last 16 packets it admitted (by
+their seen-table hash) and lets the other bridge's copy through free,
+counted as `shared=`; the mesh then drops that copy as a duplicate. OTA
+packets are always charged. Excess packets are dropped and counted (`get
+bridge.rxlimit`: `passed= dropped= shared=`, and `filter` in `get
+espnow.stats drops` / `get udp.stats drops`). Nothing changes on the wire.
+Raise it for a busy bridge-to-bridge link.
 
 ## A separate UDP secret on the repeater (`udp.secret`)
 
@@ -370,6 +375,18 @@ Payloads: Mesh = one raw MeshCore packet (2-255 bytes). Subscribe = 1 byte
 | 4 | version `1` | same |
 | 5 | kind `1` | kind `2` |
 | then | rx_ms u32, snr (quarter dB) i8, rssi i16, disposition u8 (bit 7 = truncated), len u8, raw[len] (max 235) | uptime_s u32, noise_floor i16, rx/min u16, tx/min u16, dup/min u16, airtime per mille u16, ESP-NOW nodes u8, battery mV u16, lat_e6 i32, lon_e6 i32, has_pos u8, freq f32, bw f32, sf u8, cr u8, preset_slot u8 |
+
+Health (kind 3), 20 bytes from version-1 repeaters: magic, version `1`,
+kind `3`, then body version u8 (`1`), free heap u32, minimum free heap since
+boot u32, largest free block u32, reset reason u8 (the ESP-IDF
+`esp_reset_reason_t` value: 1 power-on, 3 software, 4 panic, 5 interrupt
+WDT, 6 task WDT, 9 brownout, ...). The repeater sends one with the first
+vitals after the feed starts and then every 30 s (status frame: not rate
+limited, like vitals). Decoders accept 20 to 246 bytes and ignore what
+follows the fields they know, so later versions only append. Heads from
+before this frame do not know kind 3 and drop it (MeshCore rejects its first
+byte); the vitals frame itself is unchanged, because those heads check its
+length exactly.
 
 The same observer frames travel over ESP-NOW (one frame per ESP-NOW
 message); there is one format for both transports.
@@ -613,9 +630,9 @@ was not exercised.
 
 - UDP payloads are authenticated, not encrypted; the head keeps the WiFi
   password and the secret unencrypted in its NVS.
-- `bridge.rxlimit` deduplicates per bridge: a packet a head sends over both
-  ESP-NOW and UDP (`transport both`) counts once on each bridge; the mesh
-  still drops the second copy.
+- `bridge.rxlimit` charges a packet that arrives over both bridges once
+  (fixed in the reliability round); its second copy still reaches the mesh,
+  which drops it as a duplicate.
 - Discovery over UDP needs the head's `udp.port` to equal the repeater's
   (both default 4404) and an access point that forwards broadcasts between
   clients; otherwise the head learns the address over ESP-NOW, or is
