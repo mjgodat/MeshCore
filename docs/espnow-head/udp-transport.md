@@ -347,7 +347,33 @@ the end.
 | 5 LoRa receive throughout | PASS |
 | 6 Clear with `off`, roll back | PASS: Full image back with the ESP-NOW bridge on by itself |
 
-Open finding: after a reboot with UDP saved on while the access point is
-not on the bridge channel, the bridge ran with WiFi modem sleep
-(`ps=1 awake=0`) until the next bridge restart; the UDP station's power-save
-choice is made before the bridge counts as constraining the channel.
+Finding from step 4, fixed since (host-tested, not yet re-tested on
+hardware): after a reboot with UDP saved on while the access point was not
+on the bridge channel, the bridge ran with WiFi modem sleep
+(`ps=1 awake=0`). Now, whenever the ESP-NOW bridge runs, the radio stays
+awake (`WIFI_PS_NONE`) in any order of events: every station owner's
+modem-sleep request (UDP station, MQTT, WebConfig) is replaced by "awake"
+while the bridge runs, the bridge sets it when it starts on a shared
+station, and the bridge checks every 250 ms and undoes sleep set by any
+other path (counted). The owner's own preference applies again once the
+bridge stops.
+
+### Known limits
+
+- UDP payloads are authenticated, not encrypted; the head keeps the WiFi
+  password and the secret unencrypted in its NVS.
+- Pairing is manual, and the repeater's UDP bridge only joins WiFi once at
+  least one `udp.peer.N` is set: before the head's address is known, use a
+  placeholder peer (any unused LAN address) and replace it.
+- `set udp.enabled off` stops UDP but leaves the repeater's WiFi station
+  joined (Cascade's WiFi ownership); `set wifi.ssid off` (or a reboot with
+  UDP off) leaves the network.
+- The heads' on-screen keyboard cannot type `% ^ * + = _ ~ { } [ ] < > \ |`
+  or the backtick: such passwords or secrets need the USB terminal.
+- `auto` detects ESP-NOW loss from the repeater's vitals, so it needs
+  `observer on` and `observer.transport both` on the repeater.
+- A head that cannot find its network on the ESP-NOW channel scans all
+  channels once (ESP-NOW receive pauses about 1.5 s), at most every 10
+  minutes.
+- On builds with MQTT and the ESP-NOW bridge, MQTT's modem-sleep setting no
+  longer applies while the bridge runs (the radio stays awake; more power).
