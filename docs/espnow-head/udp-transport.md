@@ -271,13 +271,16 @@ were put on channel 2 for the test and back on 6 afterwards.
 Found on hardware, and fixed since (not yet re-tested on hardware):
 
 - **Panic when WiFi first starts while the ESP-NOW bridge runs.** The
-  bridge starts the WiFi driver through ESP-IDF without a network
+  bridge started the WiFi driver through ESP-IDF without a network
   interface; Arduino's first `WiFi.mode(WIFI_STA)` then created the station
   netif after the driver's `STA_START` event, so the netif never started
   (no lwIP input, `dhcp client start failed`, a null call in
-  `esp_netif_receive`). The station join now replays `STA_START` once for
-  that late netif before any join or DHCP; the radio is never stopped or
-  re-initialised and ESP-NOW stays up.
+  `esp_netif_receive`). In UDP builds the bridge now starts the radio
+  through Arduino's `WiFi.mode(WIFI_STA)`, as the heads do: the netif exists
+  before `esp_wifi_start` and is started by the driver's own `STA_START`.
+  The station join refuses a radio started without Arduino instead of
+  creating a late netif; it never stops or re-initialises the radio.
+  Non-UDP bridge images keep their ESP-IDF-only start unchanged.
 - **A bridge channel change while joined elsewhere stopped the bridge.**
   Now the station is dropped first (`wrong-channel`), the bridge starts on
   the new channel, a lost race is retried every 2 s, and the station
@@ -286,11 +289,24 @@ Found on hardware, and fixed since (not yet re-tested on hardware):
   bridge intent without the marker the Full image expects; it now saves it.
 - **Clearing.** `set wifi.ssid off` on the repeater (password included),
   `set udp.ssid off`, `set udp.secret off`, `set udp.password off`,
-  `set udp.peer off` on the heads.
+  `set udp.peer off` on the heads. `off` is therefore reserved in these
+  settings: a network (or secret) literally named `off` cannot be set.
+- **Bridge intent marker.** Every dedicated ESP-NOW bridge image (the
+  default `ThinkNode_M5_Repeater_bridge_espnow`, the `_udp` env, the DevKit
+  relay's bridge builds) now saves its bridge on/off as the explicit
+  ESP-NOW intent with the Full-profile marker. Harmless for those images
+  (they read `bridge_enabled` as before); it only lets a Full image flashed
+  over them keep the bridge on.
 - **Partition table.** `ThinkNode_M5_Repeater_bridge_espnow_udp` now uses
   the M5's shipped Full layout (`variants/dual_ota_full_4MB.csv`, 1984 KiB
-  app slots, byte-identical `partitions.bin`); the image fills 92.9% of a
-  slot.
+  app slots, byte-identical `partitions.bin`); the image fills 93% of a
+  slot. The upstream `ThinkNode_M5_Repeater_bridge_espnow` env keeps
+  upstream's `min_spiffs.csv` (1920 KiB slots + coredump, SPIFFS 128 KiB),
+  which differs from the owner's M5. It is not changed here: a full flash of
+  a different table would shrink SPIFFS for everyone else using that env.
+  Flash it to the owner's M5 app-only at 0x10000 only after checking that
+  the image fits 1984 KiB and the device boots from ota_0 (as done on
+  2026-11-03), or use the `_udp` env.
 
 ### Second supervised test (after the fixes)
 
