@@ -217,3 +217,13 @@ off from 15 s to every 2 minutes, and if the router later changes channel
 the station is disconnected at once and UDP pauses. `get udp.status` then
 shows `ap-moved-off-espnow-channel` (or `ap-not-on-espnow-channel`,
 `join-timeout`, `no-credentials`). Pin the router to the ESP-NOW channel.
+
+Changing `bridge.channel` while the UDP station is joined on another channel
+keeps the ESP-NOW bridge running on the new channel: the station is dropped
+first (`get udp.status`: `wrong-channel`) and rejoins only if the router is
+on the new channel. A bridge restart that loses a race with the
+disassociation is retried every 2 s; the bridge is never saved as off.
+
+`set wifi.ssid off` clears the saved network and its password on builds
+without MQTT (an empty value still clears on MQTT builds), and wipes the UDP
+station's copies in RAM.

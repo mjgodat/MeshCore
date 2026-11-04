@@ -156,7 +156,18 @@ void ESPNowBridge::begin() {
     uint8_t channel = 0;
     wifi_second_chan_t secondary = WIFI_SECOND_CHAN_NONE;
     const esp_err_t result = esp_wifi_get_channel(&channel, &secondary);
-    if (result != ESP_OK || channel != _prefs->bridge_channel) {
+    bool channel_ok = result == ESP_OK && channel == _prefs->bridge_channel;
+#if defined(WITH_UDP_BRIDGE)
+    // A station that is not associated does not hold the channel: ESP-NOW
+    // takes its configured channel (the UDP station rejoins only there).
+    wifi_ap_record_t associated_ap = {};
+    if (!channel_ok && result == ESP_OK
+        && esp_wifi_sta_get_ap_info(&associated_ap) != ESP_OK
+        && esp_wifi_set_channel(_prefs->bridge_channel, WIFI_SECOND_CHAN_NONE) == ESP_OK) {
+      channel_ok = true;
+    }
+#endif
+    if (!channel_ok) {
       recordError(Stage::ChannelConflict,
                   result != ESP_OK ? result : ESP_ERR_INVALID_STATE);
       emitDebug();

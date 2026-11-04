@@ -486,15 +486,20 @@ bool WebConfigServer::setStandaloneWiFiSSID(const char* value, char* reply,
   if (!reply || !reply_len) return false;
   // MQTT infrastructure historically allows clearing its SSID from the CLI.
   // Persist the complete empty canonical pair; never fall back to the old store.
-  const bool clearing = legacy_prefs && value && !value[0];
+  // Standalone builds clear with `off` (an empty value stays an error there),
+  // password included.
+  const bool standalone_clear = !legacy_prefs && value && !strcmp(value, "off");
+  const bool clearing = (legacy_prefs && value && !value[0]) || standalone_clear;
   if (!clearing && !mesh::cli::standaloneWiFiSSIDValid(value)) {
     snprintf(reply, reply_len, "Error: WiFi SSID must be 1-31 characters");
     return false;
   }
   mesh::wifi::Credentials credentials;
   if (!loadWiFiEdit(credentials, legacy_prefs, reply, reply_len)) return false;
-  strcpy(credentials.ssid, value);
+  strcpy(credentials.ssid, standalone_clear ? "" : value);
+  if (standalone_clear) memset(credentials.password, 0, sizeof(credentials.password));
   const bool ok = mesh::wifi::writeCredentials(credentials);
+  memset(&credentials, 0, sizeof(credentials));
   snprintf(reply, reply_len, ok ? "OK - WiFi SSID saved; reboot to apply"
                                 : "Error: failed to save WiFi SSID");
   return ok;

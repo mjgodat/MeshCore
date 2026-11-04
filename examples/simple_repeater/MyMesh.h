@@ -763,6 +763,17 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   char udp_station_ssid[33] = {};
   char udp_station_password[65] = {};
   void loadUDPStationCredentials();
+  // Configured ESP-NOW bridge channel while the bridge is enabled (0 = none).
+  uint8_t udpPinnedEspNowChannel() const;
+  // Before an ESP-NOW bridge (re)start: a UDP station on another channel is
+  // dropped (wrong-channel) so the bridge always gets its channel.
+  void prepareUdpForBridgeChannel();
+  bool udp_bridge_restart_wanted = false;
+  uint32_t udp_bridge_restart_at = 0;
+public:
+  // `set wifi.ssid off`: forget the station copies too.
+  void forgetUDPStationCredentials();
+private:
   void serviceUDPBridge();
   bool ensureUDPBridge();
   const mesh::bridge::udp::Prefs* getUDPBridgePrefs() const override {
@@ -1872,6 +1883,9 @@ public:
       return true;
     }
 #endif
+#if defined(WITH_UDP_BRIDGE)
+    prepareUdpForBridgeChannel();
+#endif
     configureBridgeFilter(&espnow_bridge);
     espnow_bridge.begin();
     return espnow_bridge.isRunning();
@@ -2064,6 +2078,9 @@ public:
     mqtt_bridge->setBoardModel(_cli.getBoard()->getManufacturerName());
     mqtt_bridge->setBuildDate(getBuildDate());
     mqtt_bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
+#endif
+#if defined(WITH_UDP_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+    prepareUdpForBridgeChannel();
 #endif
     configureBridgeFilter(active_bridge);
     active_bridge->begin();
