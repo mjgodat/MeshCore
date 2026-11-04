@@ -313,18 +313,6 @@ void HeadLinkRadio::setIdentity(const uint8_t* pub_key, const char* name) {
   self_name[mesh::discovery::NAME_SIZE] = 0;
 }
 
-// HMAC-SHA256 keyed with the shared secret (ctx: the secret string).
-static bool discoveryMac(void* ctx, const uint8_t* data, size_t len, uint8_t digest[32]) {
-  const char* key = static_cast<const char*>(ctx);
-  const size_t n = key ? strnlen(key, hl::kSecretMax + 1) : 0;
-  if (n == 0 || n > hl::kSecretMax) return false;
-  SHA256 sha;
-  sha.resetHMAC(key, n);
-  sha.update(mesh::discovery::kDomain, sizeof(mesh::discovery::kDomain));
-  sha.update(data, len);
-  sha.finalizeHMAC(key, n, digest, 32);
-  return true;
-}
 
 // WiFi task (ESP-NOW receive callback): copy and return.
 void HeadLinkRadio::onEspNowDiscovery(const uint8_t* frame, size_t len, void* ctx) {
@@ -339,7 +327,12 @@ void HeadLinkRadio::queueDiscovery(const uint8_t* frame, size_t len, const uint8
                                    bool via_espnow) {
   if (!mesh::discovery::isAnnounce(frame, len)) return;   // replies are for repeaters
   portENTER_CRITICAL(&_mux);
-  if (_pending_count < kPendingAnnounces) {
+  if (_pending_count == kPendingAnnounces) {
+    // Full: drop the oldest, keep the newest (a flood cannot starve it).
+    memmove(&_pending[0], &_pending[1], sizeof(PendingAnnounce) * (kPendingAnnounces - 1));
+    --_pending_count;
+  }
+  {
     PendingAnnounce& p = _pending[_pending_count++];
     memcpy(p.frame, frame, len);
     p.len = (uint8_t)len;
@@ -359,31 +352,36 @@ void HeadLinkRadio::serviceDiscovery() {
   _pending_count = 0;
   portEXIT_CRITICAL(&_mux);
   if (!count) return;
-  // Keys: udp.secret, then espnow.secret (both are the repeater's bridge.secret).
+  // Keys: udp.secret, then espnow.secret (the repeater's udp.secret or
+  // bridge.secret), each derived once (PBKDF2, DiscoveryKey.h) and cached.
   char espnow_secret[16] = {};
   mesh::espnow::savedEspNowLinkSecret(espnow_secret);
+  uint8_t* udp_key = const_cast<uint8_t*>(_cfg.secret[0] ? _udp_key.get(_cfg.secret) : nullptr);
+  uint8_t* espnow_key = const_cast<uint8_t*>(espnow_secret[0] ? _espnow_key.get(espnow_secret) : nullptr);
+  memset(espnow_secret, 0, sizeof(espnow_secret));
   const uint32_t now = millis();
   for (uint8_t i = 0; i < count; ++i) {
     mesh::discovery::Announce a;
-    const char* key = nullptr;
-    if (_cfg.secret[0] && mesh::discovery::decodeAnnounce(batch[i].frame, batch[i].len, discoveryMac,
-                                                          _cfg.secret, a)) key = _cfg.secret;
-    else if (espnow_secret[0] && mesh::discovery::decodeAnnounce(batch[i].frame, batch[i].len, discoveryMac,
-                                                                 espnow_secret, a)) key = espnow_secret;
+    uint8_t* key = nullptr;
+    if (udp_key && mesh::discovery::decodeAnnounce(batch[i].frame, batch[i].len, mesh::discovery::keyedMac,
+                                                   udp_key, a)) key = udp_key;
+    else if (espnow_key && mesh::discovery::decodeAnnounce(batch[i].frame, batch[i].len,
+                                                           mesh::discovery::keyedMac, espnow_key, a)) key = espnow_key;
     if (!key) { ++_disc_bad; continue; }
-    if (_disc.noteAnnounce(a, batch[i].via_espnow, now) && _link)
+    const hl::HeadDiscovery::Note note = _disc.noteAnnounce(a, batch[i].via_espnow, now);
+    if (note == hl::HeadDiscovery::Ignored) continue;   // another repeater, a replay or a stale boot
+    if (note == hl::HeadDiscovery::PeerChanged && _link)
       _link->setPeer(hl::HeadDiscovery::effectivePeer(_cfg.repeater, _disc.learnedPeer()));
     // Answer with this head's UDP address so the repeater pairs it.
     if (!_link) continue;
     const uint32_t local = _link->localAddress();
     uint8_t ip[4]; memcpy(ip, &local, 4);
     if (!_disc.shouldReply(now, ip, _link->localPort())) continue;
-    const mesh::discovery::Reply r = _disc.reply(self_prefix, self_name, ip, _link->localPort(), true);
+    const mesh::discovery::Reply r = _disc.reply(self_prefix, self_name, ip, _link->localPort());
     uint8_t frame[mesh::discovery::MAX_FRAME];
-    const size_t n = mesh::discovery::encodeReply(r, discoveryMac, const_cast<char*>(key), frame, sizeof(frame));
+    const size_t n = mesh::discovery::encodeReply(r, mesh::discovery::keyedMac, key, frame, sizeof(frame));
     if (n && _link->sendDatagram(frame, n, a.ip, a.port)) _disc.noteReplied(now, ip, _link->localPort());
   }
-  memset(espnow_secret, 0, sizeof(espnow_secret));
 }
 
 void HeadLinkRadio::setUiObserverHandler(mesh::observer::FrameHandler handler, void* ctx) {

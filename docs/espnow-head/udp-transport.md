@@ -97,27 +97,38 @@ the repeater to join WiFi at all.
 
 ## Discovery and auto-pairing
 
-Pairing no longer needs any IP address typed in. With the default
-`bridge.announce on`, the repeater announces itself every 5 s over ESP-NOW
-(on its bridge, in its `bridge.format`) and every 10 s over UDP (to the subnet
-broadcast address on its `udp.port`, and to each UDP peer). An announce
-carries the repeater's name, its key prefix, its ESP-NOW channel and format,
-its UDP address and port, and what it offers. It never carries the WiFi
-password or any secret. It is authenticated with an 8-byte HMAC-SHA256 tag
-keyed with `bridge.secret`, so only a head that has the secret uses it.
+Pairing no longer needs any IP address typed in. Discovery exists only in
+repeater images with the UDP bridge (for the M5:
+`ThinkNode_M5_Repeater_bridge_espnow_udp`). With the default
+`bridge.announce auto`, the repeater announces itself while its UDP bridge
+runs: every 5 s over ESP-NOW (on its bridge, in its `bridge.format`) and every
+10 s over UDP (to the subnet broadcast address on its `udp.port`, and to each
+UDP peer). `on` announces always, `off` never. An announce carries the
+repeater's name, its key prefix, its ESP-NOW channel and format, its UDP
+address and port, and what it offers. It never carries the WiFi password or
+any secret, but anyone in range can read it. It is authenticated with an
+8-byte HMAC-SHA256 tag keyed with a key derived from the secret
+(PBKDF2-HMAC-SHA256, 2048 iterations, derived once and cached), so only a
+head that has the secret uses it, and a recorded announce is a slow offline
+guessing target. The secret is the repeater's `udp.secret`, or its
+`bridge.secret` while `udp.secret` is off.
 
 On the head:
 
 1. Set `udp.ssid`, `udp.password` and `udp.secret` once (the repeater's
-   `bridge.secret`). Leave `udp.peer` at `off`.
+   `udp.secret`, or its `bridge.secret` if it has none). Leave `udp.peer` at
+   `off`.
 2. `set transport auto` (or `udp` / `both`).
 3. The first announce the head verifies, heard over ESP-NOW or over UDP,
    gives it the repeater's address (`get transport`: `..., udp.peer auto
    192.168.1.50:4404`; the Link page shows `Repeater: auto ...`). The head
    joins WiFi and answers the announce over UDP with its own address (signed
-   the same way, echoing one of the repeater's last 12 announces).
+   the same way, echoing one of the repeater's last 12 announces; at most one
+   answer a second, normally one every 30 s).
 
-On the repeater, a verified, fresh answer adds the head as a UDP peer at run
+On the repeater, a verified, fresh answer, sent from the address it signs and
+echoing a newer announce than that head's last answer (so a recorded answer
+cannot be replayed or re-pointed), adds the head as a UDP peer at run
 time (`get bridge.autopeers`, `get udp.status` `auto=1`): at most 4 heads, at
 most 4 new ones per minute, each kept 5 minutes after its last answer (a head
 answers every 30 s, and at once after the repeater reboots or the head's
@@ -130,7 +141,9 @@ Precedence: a manual `udp.peer` on the head and a manual `udp.peer.N` on the
 repeater always win; a head already listed in `udp.peer.N` is not added
 again. The learned address follows one repeater (key prefix); another
 repeater's announces are ignored until the current one has been silent for
-2 minutes. A head with no home repeater yet takes the first announced
+2 minutes. Replays are ignored too: within one repeater boot the announce
+counter must grow, and a new boot id is accepted only after the old one has
+been silent for 15 s (a reboot). A head with no home repeater yet takes the first announced
 repeater as home; an existing home is never replaced by an announce (adverts
 heard at 0 hops keep deciding, as before).
 
@@ -143,34 +156,68 @@ isolation); the ESP-NOW announce, or manual pairing, still works then.
 
 ## Bridged-packet rate limit (`bridge.rxlimit`)
 
-Packets arriving from the ESP-NOW and UDP bridges into the repeater (and so
-towards its LoRa airtime) share one budget: `set bridge.rxlimit <0-6000>`
-packets per minute, default 120 with bursts of 30, `0` = no limit. Excess
+New packets arriving from the ESP-NOW and UDP bridges into the repeater (and
+so towards its LoRa airtime) can share one budget: `set bridge.rxlimit
+<0-6000>` packets per minute, bursts of a fifth of that. Default `0` = no
+limit, so an upgrade changes nothing; suggested `300` (bursts of 60). Only
+packets that pass the bridge's duplicate check count, so `espnow.repeat`
+copies and echoes from relays or another bridge never spend it. Excess
 packets are dropped and counted (`get bridge.rxlimit`, and `filter` in
 `get espnow.stats drops` / `get udp.stats drops`). Nothing changes on the
 wire. Raise it for a busy bridge-to-bridge link.
 
-## Wrapped format on heads and relays
+## A separate UDP secret on the repeater (`udp.secret`)
 
-Primary ESP-NOW nodes (heads, the DevKit relay, `Generic_ESPNOW_*`) can now
-speak the bridge's `wrapped` format: `set espnow.secret <bridge.secret>`, then
+`set udp.secret <1-15 characters>` on the repeater keys its UDP sessions and
+discovery instead of `bridge.secret` (`off` = back to `bridge.secret`, the
+default). The heads' `udp.secret` must equal it. It is never printed and the
+UDP sessions restart when it changes. Use it when the ESP-NOW link is
+`wrapped`: the wrapped format is network isolation, not secrecy (an XOR with
+no nonce over largely known plaintext, so the secret can be recovered from a
+recorded frame), and that key should not also open the UDP bridge.
+
+## Wrapped format on heads and relays (optional)
+
+Nothing changes by default: primary ESP-NOW nodes (heads, the DevKit relay,
+`Generic_ESPNOW_*`) stay `raw`, and the repeater's `bridge.format` keeps its
+upstream default. Both formats are supported; pick per installation:
+
+| | `raw` | `wrapped` |
+|-|-------|-----------|
+| Interop | Stock MeshCore ESP-NOW firmware (`Generic_ESPNOW`, upstream heads) | Only nodes set to `wrapped` with the same secret |
+| Setup | Nothing to manage | One secret on every node, switched together |
+| Packet size | Full MeshCore packets (up to 255 bytes, two frames when needed) | Up to 246 bytes; observer records up to 231 raw bytes |
+| Protection | MeshCore's own encryption only (DMs, channels) | Plus isolation from other ESP-NOW users nearby and blocking of casual injection; not secrecy (XOR, no nonce: the secret can be recovered from recorded frames) |
+
+Discovery, auto-pairing and `bridge.rxlimit` work the same in both formats.
+
+To use wrapped, primary ESP-NOW nodes speak the bridge's `wrapped` format: `set espnow.secret <bridge.secret>`, then
 `set espnow.format wrapped`, then reboot (both settings apply at the next
 boot; the secret is never printed). It is byte-for-byte the repeater's
 `bridge.format wrapped`; the whole ESP-NOW link then needs the secret: mesh
 packets, the observer feed (wrapped too; a packet record then carries at most
 231 raw bytes, marked truncated) and the announces. Receive is strict on both
-sides: a wrapped node drops raw frames and a raw node cannot read wrapped
-ones, so every node on the channel must be switched.
+sides: a wrapped node drops raw frames (including any it queued at boot
+before its saved format applied) and a raw node cannot read wrapped ones, so
+every node on the channel must be switched. Wrapped is isolation, not
+secrecy: MeshCore's own encryption still protects DMs and channel messages,
+but the wrapped secret itself can be recovered from the air.
 
-### Switching an installation to wrapped
+### Switching an installation to wrapped (optional procedure)
 
-Do it in this order so that no node is cut off while it still needs to be
-reached over ESP-NOW. Keep USB access to the repeater (or a LoRa admin path)
-as the fallback.
+Only if wrapped is wanted. Do it in this order, **in one session**, so that no node is cut off while it
+still needs to be reached over ESP-NOW. A repeater in `bridge.format wrapped`
+also wraps its observer feed, so raw heads lose their pages (and chat) from
+step 4 until they are rebooted wrapped in step 5: prepare the heads in step
+2 before touching the repeater, and do not leave them raw. Keep USB access to
+the repeater (or a LoRa admin path) and to the heads as the fallback. Before
+flashing new firmware onto a repeater that is already `wrapped` (check
+`get bridge.format`), prepare and reboot its heads in the same session.
 
 1. **Pick a secret** (1-15 characters, not the admin password). On the
-   repeater: `set bridge.secret <secret>` (if it differs from the old one,
-   UDP heads need `set udp.secret` too; see the next section).
+   repeater: `set bridge.secret <secret>`. If the repeater has no
+   `udp.secret` of its own, UDP heads need `set udp.secret` to the same
+   value; better, give the repeater its own `udp.secret` first (see above).
    `bridge.format` stays `raw` for now, so nothing changes on ESP-NOW yet.
 2. **Prepare every head and relay** while they still talk raw:
    `set espnow.secret <secret>` and `set espnow.format wrapped`. Nothing
@@ -183,8 +230,9 @@ as the fallback.
 4. **Switch the repeater:** `set bridge.format wrapped` (applies at once;
    from USB, from LoRa remote admin, or from a head's admin console: the
    change is applied even if the reply does not get back).
-5. **Reboot the heads.** They come back wrapped and see the repeater again
-   (pages, chat, login).
+5. **Reboot the heads at once** (power cycle or `reboot` on the USB
+   terminal). They come back wrapped and see the repeater again (pages, chat,
+   login).
 6. **Check:** on each node `get espnow.format` (`> wrapped (refused: not
    wrapped 0, wrong secret 0)`; a growing `wrong secret` count means a node
    with another secret), on the repeater `get espnow.stats rx` (`crc` not
@@ -270,9 +318,13 @@ bridges. Heads on plain ESP-NOW (`raw`) do not use it. To change it:
   `bridge.secret` distinct from the admin password.
 - Discovery frames are authenticated, not encrypted: anyone on the network
   or the ESP-NOW channel sees the repeater's name, key prefix (both already
-  public in its adverts), channel and LAN address. Without the secret no one
-  can make the repeater add a peer; with it, at most 4 run-time peers, 4 new
-  per minute, each gone 5 minutes after its last answer.
+  public in its adverts), channel and LAN address, and can try to guess the
+  secret offline (slowed by the PBKDF2 key derivation). Without the secret no
+  one can make the repeater add a peer; with it, at most 4 run-time peers, 4
+  new per minute, each gone 5 minutes after its last answer. Answers are
+  accepted only from the address they sign and only once per announce.
+- `wrapped` ESP-NOW is isolation, not secrecy (see above); give the
+  repeater its own `udp.secret` so the LAN key is not the wrapped key.
 - Use a trusted WPA2/WPA3 network; no port forwarding or Internet exposure
   is needed (see the client-isolation notes in `docs/udp_bridge_setup.md`).
 
@@ -494,9 +546,22 @@ heads from `CYD_ESPNOW_Head_companion_usb` / `Freenove_S3_35_Head_companion_usb`
 optionally the DevKit relay from `ESP32Dev_ESPNOW_repeater`. Router on the
 ESP-NOW channel as before; rollback images and USB on every node.
 
-1. **Baseline.** Flash all; nothing configured new. `get bridge.announce`
-   `> on`; `get espnow.format` on the heads `> raw`; pages, chat, login as
-   before; `get bridge.rxlimit` `dropped=0` after 10 minutes of normal use.
+Steps 1-3, 5 and 6 run in `raw` (the default for heads and the
+repeater's `bridge.format raw` used with heads); step 4 is optional, only
+if the owner chooses wrapped.
+
+1. **Baseline (raw).** Check `get bridge.format` on the repeater: with
+   `raw` the heads stay raw. If it is `wrapped` today, either
+   `set bridge.format raw` for this test, or prepare the heads first
+   (`espnow.secret` = `bridge.secret`, `espnow.format wrapped`) and reboot
+   them right after the repeater, or its heads lose the observer feed.
+   Flash all; nothing else configured. `get bridge.announce`
+   `> auto`; `get bridge.rxlimit` `> 0 (no limit)`; `get espnow.format` on
+   the heads as prepared; pages, chat, login as before. Then
+   `set bridge.rxlimit 300` and check `dropped=0` after 10 minutes of normal
+   use. First check of discovery over UDP: does the head see the broadcast
+   announce (`get transport` shows `repeater ...` while only WiFi connects
+   them)?
 2. **Auto-pairing.** Repeater: WiFi, `bridge.secret`, `udp.enabled on`, no
    `udp.peer.N`. Head: `udp.ssid`, `udp.password`, `udp.secret`, `udp.peer
    off`, `set transport auto`. Within ~30 s: head `get transport` shows
@@ -509,15 +574,20 @@ ESP-NOW channel as before; rollback images and USB on every node.
    `set udp.peer <wrong IP>:4404`: the head stops using the learned address.
    Undo both. Power the head off: the repeater's auto peer disappears after
    about 5 minutes.
-4. **Wrapped installation.** Follow "Switching an installation to wrapped"
-   above. Afterwards: chat, login, pages (observer feed) as before; `get
+4. **Wrapped installation (optional).** Only if the owner chooses
+   wrapped: follow "Switching an installation to wrapped" above, then repeat
+   step 2 (discovery) and step 5 (rate limit) in wrapped. Afterwards: chat, login, pages (observer feed) as before; `get
    espnow.format` on each head `wrapped (refused: ... wrong secret 0)`.
    Put one head on another `espnow.secret` (and reboot it): it loses the
    repeater, its `wrong secret` count grows; restore. Then switch back to raw
    in the reverse order.
 5. **Rate limit.** `set bridge.rxlimit 6`; send 10 channel messages quickly
-   from a head: `get bridge.rxlimit` shows drops, LoRa is not flooded.
-   `set bridge.rxlimit 120`.
+   from a head: `get bridge.rxlimit` shows drops, LoRa is not flooded; with
+   `espnow.repeat 3` on the head, its copies do not count. Then
+   `set bridge.rxlimit 300` (or 0).
+6. **Separate UDP secret.** Repeater `set udp.secret <other>`: the UDP heads
+   drop off (`udp handshake`); `set udp.secret <other>` on each head: they
+   come back via discovery. `get udp.secret` shows only `set`.
 
 ### Known limits
 

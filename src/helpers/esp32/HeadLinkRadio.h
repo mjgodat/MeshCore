@@ -23,6 +23,7 @@
 #include <helpers/esp32/ESPNOWRadio.h>
 #include <helpers/HeadTransport.h>
 #include <helpers/HeadDiscovery.h>
+#include <helpers/bridges/DiscoveryKey.h>
 #include <helpers/bridges/UDPBridgeProtocol.h>
 #include <helpers/StationJoin.h>
 #include <freertos/FreeRTOS.h>
@@ -97,10 +98,13 @@ private:
     uint16_t port;
     bool via_espnow;
   };
-  static const uint8_t kPendingAnnounces = 2;
+  // Room for a few frames; a flood (good or bad tags) drops the oldest, so
+  // the latest real announce is never starved out.
+  static const uint8_t kPendingAnnounces = 4;
   PendingAnnounce _pending[kPendingAnnounces];
   uint8_t _pending_count = 0;
   mesh::headlink::HeadDiscovery _disc;
+  mesh::discovery::KeyCache _udp_key, _espnow_key;   // derived once per secret
   uint32_t _disc_bad = 0;
 };
 
