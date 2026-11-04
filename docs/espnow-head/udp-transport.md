@@ -80,8 +80,8 @@ the repeater to join WiFi at all.
   `ap-moved-off-espnow-channel`; head: `udp wrong-channel`). It rejoins only
   when the router is back on the ESP-NOW channel. Pin the router's channel.
 - If the head's network is on another channel, the head does not join it.
-  In udp or auto mode, once ESP-NOW has been silent for the fail-over time,
-  it runs one all-channel scan for that network (at most every 10 minutes;
+  In udp or auto mode, once ESP-NOW has been silent for the fail-over time
+  (counted from boot when it was never heard), it runs one all-channel scan for that network (at most every 10 minutes;
   ESP-NOW receive pauses about 1.5 s while the radio visits the other
   channels, which costs nothing then) and reports it:
   `udp wrong-channel (AP on ch 11)` in `get transport`, a warning header on
@@ -363,9 +363,12 @@ while the bridge runs, the bridge sets it when it starts on a shared
 station, and in the `_udp` M5 image every `esp_wifi_set_ps` call is wrapped
 at link time (`-Wl,--wrap`) so a sleep request never reaches the driver
 while the bridge runs; a 250 ms check in the bridge undoes anything that
-slips past (counted). After the bridge stops the radio stays awake until
-the station's owner next applies its own preference (its next join or
-setting change).
+slips past (counted). If the driver refuses (Bluetooth active) that check
+backs off up to 10 s and logs once; `get espnow.stats awake` shows repairs
+and refusals. `get wifi.powersave` shows the saved setting and that it is
+effectively `none` while the bridge runs. When a bridge that started on a
+shared station stops, the station owner's own preference is restored at
+once.
 
 ### Known limits
 
@@ -384,4 +387,5 @@ setting change).
   `_udp` env matches it.
 - The fixes since the second supervised test (radio kept awake, join without
   peers, leaving on `udp.enabled off`, the `esp_wifi_set_ps` wrap, the
-  version string, the head's diagnosis gate) still need a hardware run.
+  version string, the head's diagnosis gate, the power-save hand-back and
+  refusal back-off) still need a hardware run.
