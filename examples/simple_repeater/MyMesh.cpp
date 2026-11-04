@@ -1504,7 +1504,7 @@ void MyMesh::serviceObserverVitals() {
   // Heap and reset reason (kind 3, ObserverFrame.h): slow-moving, so one
   // frame per kHealthEveryVitals vitals ticks (30 s) after the first.
   if (w.health_wait == 0) {
-    const mesh::observer::Health h = mesh::esp32::heapHealth();
+    const mesh::observer::Health h = mesh::esp32::heapHealth((uint32_t)(uptime_millis / 1000));
     uint8_t frame[mesh::observer::HEALTH_FRAME_V1];
     const size_t frame_len = mesh::observer::encodeHealth(h, frame, sizeof(frame));
     if (frame_len) offerObserverFrame(frame, frame_len);
