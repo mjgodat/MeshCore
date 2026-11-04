@@ -346,6 +346,16 @@ class HeadTransportWiringTests(unittest.TestCase):
         self.assertIn("(uint32_t)_cfg.failover_s * 1000U, now)", loop)   # uptime gate
         self.assertLess(loop.index("setDiagnoseAllowed"), loop.index("_link->loop();"))
 
+    def test_join_diagnostic_is_uitest_only(self):
+        import re
+        header = (ROOT / "src/helpers/esp32/HeadLinkRadio.h").read_text()
+        self.assertRegex(header, r"#ifdef FREENOVE_UITEST\s+void joinDebug\(char\* out, size_t cap\);\s+#endif")
+        for m in re.finditer(r"joinDebug\(", self.radio):
+            before = self.radio[:m.start()]
+            self.assertGreater(before.rfind("#ifdef FREENOVE_UITEST"), before.rfind("#endif"))
+        console = (ROOT / "examples/companion_radio/ui-freenove/UiTestConsole.cpp").read_text()
+        self.assertIn('strcmp(cmd, "joindbg") == 0', console)
+
     def test_dedupe_only_when_both_transports_feed_the_ui(self):
         deliver = method(self.radio, "void HeadLinkRadio::deliverObserver(")
         self.assertIn("if (mode == hl::Mode::Both || mode == hl::Mode::Auto) duplicate = _dedupe.duplicate(frame, len);", deliver)

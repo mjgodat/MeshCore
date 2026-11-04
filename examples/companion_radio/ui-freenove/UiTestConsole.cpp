@@ -47,6 +47,7 @@
 #include <esp_timer.h>
 
 #include "UiTest.h"
+#include <helpers/esp32/HeadLinkRadio.h>
 #include "target.h"
 #if HMI_CYD
 #include "StubPages.h"
@@ -589,6 +590,11 @@ void run(char* line) {
           mesh::ui::displayModeName(d.battery.mode), (unsigned)d.battery.seconds, mesh::ui::displayModeName(d.usb.mode),
           (unsigned)d.usb.seconds, mig ? 1 : 0, mesh::ui::displayModeName((mesh::ui::DisplayMode)fromMode), from,
           display.isOn() ? 1 : 0);
+  } else if (strcmp(cmd, "joindbg") == 0) {
+    char out[200];
+    if (HeadLinkRadio::instance()) HeadLinkRadio::instance()->joinDebug(out, sizeof(out));
+    else snprintf(out, sizeof(out), "JOIN no-radio");
+    reply("%s", out);
   } else if (strcmp(cmd, "ping") == 0) {
     reply("OK ping");
   } else {
