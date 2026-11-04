@@ -589,10 +589,33 @@ if the owner chooses wrapped.
    drop off (`udp handshake`); `set udp.secret <other>` on each head: they
    come back via discovery. `get udp.secret` shows only `set`.
 
+### Results of the discovery test, 2026-11-04 (espnow-head e02373f90, raw)
+
+ThinkNode M5 (`_udp` image) + CYD (product image). Router on channel 2, so both
+devices were on channel 2 for the UDP steps and back on 6 at the end. A
+temporary `udp.secret` was used on both devices and cleared afterwards. Wrapped
+was not exercised.
+
+| Step | Result |
+|------|--------|
+| New defaults after flashing: `bridge.announce auto`, `bridge.rxlimit 0`, `udp.secret off` | PASS |
+| `auto` without UDP: nothing announced; `on`: the head verifies the ESP-NOW announce | PASS |
+| Subnet broadcast reaches other WiFi clients (no AP isolation on this router) | PASS |
+| Pairing learned over ESP-NOW only (head on another `udp.port`): auto peer added, UDP session and UDP vitals; no IP typed | PASS |
+| Pairing learned over UDP broadcast only (repeater `espnow.enabled off`, head rebooted): auto peer moved to the new port | PASS |
+| Spoofed reply (signed address differs from sender) refused; replayed reply refused | PASS |
+| `bridge.rxlimit 300`: `espnow.repeat 3` copies counted once (`dupe=2`); `rxlimit 1` drops; back to 0 | PASS |
+| `auto` stops announcing when UDP is turned off | PASS |
+| 10 min with UDP on: no reset (uptime continuous), LoRa receive climbing, no panic | PASS |
+| Roll back to the previous image with config cleared | PASS |
+
 ### Known limits
 
 - UDP payloads are authenticated, not encrypted; the head keeps the WiFi
   password and the secret unencrypted in its NVS.
+- `bridge.rxlimit` deduplicates per bridge: a packet a head sends over both
+  ESP-NOW and UDP (`transport both`) counts once on each bridge; the mesh
+  still drops the second copy.
 - Discovery over UDP needs the head's `udp.port` to equal the repeater's
   (both default 4404) and an access point that forwards broadcasts between
   clients; otherwise the head learns the address over ESP-NOW, or is
