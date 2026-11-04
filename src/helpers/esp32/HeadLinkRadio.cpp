@@ -80,6 +80,7 @@ public:
     return off_channel ? hl::LinkState::WrongChannel : hl::LinkState::Joining;
   }
   bool ready() const { return _socket >= 0 && _session.remote; }
+  void setDiagnoseAllowed(bool allowed) { _join.setDiagnoseAllowed(allowed); }
   uint8_t apChannel() const { return _join.apChannel(); }
   uint32_t localAddress() const { return _local; }
 
@@ -430,6 +431,17 @@ void HeadLinkRadio::loop() {
   ESPNOWRadio::loop();
   ensureLoaded();
   if (!_link) return;
+  {
+    // The all-channel look for the network only while ESP-NOW is silent
+    // (udp/auto mode); with ESP-NOW healthy the radio never leaves its channel.
+    const uint32_t now = millis();
+    portENTER_CRITICAL(&_mux);
+    const bool seen = _espnow_vitals_seen;
+    const uint32_t age = now - _espnow_vitals_at;
+    portEXIT_CRITICAL(&_mux);
+    _link->setDiagnoseAllowed(hl::allChannelDiagnosisAllowed(
+        _cfg.mode, seen, age, (uint32_t)_cfg.failover_s * 1000U));
+  }
   _link->loop();
   if (_cfg.mode == hl::Mode::Auto) {
     portENTER_CRITICAL(&_mux);

@@ -80,10 +80,13 @@ the repeater to join WiFi at all.
   `ap-moved-off-espnow-channel`; head: `udp wrong-channel`). It rejoins only
   when the router is back on the ESP-NOW channel. Pin the router's channel.
 - If the head's network is on another channel, the head does not join it.
-  It runs one all-channel scan for that network (at most every 10 minutes;
+  In udp or auto mode, once ESP-NOW has been silent for the fail-over time,
+  it runs one all-channel scan for that network (at most every 10 minutes;
   ESP-NOW receive pauses about 1.5 s while the radio visits the other
-  channels) and reports it: `udp wrong-channel (AP on ch 11)` in
-  `get transport`, a warning header on the Link screen and the Link page.
+  channels, which costs nothing then) and reports it:
+  `udp wrong-channel (AP on ch 11)` in `get transport`, a warning header on
+  the Link screen and the Link page. While ESP-NOW is healthy the head never
+  leaves its channel.
 - `set transport both|auto` (head) and `set observer.transport both`
   (repeater) are refused while the access point is known to be on another
   channel: `Error: both refused. WiFi AP on ch 11, ESP-NOW on ch 6: set the
@@ -105,9 +108,9 @@ On the repeater (USB terminal, or the head's admin console over ESP-NOW):
 set wifi.ssid <network>          (and set wifi.pwd <password>, once)
 set bridge.secret <secret>       (1-15 characters, NOT the admin password)
 set udp.port 4404
-set udp.peer.1 <head IP>:4404
 set bridge.source tx             (the repeater's own replies reach the head)
-set udp.enabled on
+set udp.enabled on               (joins WiFi now; no peer needed yet)
+set udp.peer.1 <head IP>:4404    (once the head shows its address)
 set observer on
 set observer.transport both      (or udp)
 get udp.status
@@ -125,7 +128,10 @@ get transport                    (shows this head's IP once joined)
 ```
 
 The head's IP is shown by `get transport` (and the Link screen) once it has
-joined; enter it on the repeater as `udp.peer.N`. A handshake-assisted
+joined; enter it on the repeater as `udp.peer.N`. The repeater joins WiFi as
+soon as `udp.enabled` is on (its address: `get udp.status`); peers only
+decide who receives frames. `set udp.enabled off` leaves the network again
+when UDP joined it (a network MQTT or WebConfig joined is left alone). A handshake-assisted
 pairing (the repeater adding a peer that proves the secret) was considered
 and left out: anyone holding the secret could then add peers, which changes
 Cascade's explicit allowlist model. With a static lease this is a one-time
@@ -354,8 +360,10 @@ on the bridge channel, the bridge ran with WiFi modem sleep
 awake (`WIFI_PS_NONE`) in any order of events: every station owner's
 modem-sleep request (UDP station, MQTT, WebConfig) is replaced by "awake"
 while the bridge runs, the bridge sets it when it starts on a shared
-station, and the bridge checks every 250 ms and undoes sleep set by any
-other path (counted). After the bridge stops the radio stays awake until
+station, and in the `_udp` M5 image every `esp_wifi_set_ps` call is wrapped
+at link time (`-Wl,--wrap`) so a sleep request never reaches the driver
+while the bridge runs; a 250 ms check in the bridge undoes anything that
+slips past (counted). After the bridge stops the radio stays awake until
 the station's owner next applies its own preference (its next join or
 setting change).
 
@@ -363,18 +371,17 @@ setting change).
 
 - UDP payloads are authenticated, not encrypted; the head keeps the WiFi
   password and the secret unencrypted in its NVS.
-- Pairing is manual, and the repeater's UDP bridge only joins WiFi once at
-  least one `udp.peer.N` is set: before the head's address is known, use a
-  placeholder peer (any unused LAN address) and replace it.
-- `set udp.enabled off` stops UDP but leaves the repeater's WiFi station
-  joined (Cascade's WiFi ownership); `set wifi.ssid off` (or a reboot with
-  UDP off) leaves the network.
 - The heads' on-screen keyboard cannot type `% ^ * + = _ ~ { } [ ] < > \ |`
-  or the backtick: such passwords or secrets need the USB terminal.
+  or the backtick: such passwords or secrets need the USB terminal for now
+  (long-press symbols may be added to the keyboard later).
 - `auto` detects ESP-NOW loss from the repeater's vitals, so it needs
   `observer on` and `observer.transport both` on the repeater.
-- A head that cannot find its network on the ESP-NOW channel scans all
-  channels once (ESP-NOW receive pauses about 1.5 s), at most every 10
-  minutes.
 - On builds with MQTT and the ESP-NOW bridge, MQTT's modem-sleep setting no
-  longer applies while the bridge runs (the radio stays awake; more power).
+  longer applies while the bridge runs: the radio stays awake by design
+  (more power).
+- The upstream `ThinkNode_M5_Repeater_bridge_espnow` env keeps upstream's
+  partition table (`min_spiffs.csv`), unlike the owner's M5; the
+  `_udp` env matches it.
+- The fixes since the second supervised test (radio kept awake, join without
+  peers, leaving on `udp.enabled off`, the `esp_wifi_set_ps` wrap, the
+  version string, the head's diagnosis gate) still need a hardware run.

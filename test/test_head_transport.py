@@ -268,8 +268,23 @@ static void dedupe() {
   e.reset(); assert(!e.duplicate((const uint8_t*)first.data(), first.size()));
 }
 
+static void diagnosis() {
+  const uint32_t f = 30000;
+  // ESP-NOW-only and both: never leave the channel
+  assert(!allChannelDiagnosisAllowed(Mode::EspNow, false, 0, f));
+  assert(!allChannelDiagnosisAllowed(Mode::Both, false, 0, f));
+  assert(!allChannelDiagnosisAllowed(Mode::Both, true, 999999, f));
+  // udp / auto: only while ESP-NOW is silent
+  for (Mode m : {Mode::Udp, Mode::Auto}) {
+    assert(allChannelDiagnosisAllowed(m, false, 0, f));          // never heard
+    assert(!allChannelDiagnosisAllowed(m, true, 3000, f));       // healthy
+    assert(!allChannelDiagnosisAllowed(m, true, f - 1, f));
+    assert(allChannelDiagnosisAllowed(m, true, f, f));           // silent for the fail-over time
+  }
+}
+
 int main() {
-  modes(); storage(); masking(); commands(); status(); autoSelector(); dedupe();
+  modes(); storage(); masking(); commands(); status(); autoSelector(); dedupe(); diagnosis();
   return 0;
 }
 '''
@@ -320,6 +335,11 @@ class HeadTransportWiringTests(unittest.TestCase):
     def test_secrets_never_logged(self):
         import re
         self.assertIsNone(re.search(r"(?<!sn)printf|println|Serial|logf", self.radio))
+
+    def test_all_channel_diagnosis_follows_the_espnow_health(self):
+        loop = method(self.radio, "void HeadLinkRadio::loop()")
+        self.assertIn("_link->setDiagnoseAllowed(hl::allChannelDiagnosisAllowed(", loop)
+        self.assertLess(loop.index("setDiagnoseAllowed"), loop.index("_link->loop();"))
 
     def test_dedupe_only_when_both_transports_feed_the_ui(self):
         deliver = method(self.radio, "void HeadLinkRadio::deliverObserver(")
