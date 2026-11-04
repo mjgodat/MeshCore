@@ -52,7 +52,7 @@ espnow-head       (everything above combined, plus this file)
 | `m5/hold-actions` | ThinkNode M5: user-button hold runs the page action (home page: flood advert) instead of power off (`REPEATER_UI_HOLD_ACTIONS`); bold e-ink fonts (`EINK_BOLD_FONTS`) | upstream |
 | `head/cyd` | CYD ESP-NOW head (`variants/cyd_espnow_head`), ui-new head screens (compose, admin console, repeater picker, login, presets, settings, keyboard), head contact policy, BaseChatMesh hooks, NVS identity backup | observer-feed |
 | `head/freenove` | Freenove FNK0104N visual head (`variants/freenove_s3_35_head`, `ui-freenove/`), chats list/threads, relay-name store, UI test env, fonts with licences, screenshots | head/cyd |
-| `head/cyd-hmi` | The visual head's pages on the CYD: screen profile (`HMI_PROFILE_CYD`), strip renderer (320x40 bands, no PSRAM), CYD layouts, HEAD page in the HMI style, chats; keyboard with one mode key (abc / ABC / 123) where every touchable key is drawn; CYD uitest env; CYD screenshots | head/freenove |
+| `head/cyd-hmi` | The visual head's pages on the CYD: screen profile (`HMI_PROFILE_CYD`), strip renderer (320x40 bands, no PSRAM), CYD layouts, HEAD page in the HMI style, chats; keyboard per head (CYD: one mode key abc / ABC / 123; Freenove: the PC layout) where every touchable key is drawn; CYD uitest env; CYD screenshots | head/freenove |
 | `espnow/observer-udp` | `observer on\|off`, `observer.transport espnow\|udp\|both`: the observer feed over Cascade's UDP bridge too (Observer/Subscribe frame kinds, shared rate limiter, `obs` stats pages), opt-in `ThinkNode_M5_Repeater_bridge_espnow_udp` env | observer-feed (+ keymindCascade) |
 | `head/transport-udp` | Heads over ESP-NOW / UDP / both / auto: `HeadLinkRadio`, `transport` + `udp.*` settings, Link page, `docs/espnow-head/udp-transport.md`; learns the repeater from its announces and answers them (`HeadDiscovery.h`); the repeater's heap on TELEMETRY | head/cyd-hmi + observer-udp (+ espnow/discovery) |
 | `espnow/wrapped-primary` | `espnow.format raw\|wrapped` + `espnow.secret` on primary ESP-NOW nodes (heads, relays, `Generic_ESPNOW_*`): the bridge's wrapped framing, one shared codec (`ESPNowWrappedFrame.h`); observer feed wrapped too on a wrapped link | observer-udp |
@@ -65,7 +65,7 @@ Windows include-path shortener commit for the ThinkNode M5 envs that
 `espnow/bridge-improvements` contains (needed to build those envs on
 Windows); skip it when both are pulled. `head/cyd` and `head/freenove` each
 carry an optional `docs/superpowers/` design/plan commit that can be dropped.
-`head/cyd-hmi` changes the shared keyboard for both heads (owner design).
+`head/cyd-hmi` makes the shared keyboard's layout a per-head build choice (`TOUCH_KEYBOARD_PC_LAYOUT`).
 `docs/espnow-head/README.md` summarises the heads.
 
 ## Node kinds
@@ -310,10 +310,11 @@ At most 15 frames/s; a frame takes 43-94 ms (render + push) depending on the
 page. The model (64 nodes, 128 packets) lives in internal RAM; about 62 KB
 of heap stays free.
 
-The keyboard (both heads): one mode key cycles abc -> ABC -> 123 (phone
-layout `1234567890` / `-/:;()$&@` / `.,?!'"#`); `% ^ * + = _ ~ { } [ ] < > \ |`
-and the backtick are not on the screen keyboard. On the Freenove the new
-keyboard is verified by host previews only (not yet on the glass).
+The keyboard per head: the CYD has one mode key cycling abc -> ABC -> 123
+(phone layout `1234567890` / `-/:;()$&@` / `.,?!'"#`; `% ^ * + = _ ~ { } [ ] < > \ |`
+and the backtick are not on its screen keyboard). The Freenove keeps the PC
+layout (shift key; 123 = digits, `!@#$%^&*()`, `-_=+.,?`; #+= = the rest of
+ASCII), checked on the glass.
 
 Both heads: the screen turns off 2 minutes after the last touch; the
 companion carousel's "Screen" page cycles 30 s / 1 / 2 / 5 min / Never.
@@ -335,7 +336,7 @@ names and positions come from public adverts.
 | ![Node card](docs/espnow-head/images/node_card.png) Node detail card | ![Chats](docs/espnow-head/images/chats.png) Chats list |
 | ![Thread](docs/espnow-head/images/chat_thread.png) Chat thread | ![Picker](docs/espnow-head/images/repeater_picker.png) Repeater picker, home repeater first |
 | ![Login](docs/espnow-head/images/login.png) Login (password masked) | ![Presets](docs/espnow-head/images/presets.png) Radio presets |
-| ![Keyboard](docs/espnow-head/images/keyboard_123.png) Keyboard (outdated: the layout before the single mode key) | |
+| ![Keyboard](docs/espnow-head/images/keyboard_123.png) Keyboard, PC-style 123 page (the Freenove's layout) | |
 
 ## Credits and licences
 
