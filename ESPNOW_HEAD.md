@@ -54,9 +54,9 @@ espnow-head       (everything above combined, plus this file)
 | `head/freenove` | Freenove FNK0104N visual head (`variants/freenove_s3_35_head`, `ui-freenove/`), chats list/threads, relay-name store, UI test env, fonts with licences, screenshots | head/cyd |
 | `head/cyd-hmi` | The visual head's pages on the CYD: screen profile (`HMI_PROFILE_CYD`), strip renderer (320x40 bands, no PSRAM), CYD layouts, HEAD page in the HMI style, chats; keyboard with one mode key (abc / ABC / 123) where every touchable key is drawn; CYD uitest env; CYD screenshots | head/freenove |
 | `espnow/observer-udp` | `observer on\|off`, `observer.transport espnow\|udp\|both`: the observer feed over Cascade's UDP bridge too (Observer/Subscribe frame kinds, shared rate limiter, `obs` stats pages), opt-in `ThinkNode_M5_Repeater_bridge_espnow_udp` env | observer-feed (+ keymindCascade) |
-| `head/transport-udp` | Heads over ESP-NOW / UDP / both / auto: `HeadLinkRadio`, `transport` + `udp.*` settings, Link page, `docs/espnow-head/udp-transport.md`; learns the repeater from its announces and answers them (`HeadDiscovery.h`) | head/cyd-hmi + observer-udp (+ espnow/discovery) |
+| `head/transport-udp` | Heads over ESP-NOW / UDP / both / auto: `HeadLinkRadio`, `transport` + `udp.*` settings, Link page, `docs/espnow-head/udp-transport.md`; learns the repeater from its announces and answers them (`HeadDiscovery.h`); the repeater's heap on TELEMETRY | head/cyd-hmi + observer-udp (+ espnow/discovery) |
 | `espnow/wrapped-primary` | `espnow.format raw\|wrapped` + `espnow.secret` on primary ESP-NOW nodes (heads, relays, `Generic_ESPNOW_*`): the bridge's wrapped framing, one shared codec (`ESPNowWrappedFrame.h`); observer feed wrapped too on a wrapped link | observer-udp |
-| `espnow/discovery` | Repeater announces (`bridge.announce`), auto-paired UDP heads (`bridge.autopeers`), repeater `udp.secret` (UDP builds); `bridge.rxlimit` for new packets from the bridges; M5 flash budget guard; `DiscoveryFrame.h`, `DiscoveryKey.h` | wrapped-primary |
+| `espnow/discovery` | Repeater announces (`bridge.announce`), auto-paired UDP heads (`bridge.autopeers`), repeater `udp.secret` (UDP builds); `bridge.rxlimit` for new packets from the bridges (one token per unique packet across both bridges); M5 flash budget guard; `DiscoveryFrame.h`, `DiscoveryKey.h`. Reliability: loop-task watchdog (`MESH_LOOP_WATCHDOG_SECS`, 30 s on the M5 envs), reset history in `powerlog`, observer health frame (heap, reset reason), heap in `stats-core` | wrapped-primary |
 | `espnow-head` | The combined line used on the owner's devices, plus this document | all |
 
 Each branch builds and passes its host tests on its own; the commit messages
@@ -155,7 +155,9 @@ On the bridge repeater (`docs/cli_commands.md` has the full text):
 | `set observer.transport espnow\|udp\|both` | `espnow` | Where the feed goes ([transports](#transports-esp-now-default-and-udpip-optional)); `get espnow.stats obs`, `get udp.stats obs` |
 | `set bridge.announce auto\|on\|off` | `auto` | UDP-bridge builds only. auto = while the UDP bridge runs: announce every 5 s (ESP-NOW) / 10 s (UDP), tag keyed from `udp.secret` (else `bridge.secret`) via PBKDF2; heads learn the UDP address and are auto-paired (`get bridge.autopeers`) |
 | `set udp.secret <1-15>\|off` | `off` | UDP-bridge builds only: own key for UDP sessions and discovery (off = `bridge.secret`); never printed |
-| `set bridge.rxlimit <0-6000>` | `0` (off) | New (not duplicate) packets/min admitted from the ESP-NOW and UDP bridges; suggested `300` (burst 60); drops in `get bridge.rxlimit` |
+| `set bridge.rxlimit <0-6000>` | `0` (off) | New (not duplicate) packets/min admitted from the ESP-NOW and UDP bridges; suggested `300` (burst 60); `get bridge.rxlimit` shows `passed= dropped= shared=` (shared = the other bridge's copy of an admitted packet, not charged) |
+| `powerlog` | | ESP32 repeaters: last reset reason, then the previous run (`Prev run 3d4h~, alive <UTC time>, heap>=N`; `~` = from the last 10-min checkpoint, exact after a software/panic/watchdog reset), boots and abnormal ends (panic, watchdogs, brownout) |
+| `stats-core` | | ESP32 repeaters add `heap_free`, `heap_min` (lowest since boot), `heap_max_block` |
 
 On the heads: `set transport espnow|udp|both|auto` and `udp.*` (see
 [transports](#transports-esp-now-default-and-udpip-optional)).
@@ -251,6 +253,17 @@ Full reference, wire format and owner test plan:
   to wrapped in the same session.
 - The M5 bridge envs fail their build above 97% of the app slot
   (`variants/thinknode_m5/flash_budget.py`).
+- The ThinkNode M5 envs watch the repeater's loop: a `loop()` that does not
+  return within 30 s ends in a task-watchdog reset (Arduino-ESP32 2.0.17
+  watches only core 0's idle task by default). OTA apply/download and a
+  filesystem format pause it; power-save sleeps are capped at 15 s. Other
+  boards keep it off (`-D MESH_LOOP_WATCHDOG_SECS=<s>` turns it on). No
+  scheduled reboot is added. `powerlog` reports how the previous run ended
+  and when it was last alive, so the next stop leaves evidence.
+- The repeater's heap reaches the heads as an observer health frame (kind 3,
+  every 30 s): TELEMETRY shows free heap, its 8-hour low-water trend and
+  the minimum since boot. Heads from before ignore the frame; the vitals
+  frame is unchanged.
 - `espnow.format` defaults to `raw`: an upgraded head or relay talks
   exactly as before until it is switched and rebooted.
 - `espnow.repeat` defaults to 1 (send once, unchanged behaviour). OTA payloads
