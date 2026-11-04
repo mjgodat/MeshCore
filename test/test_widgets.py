@@ -275,7 +275,7 @@ static const int kRepCount = 6;
 
 static void health(MeshModel& m, uint32_t t, uint32_t free_heap) {
   mesh::observer::Health h;
-  h.free_heap = free_heap; h.min_free_heap = 151234; h.largest_block = 65524; h.reset_reason = 1;
+  h.uptime_s = t / 1000; h.free_heap = free_heap; h.min_free_heap = 151234; h.largest_block = 65524; h.reset_reason = 1;
   m.onHealth(h, t);
 }
 

@@ -258,6 +258,14 @@ static void dedupe() {
   // distinct records (different receive time or uptime) are never merged
   FrameDeduper e;
   for (uint32_t i = 0; i < 1000; ++i) { const std::string f = frameOf(i, false); assert(!e.duplicate((const uint8_t*)f.data(), f.size())); }
+  // health frames (kind 3) with an unchanged heap 30 s apart are distinct
+  // (they carry the uptime); the other transport's copy is still dropped
+  { FrameDeduper h; mesh::observer::Health hv; hv.uptime_s = 100; hv.free_heap = 180000; hv.min_free_heap = 150000;
+    hv.largest_block = 65000; hv.reset_reason = 1;
+    for (int i = 0; i < 10; ++i, hv.uptime_s += 30) {
+      uint8_t f[64]; const size_t n = mesh::observer::encodeHealth(hv, f, sizeof(f));
+      assert(n && !h.duplicate(f, n) && h.duplicate(f, n));
+    } }
   // a record repeated after more than 64 others is passed again (bounded memory)
   assert(FrameDeduper::kDepth == 64);
   const std::string first = frameOf(5000, false);

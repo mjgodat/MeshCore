@@ -376,13 +376,15 @@ Payloads: Mesh = one raw MeshCore packet (2-255 bytes). Subscribe = 1 byte
 | 5 | kind `1` | kind `2` |
 | then | rx_ms u32, snr (quarter dB) i8, rssi i16, disposition u8 (bit 7 = truncated), len u8, raw[len] (max 235) | uptime_s u32, noise_floor i16, rx/min u16, tx/min u16, dup/min u16, airtime per mille u16, ESP-NOW nodes u8, battery mV u16, lat_e6 i32, lon_e6 i32, has_pos u8, freq f32, bw f32, sf u8, cr u8, preset_slot u8 |
 
-Health (kind 3), 20 bytes from version-1 repeaters: magic, version `1`,
-kind `3`, then body version u8 (`1`), free heap u32, minimum free heap since
-boot u32, largest free block u32, reset reason u8 (the ESP-IDF
+Health (kind 3), 24 bytes from version-1 repeaters: magic, version `1`,
+kind `3`, then body version u8 (`1`), uptime_s u32 (keeps every frame
+distinct for the heads' both-transport de-duplication), free heap u32,
+minimum free heap since boot u32, largest free block u32, reset reason u8
+(the ESP-IDF
 `esp_reset_reason_t` value: 1 power-on, 3 software, 4 panic, 5 interrupt
 WDT, 6 task WDT, 9 brownout, ...). The repeater sends one with the first
 vitals after the feed starts and then every 30 s (status frame: not rate
-limited, like vitals). Decoders accept 20 to 246 bytes and ignore what
+limited, like vitals). Decoders accept 24 to 246 bytes and ignore what
 follows the fields they know, so later versions only append. Heads from
 before this frame do not know kind 3 and drop it (MeshCore rejects its first
 byte); the vitals frame itself is unchanged, because those heads check its
