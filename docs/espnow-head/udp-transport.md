@@ -268,7 +268,7 @@ were put on channel 2 for the test and back on 6 afterwards.
 | 7 Channel safety (simulated by moving the repeater's bridge channel) | FAIL: the bridge stopped instead of the station |
 | 8 Roll back | PASS |
 
-Found on hardware, and fixed since (not yet re-tested on hardware):
+Found on hardware, fixed since, and re-tested in the second test below:
 
 - **Panic when WiFi first starts while the ESP-NOW bridge runs.** The
   bridge started the WiFi driver through ESP-IDF without a network
@@ -332,3 +332,22 @@ equals the M5's table before writing app-only at 0x10000.
    `set udp.password off`, `set udp.peer off`, `transport espnow`,
    `espnow.channel 6`. Flash the rollback image app-only: `get espnow.enabled`
    on without any manual fix, `ver`, `get radio`, `get preset` as before.
+
+### Results of the second supervised test, 2026-11-03 (espnow-head 749098ecd)
+
+ThinkNode M5 + CYD, router on channel 2, both devices back on channel 6 at
+the end.
+
+| Step | Result |
+|------|--------|
+| 1 Baseline, UDP off | PASS |
+| 2 UDP enabled at runtime with the bridge running; off/on twice | PASS: no panic, no reset, join and UDP vitals each time |
+| 3 both (no duplicate frames) / auto (fail-over ~35 s, fail-back after 3 vitals) | PASS |
+| 4 Bridge channel change while joined | PASS: bridge up on the new channel, WiFi dropped with its reason, bridge still enabled after a reboot, rejoined in 15 s on return |
+| 5 LoRa receive throughout | PASS |
+| 6 Clear with `off`, roll back | PASS: Full image back with the ESP-NOW bridge on by itself |
+
+Open finding: after a reboot with UDP saved on while the access point is
+not on the bridge channel, the bridge ran with WiFi modem sleep
+(`ps=1 awake=0`) until the next bridge restart; the UDP station's power-save
+choice is made before the bridge counts as constraining the channel.
