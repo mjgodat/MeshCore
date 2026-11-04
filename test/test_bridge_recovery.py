@@ -122,6 +122,7 @@ public:
  virtual void begin()=0;virtual void end()=0;virtual void loop()=0;
  virtual void sendPacket(mesh::Packet*)=0;virtual void onPacketReceived(mesh::Packet*)=0;
  bool allowsPacket(const mesh::Packet*)const{return allowed;}
+ virtual bool admitIngress(){return true;}
  bool preparePacketIngress(mesh::Packet* packet)const{
    packet->ingress_source=ingress_source?*ingress_source:mesh::bridge::IngressSource();return true;
  }

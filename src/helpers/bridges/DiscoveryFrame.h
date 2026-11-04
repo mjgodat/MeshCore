@@ -9,10 +9,11 @@
 // who the repeater is and how to reach it on the other transport. Reply
 // (head -> repeater, over UDP, to the announce's address): the head's own
 // UDP address, echoing the announce's boot id and counter. Both carry an
-// 8-byte tag, the first bytes of HMAC-SHA256 keyed with the shared secret
-// (the repeater's bridge.secret = the head's udp.secret / espnow.secret)
-// over "MeshCore discovery v1\0" and every byte before the tag. Frames whose
-// tag does not verify are ignored. Never carried: WiFi credentials, secrets.
+// 8-byte tag: the first bytes of HMAC-SHA256 over "MeshCore discovery v1\0"
+// and every byte before the tag, keyed with a key derived from the shared
+// secret (DiscoveryKey.h: PBKDF2-HMAC-SHA256; the secret is the repeater's
+// udp.secret, or its bridge.secret when that is off = the head's
+// udp.secret). Frames whose tag does not verify are ignored. Never carried: WiFi credentials, secrets.
 //
 // Layout (little-endian, like ObserverFrame.h): MAGIC[4] VERSION KIND body TAG[8]
 //   MAGIC B0 42 44 43. Like the observer magic, B0 is a MeshCore header byte
@@ -24,8 +25,7 @@
 //     format u8 (0 raw, 1 wrapped), caps u8, udp ip[4], udp port u16
 //     (0 = no UDP).
 //   Reply body (37): boot u32, counter u32 (both echoed), pubkey prefix[6],
-//     name[16], flags u8 (bit 0: wants the observer feed), udp ip[4],
-//     udp port u16.
+//     name[16], flags u8 (reserved, 0), udp ip[4], udp port u16.
 //
 // On ESP-NOW the frame travels like any other frame of the link: raw, or
 // wrapped (ESPNowWrappedFrame.h) when the link is wrapped.
@@ -61,7 +61,6 @@ constexpr uint8_t CAP_OBSERVER = 0x04;     // observer feed on
 constexpr uint8_t CAP_OBS_ESPNOW = 0x08;   // ... over ESP-NOW
 constexpr uint8_t CAP_OBS_UDP = 0x10;      // ... over UDP
 constexpr uint8_t CAP_AUTOPAIR = 0x20;     // accepts replies (UDP auto-pairing)
-constexpr uint8_t REPLY_WANTS_OBSERVER = 0x01;
 
 // HMAC-SHA256 over (domain || data) keyed with the secret; the platform
 // supplies it (rweather SHA256 on the devices). False when no key.
@@ -209,8 +208,10 @@ inline bool due(uint32_t now, uint32_t deadline) { return (int32_t)(now - deadli
 
 // Repeater side: heads auto-paired over UDP. Bounded slots, keyed by the
 // head's pubkey prefix; a slot lives kAutoPeerTtlMs after the head's last
-// verified reply. New heads (not refreshes) are rate limited. The caller
-// checks the manual udp.peer.N list first (manual wins, nothing is added).
+// verified reply. New heads (not refreshes) are rate limited. A head's
+// replies must echo ever newer announce counters: a recorded reply cannot
+// be replayed into its slot (Replay). The caller checks the manual
+// udp.peer.N list first (manual wins, nothing is added).
 constexpr uint8_t kAutoPeerSlots = 4;
 constexpr uint32_t kAutoPeerTtlMs = 300000;     // 5 min without a reply
 constexpr uint8_t kAutoPeerNewPerMinute = 4;
@@ -221,10 +222,10 @@ struct AutoPeer {
   uint8_t ip[4] = {};
   uint16_t port = 0;
   uint32_t until = 0;
-  bool wants_observer = false;
+  uint32_t counter = 0;   // announce counter of the last accepted reply
 };
 
-enum class PairResult : uint8_t { Added, Refreshed, Moved, Full, RateLimited, Invalid };
+enum class PairResult : uint8_t { Added, Refreshed, Moved, Full, RateLimited, Invalid, Replay };
 
 class AutoPeers {
 public:
@@ -235,10 +236,11 @@ public:
     for (uint8_t i = 0; i < kAutoPeerSlots; ++i) {
       AutoPeer& p = _slots[i];
       if (!p.used || memcmp(p.prefix, r.prefix, PREFIX_SIZE)) continue;
+      if (r.counter <= p.counter) { ++_replays; return PairResult::Replay; }
+      p.counter = r.counter;
       const bool moved = memcmp(p.ip, r.ip, 4) || p.port != r.port;
       memcpy(p.ip, r.ip, 4); p.port = r.port;
       p.until = now + kAutoPeerTtlMs;
-      p.wants_observer = (r.flags & REPLY_WANTS_OBSERVER) != 0;
       _last = i;
       return moved ? PairResult::Moved : PairResult::Refreshed;
     }
@@ -251,7 +253,7 @@ public:
     p.used = true;
     memcpy(p.prefix, r.prefix, PREFIX_SIZE); memcpy(p.ip, r.ip, 4); p.port = r.port;
     p.until = now + kAutoPeerTtlMs;
-    p.wants_observer = (r.flags & REPLY_WANTS_OBSERVER) != 0;
+    p.counter = r.counter;
     _last = free_slot;
     ++_added;
     return PairResult::Added;
@@ -270,6 +272,7 @@ public:
   uint32_t added() const { return _added; }
   uint32_t full() const { return _full; }
   uint32_t limited() const { return _limited; }
+  uint32_t replays() const { return _replays; }
 
 private:
   bool takeToken(uint32_t now) {
@@ -284,14 +287,18 @@ private:
   }
   AutoPeer _slots[kAutoPeerSlots];
   uint8_t _last = 0, _tokens = 0;
-  uint32_t _at = 0, _added = 0, _full = 0, _limited = 0;
+  uint32_t _at = 0, _added = 0, _full = 0, _limited = 0, _replays = 0;
   bool _started = false;
 };
 
-// bridge.rxlimit: mesh packets per minute admitted from the ESP-NOW and UDP
-// bridges into the repeater (and so towards its LoRa airtime); 0 = no limit.
-// One shared token bucket, burst = a quarter minute's worth (at least 1).
-constexpr uint16_t kRxLimitDefault = 120;
+// bridge.rxlimit: new (not duplicate) mesh packets per minute admitted from
+// the ESP-NOW and UDP bridges into the repeater (and so towards its LoRa
+// airtime); 0 = no limit, the default. BridgeBase charges it only for a
+// packet that passed the duplicate check, just before it is queued. One
+// shared token bucket, burst = a fifth of the rate (at least 1): the
+// suggested 300/min gives bursts of 60.
+constexpr uint16_t kRxLimitDefault = 0;
+constexpr uint16_t kRxLimitSuggested = 300;
 constexpr uint16_t kRxLimitMax = 6000;
 
 class RxLimiter {
@@ -301,7 +308,7 @@ public:
     if (per_minute != _rate) { _rate = per_minute; _started = false; }
   }
   uint16_t rate() const { return _rate; }
-  uint16_t burst() const { return _rate == 0 ? 0 : (uint16_t)(_rate / 4 ? _rate / 4 : 1); }
+  uint16_t burst() const { return _rate == 0 ? 0 : (uint16_t)(_rate / 5 ? _rate / 5 : 1); }
   // True when the packet may pass; counts passes and drops.
   bool admit(uint32_t now) {
     if (_rate == 0) { ++_passed; return true; }
@@ -330,6 +337,18 @@ private:
 inline RxLimiter& rxLimiter() {
   static RxLimiter limiter;
   return limiter;
+}
+
+// The repeater's udp.secret (BridgeDiscoverySettings): keys UDP sessions and
+// discovery instead of bridge.secret when set. Empty = use bridge.secret.
+inline char* udpSecretOverride() {
+  static char secret[16] = {};
+  return secret;
+}
+
+inline const char* udpSessionSecret(const char* bridge_secret) {
+  const char* own = udpSecretOverride();
+  return own[0] ? own : bridge_secret;
 }
 
 }}  // namespace mesh::discovery

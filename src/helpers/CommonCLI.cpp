@@ -3756,6 +3756,16 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #if MESH_ENABLE_EMERGENCY_POWER
     if (handleEmergencyPowerCommand(command, reply)) return;
 #endif
+#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)
+    // bridge.rxlimit, bridge.announce, bridge.autopeers, udp.secret (before
+    // Cascade's udp.* parser, which refuses keys it does not know). Reached
+    // remotely only by full admins: not in the manager allow lists.
+    if (strstr(command, "bridge.") != nullptr || strstr(command, "udp.secret") != nullptr) {
+      mesh::discovery::DiscoveryRuntime discovery_runtime;
+      _callbacks->getDiscoveryRuntime(discovery_runtime);
+      if (mesh::discovery::handleBridgeDiscoveryCommand(command, reply, 157, &discovery_runtime)) return;
+    }
+#endif
 #if defined(WITH_UDP_BRIDGE)
     if (handleUDPBridgeCommand(sender_timestamp, command, reply)) return;
 #endif
@@ -3781,14 +3791,6 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       mesh::espnow::ObserverRuntime observer_runtime;
       _callbacks->getObserverRuntime(observer_runtime);
       if (mesh::espnow::handleEspNowObserverCommand(command, reply, 157, &observer_runtime)) return;
-    }
-#endif
-#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)
-    // Reached remotely only by full admins: not in the manager allow lists.
-    if (strstr(command, "bridge.") != nullptr) {
-      mesh::discovery::DiscoveryRuntime discovery_runtime;
-      _callbacks->getDiscoveryRuntime(discovery_runtime);
-      if (mesh::discovery::handleBridgeDiscoveryCommand(command, reply, 157, &discovery_runtime)) return;
     }
 #endif
 #if defined(WITH_ESPNOW_BRIDGE)

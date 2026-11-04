@@ -49,6 +49,8 @@ static bool rx_whole[RX_QUEUE_DEPTH];
 // Frames refused by the wrapped format (not wrapped / wrong secret).
 static volatile uint32_t rx_link_foreign = 0;
 static volatile uint32_t rx_link_checksum = 0;
+static uint32_t rx_link_generation = 0;   // activeLink().generation last seen by recvRaw
+static uint32_t rx_generation[RX_QUEUE_DEPTH];   // the format generation each entry arrived under
 static volatile uint8_t rx_head = 0;
 static volatile uint8_t rx_tail = 0;
 static volatile uint8_t rx_count = 0;
@@ -142,6 +144,7 @@ static void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
   uint8_t plain[mesh::bridge::WRAPPED_MAX_PAYLOAD];
   bool whole = false;
   mesh::espnow::ActiveLink& link = mesh::espnow::activeLink();
+  const uint32_t generation = link.generation.load(std::memory_order_acquire);
   if (link.wrapped.load(std::memory_order_acquire)) {
     size_t plain_len = 0;
     const mesh::bridge::Unwrap result = data == nullptr || len <= 0
@@ -183,6 +186,7 @@ static void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
     memcpy(rx_frames[rx_head], data, static_cast<size_t>(len));
     rx_lengths[rx_head] = static_cast<uint16_t>(len);
     rx_whole[rx_head] = whole;
+    rx_generation[rx_head] = generation;
     if (mac != nullptr) {
       memcpy(rx_sources[rx_head], mac,
              mesh::espnow::ESPNOW_RAW_SOURCE_MAC_SIZE);
@@ -606,6 +610,17 @@ int ESPNOWRadio::recvRaw(uint8_t* bytes, int sz) {
     rx_dropped_reported = dropped;
   }
 
+  // The boot's format was (re)applied: frames queued before it, still in the
+  // old format, are dropped, never decoded (review F4: radio_init runs
+  // before the settings load).
+  mesh::espnow::ActiveLink& link = mesh::espnow::activeLink();
+  const uint32_t generation = link.generation.load(std::memory_order_acquire);
+  if (generation != rx_link_generation) {
+    rx_reassembler.reset();   // half a raw packet from before never completes
+    rx_link_generation = generation;
+  }
+  const bool wrapped = link.wrapped.load(std::memory_order_acquire);
+
   // Drain fragment-only and malformed frames in one dispatcher poll. This
   // lets a queued two-frame packet become one ordinary MeshCore receive while
   // retaining the callback's fixed, bounded handoff queue.
@@ -614,11 +629,13 @@ int ESPNOWRadio::recvRaw(uint8_t* bytes, int sz) {
     uint8_t source[mesh::espnow::ESPNOW_RAW_SOURCE_MAC_SIZE];
     uint16_t frame_len = 0;
     bool whole = false;
+    bool stale = false;
 
     portENTER_CRITICAL(&rx_mux);
     if (rx_count > 0) {
       frame_len = rx_lengths[rx_tail];
       whole = rx_whole[rx_tail];
+      stale = rx_generation[rx_tail] != generation;
       if (frame_len > 0 && frame_len <= sizeof(frame)) {
         memcpy(frame, rx_frames[rx_tail], frame_len);
         memcpy(source, rx_sources[rx_tail], sizeof(source));
@@ -631,6 +648,14 @@ int ESPNOWRadio::recvRaw(uint8_t* bytes, int sz) {
     portEXIT_CRITICAL(&rx_mux);
 
     if (frame_len == 0) break;
+    if (stale || (wrapped && !whole)) {
+      // Strict: a raw frame never reaches MeshCore on a wrapped node, and
+      // nothing queued under the previous format is decoded under this one.
+      portENTER_CRITICAL(&rx_mux);
+      rx_link_foreign++;
+      portEXIT_CRITICAL(&rx_mux);
+      continue;
+    }
     if (whole) {
       // An unwrapped packet (espnow.format wrapped): never a fragment.
       if (frame_len > static_cast<uint16_t>(sz)) {

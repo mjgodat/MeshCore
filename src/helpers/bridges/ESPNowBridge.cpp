@@ -1103,13 +1103,12 @@ void ESPNowBridge::sendPacket(mesh::Packet *packet) {
 }
 
 void ESPNowBridge::onPacketReceived(mesh::Packet *packet) {
-  // bridge.rxlimit: one shared budget for packets entering from the bridges.
-  if (packet && !mesh::discovery::rxLimiter().admit(millis())) {
-    _mgr->free(packet);
-    onIngressResult(IngressResult::Filtered);
-    return;
-  }
   handleReceivedPacket(packet);
+}
+
+bool ESPNowBridge::admitIngress() {
+  // bridge.rxlimit: one budget shared with the UDP bridge, new packets only.
+  return mesh::discovery::rxLimiter().admit(millis());
 }
 
 void ESPNowBridge::noteRx(uint32_t mesh::bridge::diag::RxStats::* field) {

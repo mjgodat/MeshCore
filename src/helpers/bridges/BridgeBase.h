@@ -54,6 +54,10 @@ protected:
   // Observe the existing admission decision without evaluating filters twice.
   enum class IngressResult : uint8_t { Stopped, Filtered, Duplicate, Queued };
   virtual void onIngressResult(IngressResult) {}
+  // bridge.rxlimit hook: asked once per new (not duplicate) packet just
+  // before it is queued; false drops it (Filtered, not marked seen). The
+  // ESP-NOW and UDP bridges share one budget; others always admit.
+  virtual bool admitIngress() { return true; }
 #endif
 
   /** Tracks bridge state */

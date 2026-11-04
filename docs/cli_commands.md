@@ -6766,41 +6766,59 @@ record means `off`, and `get espnow.observer` reports an error until it is saved
 again. Over LoRa only full admins can read or change it (it is not in the region
 or filter manager allow lists).
 
-#### Discovery and auto-pairing for visual heads (`bridge.announce`, `bridge.autopeers`)
+#### Discovery and auto-pairing for visual heads (`bridge.announce`, `bridge.autopeers`, `udp.secret`)
 
 ```text
 get bridge.announce
-set bridge.announce on|off
+set bridge.announce auto|on|off
 get bridge.autopeers
+get udp.secret
+set udp.secret <1-15 characters>|off
 ```
 
-Repeaters with the ESP-NOW and/or the UDP bridge. Default `on`: the repeater
-announces itself every 5 s over the ESP-NOW bridge (raw, or wrapped when
-`bridge.format` is `wrapped`) and every 10 s over the UDP bridge (to the subnet
-broadcast address on `udp.port` and to every UDP peer). An announce carries the
-repeater's name, the first 6 bytes of its public key, its ESP-NOW channel and
-format, its UDP address and port, and what it offers (bridge, UDP, observer
-feed). It never carries WiFi credentials or secrets. It is authenticated with an
-8-byte tag (HMAC-SHA256 keyed with `bridge.secret`); a node without the secret
-ignores it. Frame format: `src/helpers/bridges/DiscoveryFrame.h` (magic
+Repeaters built with the WiFi UDP bridge only (on ESP-NOW-only images such as
+the default `ThinkNode_M5_Repeater_bridge_espnow` none of this is compiled in).
+Default `auto`: the repeater announces itself only while its UDP bridge runs
+(`udp.enabled on` and joined), since pairing needs it; `on` announces always,
+`off` never. It then announces every 5 s over the ESP-NOW bridge (raw, or
+wrapped when `bridge.format` is `wrapped`) and every 10 s over the UDP bridge
+(to the subnet broadcast address on `udp.port` and to every UDP peer). An
+announce carries the repeater's name, the first 6 bytes of its public key, its
+ESP-NOW channel and format, its UDP address and port, and what it offers. It
+never carries WiFi credentials or secrets, but anyone in range sees it. It is
+authenticated with an 8-byte tag: HMAC-SHA256 with a key derived from the
+secret by PBKDF2-HMAC-SHA256 (2048 iterations, derived once and cached), so a
+recorded announce is a slow offline guessing target, not a fast one; use a
+secret that is not trivially guessable. Frame format:
+`src/helpers/bridges/DiscoveryFrame.h` and `DiscoveryKey.h` (magic
 `B0 42 44 43`, which today's MeshCore rejects as a packet).
 
-A visual head that has the secret (`udp.secret`) learns the repeater's UDP
-address from the announce, so its `udp.peer` can stay `off`. It answers over UDP
-with its own address (also authenticated, echoing one of the repeater's last 12
-announces, about a minute). The repeater then adds that head as a UDP peer at run
-time: at most 4 heads, each kept for 5 minutes after its last answer (heads answer
-every 30 s), at most 4 new heads per minute, and only into a free `udp.peer`
-slot. A head listed in `udp.peer.1..8` is never added twice: manual peers always
-win. Auto peers are never saved; after a reboot or UDP restart the heads are
-added again within a minute. `get bridge.autopeers` lists them
-(`> 1 192.168.1.77:4404/A1B2/290s replies=12 bad=0 stale=0 full=0 limited=0`: address, the head's key
-prefix, seconds left; `bad` = tag did not verify, `stale` = echoed an old
-announce). `get udp.status` shows `auto=<n>`.
+The secret is `udp.secret` when set, otherwise `bridge.secret` (the
+compatible default). `udp.secret` also keys the UDP bridge sessions; setting
+or clearing it restarts them at once, and the heads' `udp.secret` must then
+match. It is never printed (`get udp.secret`: `set` or `off (bridge.secret)`)
+and every set answers `saved`. Use a separate `udp.secret` when the ESP-NOW
+link is `wrapped`: the wrapped XOR key can be recovered from the air, and it
+should not also open the UDP bridge.
 
-`set bridge.announce off` stops the announces; heads must then use `udp.peer`
-and the repeater `udp.peer.N` (manual pairing, as before). Over LoRa only full
-admins can read or change these settings.
+A visual head with the secret learns the repeater's UDP address from the
+announce, so its `udp.peer` can stay `off`. It answers over UDP with its own
+address (signed the same way, echoing one of the repeater's last 12 announces,
+about a minute). The repeater accepts the answer only from the address it
+signs, and only with a newer announce counter than that head's last answer (a
+recorded answer cannot be replayed). It then adds that head as a UDP peer at
+run time: at most 4 heads, each kept for 5 minutes after its last answer (heads
+answer every 30 s), at most 4 new heads per minute, and only into a free
+`udp.peer` slot. A head listed in `udp.peer.1..8` is never added twice: manual
+peers always win. Auto peers are never saved; after a reboot or UDP restart
+the heads are added again within a minute. `get bridge.autopeers` lists them
+(`> 1 192.168.1.77:4404/A1B2/290s replies=12 bad=0 stale=0 spoofed=0 replay=0 full=0 limited=0`:
+address, the head's key prefix, seconds left; `bad` = tag did not verify,
+`stale` = echoed an old announce, `spoofed` = sent from another address than
+it signs, `replay` = not newer than the last accepted). `get udp.status`
+shows `auto=<n>`. With `set bridge.announce off`, pair by hand: the head's
+`udp.peer` and the repeater's `udp.peer.N`. Over LoRa only full admins can
+read or change these settings.
 
 #### Rate limit for packets from the bridges (`bridge.rxlimit`)
 
@@ -6809,15 +6827,18 @@ get bridge.rxlimit
 set bridge.rxlimit <0-6000>
 ```
 
-Packets per minute admitted from the ESP-NOW and UDP bridges into the repeater
-(and so towards its LoRa airtime), one shared budget. Default `120`, with bursts
-of a quarter of that (30); `0` = no limit. Excess packets are dropped and counted
-(`get bridge.rxlimit`: `> 120/min (burst 30) passed=812 dropped=0`; they also
+New packets per minute admitted from the ESP-NOW and UDP bridges into the
+repeater (and so towards its LoRa airtime), one shared budget. Default `0` =
+no limit, so an upgrade changes nothing. Only packets that pass the bridge's
+duplicate check spend it (repeat copies and echoes from relays or a second
+bridge do not); a dropped packet is not marked seen, so a later copy can
+still pass. Bursts may reach a fifth of the rate. Suggested value:
+`set bridge.rxlimit 300` (bursts of 60), above the traffic of a busy
+regional mesh; raise it for a busy bridge-to-bridge link. Drops are counted
+(`get bridge.rxlimit`: `> 300/min (burst 60) passed=812 dropped=0`; they also
 show as filtered in `get espnow.stats drops` / `get udp.stats drops`). Nothing
-changes on the wire. The limit protects the LoRa channel against a flood from a
-misbehaving or hostile ESP-NOW/UDP node; raise it for a busy bridge-to-bridge
-link. Saved with `bridge.announce` in `/bridge_discovery`; a missing or damaged
-record means `on` / `120`.
+changes on the wire. Saved with the discovery settings in `/bridge_discovery`;
+a missing or damaged record means `auto` / `0` / `udp.secret off`.
 
 #### Observer feed transport (`observer`, `observer.transport`)
 
@@ -7523,6 +7544,19 @@ packet record then carries at most 231 raw bytes, marked truncated beyond
 that), so the whole link needs the secret. On a companion (head) the commands
 are accepted only from an attached local client; on a relay or repeater also
 from a remote admin. A missing or damaged record means `raw`.
+
+Both formats are supported and neither is preferred; the default stays `raw`
+(and the bridge's `bridge.format` keeps its upstream default):
+
+- `raw`: interoperates with stock MeshCore ESP-NOW firmware, no secret to
+  manage, full MeshCore packets up to 255 bytes.
+- `wrapped`: isolates the link from other ESP-NOW users nearby and blocks
+  casual injection, at the cost of one shared secret on every node and a
+  246-byte packet limit. It is not secrecy: the XOR has no nonce and much of
+  every frame is known plaintext, so anyone who records a wrapped frame can
+  recover the secret. MeshCore's own encryption still protects DMs and
+  channel messages in both formats. Do not reuse the wrapped secret for
+  anything that must stay secret.
 
 To move a whole installation from raw to wrapped without losing any node, see
 "Switching an installation to wrapped" in `docs/espnow-head/udp-transport.md`.
