@@ -136,13 +136,18 @@ inline void formatEpoch(char* out, size_t cap, uint32_t epoch) {
 //   "\r\nPrev run 3d4h~, alive 2026-11-04 03:12Z, heap>=81234"
 //   "\r\nBoots 12, abnormal 1 (task wdt @2026-11-03 20:01Z)"
 // "~": from the last checkpoint (up to kCheckpointSecs early), not exact.
+// A run that stopped before its first checkpoint (power-on reset) reads
+// "Prev run <1m, not checkpointed".
 // `name` maps a reason to text (ObserverFrame.h resetReasonName).
 inline size_t format(const Record& rec, char* out, size_t cap, const char* (*name)(uint8_t)) {
   if (out == nullptr || cap == 0) return 0;
   out[0] = 0;
   char up[24], at[40];
   size_t n = 0;
-  if (rec.prev_known) {
+  if (rec.prev_known && !rec.prev_exact && rec.prev_uptime_s == 0) {
+    // stopped before its first checkpoint (kFirstCheckpointSecs)
+    n += (size_t)snprintf(out + n, cap - n, "\r\nPrev run <1m, not checkpointed");
+  } else if (rec.prev_known) {
     formatDuration(up, sizeof(up), rec.prev_uptime_s);
     formatEpoch(at, sizeof(at), rec.prev_epoch);
     n += (size_t)snprintf(out + n, cap - n, "\r\nPrev run %s%s, alive %s, heap>=%lu", up,

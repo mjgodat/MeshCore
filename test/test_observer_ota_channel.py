@@ -62,6 +62,7 @@ struct UpdateMock {
   void abort() { aborted=true; }
   const char* errorString() { return "injected failure"; }
 } Update;
+static volatile bool ota_worker_abort=false;
 struct Client {
   std::string image;
   size_t pos=0, chunk=1;
@@ -124,6 +125,11 @@ int main() {
   Update=UpdateMock(); Update.end_ok=false; Client bad_end; bad_end.image=tag;
   assert(!ota_streamFirmware(bad_end, tag.size(), reply));
   assert(!Update.boot_committed && Update.end_calls==1);
+  // abandoned by the loop (review M1): stops at the next chunk, never commits
+  Update=UpdateMock(); ota_worker_abort=true; Client given_up; given_up.image=compatible; given_up.chunk=64;
+  assert(!ota_streamFirmware(given_up, compatible.size(), reply));
+  assert(Update.aborted && Update.end_calls==0 && Update.written.empty() && strstr(reply, "aborted"));
+  ota_worker_abort=false;
 }
 '''.replace("@STREAM@", stream)
         compile_run(code)
@@ -196,23 +202,28 @@ int main() {
         compile_run(code)
 
     def test_worker_releases_network_pin_after_task_failure_and_completion(self):
-        board = (ROOT / "src/helpers/ESP32Board.cpp").read_text(encoding="utf-8")
-        args = extract_braced(board, "struct OtaTaskArgs {") + ";"
-        entry = extract_braced(board, "static void ota_task_entry(")
-        worker = extract_braced(board, "bool ESP32Board::otaFromManifest(")
-        code = r'''
+        board = (ROOT / "src/helpers/ESP32Board.cpp").read_text(encoding="utf-8").replace("\r\n", "\n")
+        worker = board[board.index("// ota worker begin"):board.index("// ota worker end")]
+        # A hung download must not hold the loop forever (reliability review
+        # M1): the loop stays watched and fed, gives up after 10 minutes,
+        # tells the worker to abort and refuses a new OTA until it returns.
+        code = r"""
 #include <cassert>
 #include <cstring>
 #include <cstdint>
 using TaskHandle_t=void*; using BaseType_t=int;
 static constexpr BaseType_t pdPASS=1;
-static bool spawn_ok=false;
-void delay(uint32_t) {}
+static bool spawn_ok=false, run_inline=true;
+static uint32_t now_ms=1000; static int feeds=0;
+static void* pending_arg=nullptr; static void (*pending_entry)(void*)=nullptr;
+uint32_t millis() { return now_ms; }
+void delay(uint32_t ms) { now_ms += ms; }
 void vTaskDelete(void*) {}
 BaseType_t xTaskCreatePinnedToCore(void (*entry)(void*), const char*, int, void* arg, int,
                                    TaskHandle_t*, int) {
   if (!spawn_ok) return 0;
-  entry(arg); return pdPASS;
+  if (run_inline) entry(arg); else { pending_entry=entry; pending_arg=arg; }
+  return pdPASS;
 }
 struct NetworkLink {
   int locks=0, releases=0;
@@ -220,28 +231,47 @@ struct NetworkLink {
   void unlockSwitching() { ++releases; }
 } network;
 NetworkLink& activeNetworkLink() { return network; }
-namespace mesh { namespace esp32 { struct LoopWatchdogPause { LoopWatchdogPause() {} }; } }   // LoopWatchdog.h: no WDT here
+namespace mesh { namespace esp32 { inline void feedLoopWatchdog() { ++feeds; } } }
+static volatile bool ota_worker_abort = false;
 struct ESP32Board {
   bool otaFromManifest(const char*, const char*, bool, char[]);
-  bool otaFromManifestImpl(const char* base, const char* version, bool dry, char[]) {
-    assert(network.locks==network.releases+1);
+  bool otaFromManifestImpl(const char* base, const char* version, bool dry, char reply[]) {
     assert(!strcmp(base, "base") && !strcmp(version, "version") && dry);
+    strcpy(reply, "worker reply");
     return false;
   }
 };
-@ARGS@
-@ENTRY@
 @WORKER@
 int main() {
   ESP32Board board; char reply[160]={};
   assert(!board.otaFromManifest("base", "version", true, reply));
-  assert(network.locks==1 && network.releases==1 && strstr(reply, "spawn failed"));
+  assert(network.locks==1 && network.releases==1 && strstr(reply, "spawn failed") && !ota_worker_busy);
   spawn_ok=true;
   assert(!board.otaFromManifest("base", "version", true, reply));
-  assert(network.locks==2 && network.releases==2);
+  assert(network.locks==2 && network.releases==2 && !strcmp(reply, "worker reply") && !ota_worker_busy);
+  // a worker that never finishes: fed while waiting, abandoned after 10 min
+  run_inline=false; feeds=0; const uint32_t t0=now_ms;
+  assert(!board.otaFromManifest("base", "version", true, reply));
+  assert(strstr(reply, "timed out") && ota_worker_abort && ota_worker_busy);
+  assert(now_ms - t0 >= 600000u && now_ms - t0 < 600000u + 200u && feeds > 10000);
+  assert(network.locks==3 && network.releases==3);
+  // refused while the abandoned worker still runs; its memory stays valid
+  assert(!board.otaFromManifest("base", "version", true, reply) && strstr(reply, "still running"));
+  assert(network.locks==3);
+  pending_entry(pending_arg);   // it finally returns
+  assert(!ota_worker_busy);
+  run_inline=true;
+  assert(!board.otaFromManifest("base", "version", true, reply) && !strcmp(reply, "worker reply"));
+  // over-long arguments are refused before anything starts
+  char longurl[300]; memset(longurl, 'a', sizeof(longurl) - 1); longurl[sizeof(longurl) - 1] = 0;
+  assert(!board.otaFromManifest(longurl, "version", true, reply) && strstr(reply, "too long"));
 }
-'''.replace("@ARGS@", args).replace("@ENTRY@", entry).replace("@WORKER@", worker)
+""".replace("@WORKER@", worker)
         compile_run(code)
+        # the download stops at the next chunk once abandoned, without committing
+        stream = extract_braced(board, "static bool ota_streamFirmware(")
+        self.assertIn('if (ota_worker_abort) {', stream)
+        self.assertLess(stream.index("if (ota_worker_abort) {"), stream.index("Update.write(buffer"))
 
 
 if __name__ == "__main__":
