@@ -18,10 +18,15 @@
 //   rejoins only when a later scan finds the access point back on the
 //   ESP-NOW channel.
 // - Failed attempts back off: 15 s, 30 s, 60 s, then every 2 min; a
-//   successful join resets the back-off.
+//   successful join resets the back-off. When the ESP-NOW channel changes,
+//   or a diagnosis sees the access point on the ESP-NOW channel, the next
+//   attempt comes after 1 s with the back-off reset (never more than one
+//   attempt a second).
 // - Optional diagnosis (heads): when the access point is not on the ESP-NOW
 //   channel, one all-channel scan at most every `diagnose_interval_ms`
-//   reports where it is. Repeaters leave it at 0 (never), so the bridge
+//   reports where it is. Only a completed diagnosis uses up the interval; a
+//   failed one is retried at the next due attempt, and one that outlives its
+//   timeout is still read when its result lands. Repeaters leave it at 0 (never), so the bridge
 //   never goes deaf for a scan.
 // - With no ESP-NOW channel to protect (espNowChannel() == 0) the join is a
 //   plain WiFi.begin() without a scan.
@@ -86,6 +91,7 @@ public:
   static const uint32_t kDiagnoseTimeoutMs = 8000;
   static const uint32_t kJoinTimeoutMs = 20000;
   static const uint32_t kBusyRetryMs = 1000;
+  static const uint32_t kPromptRetryMs = 1000;
 
   explicit StationJoin(uint32_t diagnose_interval_ms = 0) : _diagnose_interval(diagnose_interval_ms) {}
 
@@ -138,11 +144,17 @@ public:
 
   void poll(Driver& d, uint32_t now, const char* ssid, const char* password) {
     const uint8_t channel = d.espNowChannel();
+    if (channel != _seen_channel) {   // the ESP-NOW channel moved: look there soon
+      if (_seen_channel && channel) retrySoon(now);
+      _seen_channel = channel;
+    }
     if (_scan_pending) {   // an earlier scan was left running: drop its results once done
-      if (d.scanResult() == -1) {
+      const int n = d.scanResult();
+      if (n == -1) {
         if (_state == JoinState::Idle && !d.linkUp()) return;   // no new scan until it ends
       } else {
-        d.scanDelete(); d.restoreChannel(); _scan_pending = false;
+        if (_pending_diagnosis && n > 0 && ssid) readDiagnosis(d, ssid, channel, now);
+        d.scanDelete(); d.restoreChannel(); _scan_pending = false; _pending_diagnosis = false;
       }
     }
     switch (_state) {
@@ -193,7 +205,7 @@ public:
           if (_diagnose_interval && _diagnose_allowed
               && (!_diagnosed_at || now - _diagnosed_at >= _diagnose_interval)
               && d.startScan(0, ssid)) {
-            _diagnosed_at = now | 1U;
+            _diagnosis_started = now | 1U;   // counts once it completes
             _state = JoinState::Diagnosing; _deadline = now + kDiagnoseTimeoutMs;
             return;
           }
@@ -211,13 +223,14 @@ public:
       case JoinState::Diagnosing: {
         const int n = d.scanResult();
         if (n == -1 && !due(now, _deadline)) return;
-        uint8_t bssid[6]; uint8_t strongest = 0;
-        if (n > 0) d.pick(ssid, 0, bssid, strongest);
-        if (strongest) _ap_channel = strongest;
-        if (n == -1) _scan_pending = true;   // timed out: never delete a running scan
-        else { d.scanDelete(); d.restoreChannel(); }
         _state = JoinState::Idle;
         fail(now);
+        if (n == -1) {   // timed out: never delete a running scan; read it when it lands
+          _scan_pending = true; _pending_diagnosis = true;
+          return;
+        }
+        if (n >= 0) readDiagnosis(d, ssid, channel, now);   // a failed one (< -1) does not count
+        d.scanDelete(); d.restoreChannel();
         return;
       }
       case JoinState::Joining:
@@ -247,13 +260,40 @@ public:
   uint32_t retryAt() const { return _retry_at; }
   // The current association was made by this machine.
   bool owned() const { return _owned; }
+  // Diagnostics (the heads' uitest console).
+  bool scanPending() const { return _scan_pending; }
+  bool diagnoseAllowed() const { return _diagnose_allowed; }
+  uint32_t diagnosedAt() const { return _diagnosed_at; }
 
 private:
   static bool due(uint32_t now, uint32_t at) { return (int32_t)(now - at) >= 0; }
 
   void fail(uint32_t now) {
+    if (_retry_soon) {   // the channel situation changed meanwhile
+      _retry_soon = false;
+      _retry_at = now + kPromptRetryMs; _backoff = kFirstBackoffMs;
+      return;
+    }
     _retry_at = now + _backoff;
     _backoff = _backoff >= kMaxBackoffMs / 2 ? kMaxBackoffMs : _backoff * 2;
+  }
+
+  // Next attempt in kPromptRetryMs, back-off reset. In Idle at once; in a
+  // scan or join, when that ends (fail()). Never sooner than 1 s from now.
+  void retrySoon(uint32_t now) {
+    _backoff = kFirstBackoffMs;
+    if (_state != JoinState::Idle) { _retry_soon = true; return; }
+    if ((int32_t)(_retry_at - (now + kPromptRetryMs)) > 0) _retry_at = now + kPromptRetryMs;
+  }
+
+  // A completed all-channel scan: where the access point is, and the
+  // interval starts. Seen on the ESP-NOW channel itself: try it soon.
+  void readDiagnosis(Driver& d, const char* ssid, uint8_t channel, uint32_t now) {
+    uint8_t bssid[6]; uint8_t strongest = 0;
+    (void)d.pick(ssid, 0, bssid, strongest);
+    if (strongest) _ap_channel = strongest;
+    _diagnosed_at = _diagnosis_started ? _diagnosis_started : (now | 1U);
+    if (strongest && strongest == channel) retrySoon(now);
   }
 
   void cancelScan(Driver& d) {
@@ -281,9 +321,10 @@ private:
   JoinState _state = JoinState::Idle;
   JoinReason _reason = JoinReason::None;
   uint32_t _retry_at = 0, _deadline = 0, _backoff = kFirstBackoffMs;
-  uint32_t _diagnose_interval, _diagnosed_at = 0;
-  uint8_t _ap_channel = 0;
+  uint32_t _diagnose_interval, _diagnosed_at = 0, _diagnosis_started = 0;
+  uint8_t _ap_channel = 0, _seen_channel = 0;
   bool _owned = false, _scan_pending = false, _diagnose_allowed = true;
+  bool _pending_diagnosis = false, _retry_soon = false;
 };
 
 }}  // namespace mesh::wifi

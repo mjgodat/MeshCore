@@ -37,6 +37,7 @@ enum wl_status_t { WL_IDLE_STATUS = 0, WL_NO_SSID_AVAIL = 1, WL_CONNECTED = 3, W
 #define WIFI_OFF WIFI_MODE_NULL
 #define WIFI_STA WIFI_MODE_STA
 struct IPAddress { uint32_t v = 0; operator uint32_t() const { return v; } };
+uint32_t millis();
 struct FakeArduinoWiFi {
   wifi_mode_t getMode();
   bool mode(wifi_mode_t m);
@@ -46,13 +47,13 @@ struct FakeArduinoWiFi {
   wl_status_t status();
   IPAddress localIP() { IPAddress a; return a; }
   int32_t channel() { return 6; }
-  int16_t scanComplete() { return -2; }
+  int16_t scanComplete();
   int16_t scanNetworks(bool, bool, bool, uint32_t, uint8_t, const char*, const uint8_t*);
-  void scanDelete() {}
-  std::string SSID(int) { return ""; }
-  int32_t RSSI(int) { return 0; }
-  int32_t channel(int) { return 0; }
-  const uint8_t* BSSID(int) { return nullptr; }
+  void scanDelete();
+  std::string SSID(int i);
+  int32_t RSSI(int i);
+  int32_t channel(int i);
+  const uint8_t* BSSID(int i);
   bool disconnect(bool, bool) { return true; }
 };
 extern FakeArduinoWiFi WiFi;
@@ -182,9 +183,56 @@ bool FakeArduinoWiFi::mode(wifi_mode_t m) {
   return true;
 }
 wl_status_t FakeArduinoWiFi::status() { return associated && netif_up ? WL_CONNECTED : WL_IDLE_STATUS; }
-int16_t FakeArduinoWiFi::scanNetworks(bool, bool, bool, uint32_t, uint8_t, const char*, const uint8_t*) {
-  L("scan"); return WIFI_SCAN_RUNNING;
+
+// ---- Arduino 2.0.17 WiFiScan.cpp, as it behaves (time in ms) -------------
+// scanNetworks sets _scanTimeout = max_ms_per_chan * 20; scanComplete()
+// reports WIFI_SCAN_FAILED once that elapses although the driver keeps
+// scanning; the SCAN_DONE event (_scanDone) later stores the results.
+static uint32_t now_ms = 1000;
+uint32_t millis() { return now_ms; }
+struct FakeAp { std::string ssid; uint8_t channel; int32_t rssi; };
+static std::vector<FakeAp> world_aps;
+static std::vector<FakeAp> scan_results;
+static bool scanning_bit = false, done_bit = false, idf_scanning = false;
+static uint32_t scan_started = 0, scan_timeout = 10000, idf_done_at = 0;
+static uint8_t idf_scan_channel = 0;
+static int16_t scan_count = 0;
+static uint32_t all_channel_scan_ms = 2630;   // the CYD: longer than 20 x 110 ms
+static void scan_done_event() {
+  scan_results.clear();
+  for (auto& a : world_aps) if (!idf_scan_channel || a.channel == idf_scan_channel) scan_results.push_back(a);
+  scan_count = (int16_t)scan_results.size();
+  scan_started = 0; done_bit = true; scanning_bit = false;
 }
+static void advance(uint32_t ms) {
+  for (uint32_t i = 0; i < ms; ++i) {
+    ++now_ms;
+    if (idf_scanning && (int32_t)(now_ms - idf_done_at) >= 0) { idf_scanning = false; scan_done_event(); }
+  }
+}
+int16_t FakeArduinoWiFi::scanNetworks(bool, bool, bool, uint32_t max_ms, uint8_t ch, const char*, const uint8_t*) {
+  L("scan");
+  if (scanning_bit) return WIFI_SCAN_RUNNING;
+  scan_timeout = max_ms * 20;
+  scanDelete();
+  if (idf_scanning) return -2;   // esp_wifi_scan_start refuses while the driver still scans
+  idf_scanning = true; idf_scan_channel = ch;
+  idf_done_at = now_ms + (ch ? max_ms : all_channel_scan_ms);
+  scan_started = now_ms ? now_ms : 1; done_bit = false; scanning_bit = true;
+  return WIFI_SCAN_RUNNING;
+}
+int16_t FakeArduinoWiFi::scanComplete() {
+  if (scan_started && now_ms - scan_started > scan_timeout) { scanning_bit = false; return -2; }
+  if (done_bit) return scan_count;
+  if (scanning_bit) return WIFI_SCAN_RUNNING;
+  return -2;
+}
+void FakeArduinoWiFi::scanDelete() { done_bit = false; scan_results.clear(); scan_count = 0; }
+std::string FakeArduinoWiFi::SSID(int i) { return (size_t)i < scan_results.size() ? scan_results[(size_t)i].ssid : ""; }
+int32_t FakeArduinoWiFi::RSSI(int i) { return (size_t)i < scan_results.size() ? scan_results[(size_t)i].rssi : 0; }
+int32_t FakeArduinoWiFi::channel(int i) { return (size_t)i < scan_results.size() ? scan_results[(size_t)i].channel : 0; }
+static const uint8_t fake_bssid[6] = {9, 9, 9, 9, 9, 9};
+const uint8_t* FakeArduinoWiFi::BSSID(int i) { return (size_t)i < scan_results.size() ? fake_bssid : nullptr; }
 
 // the bridge's two ways of starting the radio
 static void bridge_start_raw() { idf_init(); drv_mode = WIFI_MODE_STA; idf_start(); }
@@ -209,6 +257,7 @@ static void reset_all() {
   queue.clear(); log_.clear(); drv_init = drv_started = associated = false; drv_mode = WIFI_MODE_NULL;
   netif = netif_started = netif_up = false; faults = 0; sta_started_bit = false;
   ard_low_level = ard_started = false; radio_channel = 6; posts_by_driver_code = 0;
+  scanning_bit = done_bit = idf_scanning = false; scan_started = 0; scan_count = 0; scan_results.clear(); world_aps.clear();
 }
 static int count(const char* what) { int n = 0; for (auto& s : log_) n += s == what; return n; }
 
@@ -274,6 +323,49 @@ int main() {
     assert(d.begin("net", "pw", 6, bssid));
     assert(applied_ps == WIFI_PS_NONE && WiFi.sleep_cache == WIFI_PS_NONE);
     d.pinned_channel = 0;
+  }
+  // 5) Arduino's early "failed" on the heads' all-channel diagnosis (the
+  //    2026-11-04 CYD finding): 20 x 110 ms = 2.2 s, the scan takes 2.63 s.
+  //    The driver keeps reporting it running and reads the real result.
+  reset_all();
+  bridge_start_arduino(); pump();
+  world_aps = {{"net", 2, -45}};
+  {
+    mesh::wifi::StationJoinDriver d;
+    assert(d.startScan(0, "net"));
+    advance(2300);
+    assert(WiFi.scanComplete() == -2);     // Arduino already says failed
+    assert(d.scanResult() == -1);           // the driver knows it still runs
+    assert(!d.startScan(0, "net"));         // and starts no second scan meanwhile
+    advance(400);
+    assert(d.scanResult() == 1);            // the real result
+    uint8_t b[6]; uint8_t strongest = 0;
+    assert(!d.pick("net", 6, b, strongest) && strongest == 2);
+    d.scanDelete();
+    // a scan that really never ends is given up after the driver's own limit
+    all_channel_scan_ms = 60000;
+    assert(d.startScan(0, "net"));
+    advance(9000);
+    assert(d.scanResult() == -1);
+    advance(2000);
+    assert(d.scanResult() == -2);
+    advance(60000);                         // the late result lands much later
+    all_channel_scan_ms = 2630;
+    d.scanDelete();
+  }
+  // 6) end to end with StationJoin: the head (ESP-NOW ch 6, network on ch 2)
+  //    reports the AP's channel, and the targeted ch-6 scans are unaffected.
+  reset_all();
+  bridge_start_arduino(); pump();
+  world_aps = {{"net", 2, -45}};
+  {
+    mesh::wifi::StationJoinDriver d;
+    mesh::wifi::StationJoin<mesh::wifi::StationJoinDriver> j(600000);
+    j.reset(d, now_ms);
+    for (int i = 0; i < 6000 && !j.apChannel(); ++i) { advance(20); pump(); j.poll(d, now_ms, "net", "pw"); }
+    assert(j.apChannel() == 2);
+    assert(j.reason() == mesh::wifi::JoinReason::NotOnChannel);
+    assert(count("join") == 0);
   }
   // 4) pinned channel (repeater): the configured bridge channel wins while
   //    the bridge is momentarily stopped; restore puts the radio there.
