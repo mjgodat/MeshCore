@@ -39,6 +39,9 @@ public:
   // Null (the default) leaves them on the normal path. Register once, before
   // or after init(); to change it, clear it first.
   static void setObserverHandler(mesh::observer::FrameHandler handler, void* ctx);
+  // espnow.format wrapped: frames refused since boot because they were not
+  // wrapped (foreign) or failed the espnow.secret checksum.
+  static void linkRejects(uint32_t& foreign, uint32_t& checksum);
   bool isEnabled() const { return initialized_; }
   int recvRaw(uint8_t* bytes, int sz) override;
   uint32_t getEstAirtimeFor(int len_bytes) override;

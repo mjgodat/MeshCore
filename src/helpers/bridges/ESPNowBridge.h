@@ -8,6 +8,7 @@
 #include "helpers/esp32/EspNowRepeatScheduler.h"
 #include "helpers/bridges/BridgeBase.h"
 #include "helpers/bridges/ESPNowBridgeFormat.h"
+#include "helpers/bridges/ESPNowWrappedFrame.h"
 #include "helpers/bridges/ESPNowBridgeDiagnostics.h"
 #include "helpers/bridges/ESPNowNodeTable.h"
 #include "helpers/bridges/ObserverRateLimiter.h"
@@ -188,17 +189,12 @@ private:
   void onIngressResult(IngressResult result) override;
 
   /**
-   * Performs XOR encryption/decryption of data
-   * Used to isolate different mesh networks
-   *
-   * Uses _prefs->bridge_secret as the key in a simple XOR operation.
-   * The same operation is used for both encryption and decryption.
-   * While not cryptographically secure, it provides basic network isolation.
-   *
-   * @param data Pointer to data to encrypt/decrypt
-   * @param len Length of data in bytes
+   * Wraps one payload (a MeshCore packet or an observer frame) in the
+   * bridge.secret wrapper (ESPNowWrappedFrame.h, shared with primary
+   * ESP-NOW nodes). Returns the frame length, 0 when it does not fit or the
+   * secret is unusable (recorded as a Secret error).
    */
-  bool xorCrypt(uint8_t *data, size_t len);
+  size_t wrapFrame(const uint8_t* payload, size_t len, uint8_t* out, size_t cap);
 
   /** Parse and queue one serialized MeshCore packet. */
   void receiveMeshPacket(mesh::Packet* packet, const uint8_t *data, size_t len);

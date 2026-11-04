@@ -695,6 +695,15 @@ void ESPNowBridge::pumpTransmitQueue() {
   // so the queue cannot gain an entry between this check and the start below.
   if (observer_slot && !_observer.empty()) {
     frame_len = static_cast<uint16_t>(_observer.pop(frame, sizeof(frame)));
+    if (frame_len > 0 && _active_format == mesh::bridge::ESPNOW_FORMAT_WRAPPED) {
+      // Wrapped links carry the observer feed wrapped too (bridge.secret),
+      // cut to fit the four-byte wrapper.
+      uint8_t plain[MAX_ESPNOW_PACKET_SIZE];
+      const size_t fitted = mesh::observer::fitWrappedPacketFrame(frame, frame_len);
+      memcpy(plain, frame, fitted);
+      frame_len = fitted ? static_cast<uint16_t>(wrapFrame(plain, fitted, frame, sizeof(frame))) : 0;
+      if (frame_len == 0) _observer.noteSent(false);
+    }
     if (frame_len > 0) {
       observer_start = true;
       portENTER_CRITICAL(&_tx_mux);
@@ -789,20 +798,6 @@ void ESPNowBridge::pumpTransmitQueue() {
     portEXIT_CRITICAL(&_tx_mux);
   }
   _debug_dirty.store(true, std::memory_order_relaxed);
-}
-
-bool ESPNowBridge::xorCrypt(uint8_t *data, size_t len) {
-  size_t keyLen = 0;
-  while (keyLen < sizeof(_prefs->bridge_secret) && _prefs->bridge_secret[keyLen] != 0) keyLen++;
-  if (keyLen == 0 || keyLen == sizeof(_prefs->bridge_secret)) {
-    recordError(mesh::bridge::diag::Stage::Secret, ESP_ERR_INVALID_ARG);
-    BRIDGE_DEBUG_PRINTLN("Invalid empty or unterminated bridge secret\n");
-    return false;
-  }
-  for (size_t i = 0; i < len; i++) {
-    data[i] ^= _prefs->bridge_secret[i % keyLen];
-  }
-  return true;
 }
 
 void ESPNowBridge::receiveMeshPacket(mesh::Packet* pkt, const uint8_t *data, size_t len) {
@@ -902,42 +897,51 @@ bool ESPNowBridge::processReceivedFrame(mesh::Packet* packet_slot, const uint8_t
 
   // Wrapped mode is strict: ignore packets too small to contain its header
   // and checksum rather than trying to auto-detect raw MeshCore traffic.
-  if (len < (BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE)) {
+  uint8_t decrypted[MAX_ESPNOW_PACKET_SIZE];
+  size_t payloadLen = 0;
+  const mesh::bridge::Unwrap unwrapped = mesh::bridge::unwrapFrame(
+      data, len, _prefs->bridge_secret, sizeof(_prefs->bridge_secret),
+      decrypted, sizeof(decrypted), payloadLen);
+  if (unwrapped == mesh::bridge::Unwrap::TooShort) {
     noteRx(&mesh::bridge::diag::RxStats::badframe);
     BRIDGE_DEBUG_PRINTLN("RX packet too small, len=%u\n", (unsigned)len);
     return false;
   }
-
-  // Check packet header magic
-  uint16_t received_magic = (data[0] << 8) | data[1];
-  if (received_magic != BRIDGE_PACKET_MAGIC) {
+  if (unwrapped == mesh::bridge::Unwrap::Foreign) {
     noteRx(&mesh::bridge::diag::RxStats::foreign);
-    BRIDGE_DEBUG_PRINTLN("RX invalid magic 0x%04X\n", received_magic);
+    BRIDGE_DEBUG_PRINTLN("RX invalid magic 0x%02X%02X\n", data[0], data[1]);
     return false;
   }
-
-  // Make a copy we can decrypt
-  uint8_t decrypted[MAX_ESPNOW_PACKET_SIZE];
-  const size_t encryptedDataLen = len - BRIDGE_MAGIC_SIZE;
-  memcpy(decrypted, data + BRIDGE_MAGIC_SIZE, encryptedDataLen);
-
-  // Try to decrypt (checksum + payload)
-  if (!xorCrypt(decrypted, encryptedDataLen)) return false;
-
-  // Validate checksum
-  uint16_t received_checksum = (decrypted[0] << 8) | decrypted[1];
-  const size_t payloadLen = encryptedDataLen - BRIDGE_CHECKSUM_SIZE;
-
-  if (!validateChecksum(decrypted + BRIDGE_CHECKSUM_SIZE, payloadLen, received_checksum)) {
+  if (unwrapped == mesh::bridge::Unwrap::NoSecret) {
+    recordError(mesh::bridge::diag::Stage::Secret, ESP_ERR_INVALID_ARG);
+    return false;
+  }
+  if (unwrapped == mesh::bridge::Unwrap::Checksum) {
     noteRx(&mesh::bridge::diag::RxStats::checksum_bad);
     // Failed to decrypt - likely from a different network
-    BRIDGE_DEBUG_PRINTLN("RX checksum mismatch, rcv=0x%04X\n", received_checksum);
+    BRIDGE_DEBUG_PRINTLN("RX checksum mismatch\n");
+    return false;
+  }
+  // A wrapped observer feed (another repeater's) is for visual heads only.
+  if (mesh::observer::isObserverFrame(decrypted, payloadLen)) {
+    noteRx(&mesh::bridge::diag::RxStats::foreign);
     return false;
   }
 
   BRIDGE_DEBUG_PRINTLN("RX, payload_len=%u\n", (unsigned)payloadLen);
-  receiveMeshPacket(packet_slot, decrypted + BRIDGE_CHECKSUM_SIZE, payloadLen);
+  receiveMeshPacket(packet_slot, decrypted, payloadLen);
   return true;
+}
+
+size_t ESPNowBridge::wrapFrame(const uint8_t* payload, size_t len, uint8_t* out, size_t cap) {
+  const size_t size = mesh::bridge::wrapFrame(payload, len, _prefs->bridge_secret,
+                                              sizeof(_prefs->bridge_secret), out, cap);
+  if (size == 0 && mesh::bridge::wrappedSecretLength(_prefs->bridge_secret,
+                                                     sizeof(_prefs->bridge_secret)) == 0) {
+    recordError(mesh::bridge::diag::Stage::Secret, ESP_ERR_INVALID_ARG);
+    BRIDGE_DEBUG_PRINTLN("Invalid empty or unterminated bridge secret\n");
+  }
+  return size;
 }
 
 void ESPNowBridge::onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
@@ -1007,22 +1011,15 @@ void ESPNowBridge::sendPacket(mesh::Packet *packet) {
 
     size_t totalPacketSize = meshPacketLen;
     if (_active_format != mesh::bridge::ESPNOW_FORMAT_RAW) {
-      const size_t packetOffset = BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE;
-      memmove(buffer + packetOffset, buffer, meshPacketLen);
-
-      // Write the legacy magic and encrypted checksum/payload wrapper.
-      buffer[0] = (BRIDGE_PACKET_MAGIC >> 8) & 0xFF;
-      buffer[1] = BRIDGE_PACKET_MAGIC & 0xFF;
-      const uint16_t checksum =
-          fletcher16(buffer + packetOffset, meshPacketLen);
-      buffer[2] = (checksum >> 8) & 0xFF;
-      buffer[3] = checksum & 0xFF;
-      if (!xorCrypt(buffer + BRIDGE_MAGIC_SIZE,
-                    meshPacketLen + BRIDGE_CHECKSUM_SIZE)) {
+      // The legacy magic and XORed checksum/payload wrapper, shared with
+      // primary ESP-NOW nodes in espnow.format wrapped (ESPNowWrappedFrame.h).
+      uint8_t plain[MAX_TRANS_UNIT];
+      memcpy(plain, buffer, meshPacketLen);
+      totalPacketSize = wrapFrame(plain, meshPacketLen, buffer, sizeof(buffer));
+      if (totalPacketSize == 0) {
         noteTx(&TxStats::drops);
         return;
       }
-      totalPacketSize = packetOffset + meshPacketLen;
     }
 
     mesh::espnow::ESPNowRawFrames frames;

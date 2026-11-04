@@ -43,6 +43,11 @@ constexpr size_t PACKET_FIXED = HEADER_SIZE + 4 + 1 + 2 + 1 + 1;   // + raw[len]
 constexpr size_t MAX_PACKET_FRAME = PACKET_FIXED + MAX_RAW;
 constexpr size_t VITALS_FRAME = HEADER_SIZE + 4 + 2 + 2 + 2 + 2 + 2 + 1 + 2 + 4 + 4 + 1 + 4 + 4 + 1 + 1 + 1;
 static_assert(MAX_PACKET_FRAME <= 250 && VITALS_FRAME <= 250, "must fit one ESP-NOW frame");
+// In espnow.format/bridge.format wrapped every frame is wrapped (4 more
+// bytes), so a record carries at most MAX_RAW_WRAPPED raw bytes there.
+constexpr size_t MAX_WRAPPED_FRAME = 246;
+constexpr size_t MAX_RAW_WRAPPED = MAX_WRAPPED_FRAME - PACKET_FIXED;
+static_assert(MAX_RAW_WRAPPED == 231 && VITALS_FRAME <= MAX_WRAPPED_FRAME, "wrapped observer frames");
 
 namespace detail {
 struct W {
@@ -114,12 +119,28 @@ inline bool decodePacket(const uint8_t* buf, size_t len, PacketRecord& out) {
   uint8_t disp = r.u8(), n = r.u8();
   const bool truncated = (disp & DISP_TRUNCATED) != 0;
   disp &= (uint8_t)~DISP_TRUNCATED;
-  if (disp > (uint8_t)Disposition::Dropped || n > MAX_RAW || (truncated && n != MAX_RAW)) return false;
+  // A truncated record carries MAX_RAW bytes, or MAX_RAW_WRAPPED when it was
+  // cut to fit a wrapped ESP-NOW frame (fitWrappedPacketFrame).
+  if (disp > (uint8_t)Disposition::Dropped || n > MAX_RAW
+      || (truncated && n != MAX_RAW && n != MAX_RAW_WRAPPED)) return false;
   out.rx_ms = rx; out.snr_q4 = snr; out.rssi = rssi; out.disp = (Disposition)disp;
   out.truncated = truncated; out.len = n;
   memcpy(out.raw, buf + r.i, n);
   if (n < MAX_RAW) memset(out.raw + n, 0, MAX_RAW - n);
   return true;
+}
+
+// Shrinks an encoded frame in place to fit a wrapped ESP-NOW frame (246
+// bytes for the observer frame, ESPNowWrappedFrame.h): a longer packet record
+// keeps its first MAX_RAW_WRAPPED raw bytes and is marked truncated. Returns
+// the new length (unchanged when it already fits), 0 for a non-frame.
+inline size_t fitWrappedPacketFrame(uint8_t* frame, size_t len) {
+  if (!isObserverFrame(frame, len)) return 0;
+  if (len <= MAX_WRAPPED_FRAME) return len;
+  if (frame[5] != (uint8_t)Kind::Packet) return 0;
+  frame[PACKET_FIXED - 2] |= DISP_TRUNCATED;
+  frame[PACKET_FIXED - 1] = (uint8_t)MAX_RAW_WRAPPED;
+  return MAX_WRAPPED_FRAME;
 }
 
 inline bool decodeVitals(const uint8_t* buf, size_t len, Vitals& out) {

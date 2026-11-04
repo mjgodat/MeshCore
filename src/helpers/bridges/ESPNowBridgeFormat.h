@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <helpers/ESPNowRawFragmentation.h>
+#include <helpers/bridges/ESPNowWrappedFrame.h>
 
 namespace mesh {
 namespace bridge {

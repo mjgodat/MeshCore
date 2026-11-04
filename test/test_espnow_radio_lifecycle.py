@@ -14,6 +14,7 @@ STUBS = r'''
 #include <cstring>
 #include <helpers/WirelessControl.h>
 #include <helpers/ESPNowRawFragmentation.h>
+#include <helpers/bridges/ESPNowWrappedFrame.h>
 #include <helpers/esp32/EspNowRepeatScheduler.h>
 #include <helpers/RadioDirectionPolicy.h>
 #include <helpers/bridges/ESPNowBridgeDiagnostics.h>

@@ -7404,6 +7404,10 @@ raw MeshCore frames. Coordinate the format and channel on every ESP-NOW peer;
 there is no automatic dual-format receive mode because it would permit
 ambiguous, asymmetric bridge deployments.
 
+Primary ESP-NOW nodes speak `raw` by default; with `espnow.format wrapped` and
+the same secret (`espnow.secret`) they speak `wrapped` too (see below).
+In `wrapped` the bridge also wraps its observer feed.
+
 Use `raw` to connect a LoRa-primary `*_repeater_bridge_espnow` node to
 `Generic_ESPNOW`, `SenseCapIndicator-ESPNow`, or another primary-ESP-NOW node.
 Raw mode enables the ESP-NOW LR PHY and sends at the same LR rate used by those
@@ -7430,6 +7434,45 @@ magic and checksum overhead, and drops larger packets instead of truncating
 them.
 
 ---
+
+#### Wrapped format on primary ESP-NOW nodes (`espnow.format`, `espnow.secret`)
+
+```text
+get espnow.format
+set espnow.format raw|wrapped
+get espnow.secret
+set espnow.secret <1-15 characters>|off
+```
+
+Primary ESP-NOW firmware (the visual heads, the ESP32 DevKit relay,
+`Generic_ESPNOW_*`). Default `raw`: plain serialized MeshCore packets, exactly
+as before. `wrapped` is byte-for-byte the bridge's `bridge.format wrapped`
+(magic `C0 3E`, Fletcher-16, XOR with the secret; one shared codec,
+`src/helpers/bridges/ESPNowWrappedFrame.h`), so these nodes can join a wrapped
+bridge link. `espnow.secret` must equal the bridge's `bridge.secret`; set it
+before `set espnow.format wrapped` (refused without a secret). The secret is
+never printed (`get espnow.secret` shows `set` or `not set`); `off` clears it
+and is refused while the saved format is `wrapped`.
+
+Both settings are saved at once and apply at the **next reboot**, so a node can
+be prepared over the mesh while it still talks the old format.
+`get espnow.format` shows a pending change (`> wrapped (saved; raw until
+reboot)`) and, while wrapped is active, the frames refused since boot
+(`> wrapped (refused: not wrapped 0, wrong secret 0)`).
+
+Receive is strict, as on the bridge: a wrapped node drops every frame that is
+not wrapped with its secret (raw MeshCore frames, raw observer frames, other
+ESP-NOW users on the channel); a raw node passes wrapped frames to MeshCore,
+which cannot parse them. Wrapped packets carry at most 246 bytes (the bridge's
+limit); longer packets are not sent. Observer frames are wrapped too in
+wrapped mode (the repeater wraps its feed when `bridge.format` is `wrapped`; a
+packet record then carries at most 231 raw bytes, marked truncated beyond
+that), so the whole link needs the secret. On a companion (head) the commands
+are accepted only from an attached local client; on a relay or repeater also
+from a remote admin. A missing or damaged record means `raw`.
+
+To move a whole installation from raw to wrapped without losing any node, see
+"Switching an installation to wrapped" in `docs/espnow-head/udp-transport.md`.
 
 #### Set the ESP-Now secret
 **Usage:** 
