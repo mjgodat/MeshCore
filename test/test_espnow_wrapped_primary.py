@@ -226,7 +226,20 @@ int main(int argc, char** argv) {
   if (strcmp(argv[2], "raw")) assert(mesh::espnow::activateLink(true, argv[2]));
   ESPNOWRadio::setObserverHandler(on_observer, nullptr);
   ESPNOWRadio radio; radio.init(); assert(radio.isEnabled());
-  if (!strcmp(argv[1], "send")) {
+  if (!strcmp(argv[1], "boot")) {
+    // Raw frames that arrive before the saved wrapped format is applied at
+    // boot (radio_init runs before the settings load) must never reach
+    // MeshCore once the node is wrapped.
+    assert(!strcmp(argv[2], "raw"));
+    const auto frames = read_frames(argv[3]);
+    for (size_t i = 0; i + 1 < frames.size(); ++i) deliver(frames[i].data(), (int)frames[i].size());
+    assert(mesh::espnow::activateLink(true, "fleet-test"));
+    deliver(frames.back().data(), (int)frames.back().size());
+    uint8_t out[255]; int n;
+    while ((n = radio.recvRaw(out, sizeof(out))) > 0) dump("RX", std::vector<uint8_t>(out, out + n));
+    uint32_t foreign = 0, checksum = 0; ESPNOWRadio::linkRejects(foreign, checksum);
+    printf("STATS foreign=%lu checksum=%lu\n", (unsigned long)foreign, (unsigned long)checksum);
+  } else if (!strcmp(argv[1], "send")) {
     for (const auto& p : read_frames(argv[3])) {
       const size_t before = air_log.size();
       const bool started = radio.startSendRaw(p.data(), (int)p.size());
@@ -408,6 +421,17 @@ class WrappedInteropTests(unittest.TestCase):
         got = self.p.run(self.p.radio, "recv", "raw", wrapped)
         self.assertTrue(all(f[:2] == b"\xc0\x3e" for f in parse(got, "RX")))
 
+    def test_frames_queued_before_the_boot_format_applies_are_dropped(self):
+        # Review F4: two raw packets (one a raw fragment) queued while the
+        # node was still raw at boot, then wrapped activates.
+        big = bytes([0x15]) + bytes(range(254))
+        raw_frames = parse(self.p.run(self.p.radio, "send", "raw", [packets()[0], big]), "TX")
+        self.assertEqual(len(raw_frames), 3)
+        wrapped = legacy_wrap(packets()[1], "fleet-test")
+        got = self.p.run(self.p.radio, "boot", "raw", raw_frames + [wrapped])
+        self.assertEqual(parse(got, "RX"), [packets()[1]])
+        self.assertIn("STATS foreign=3 checksum=0", got)
+
     def test_raw_mode_keeps_two_frame_packets(self):
         big = [bytes([0x15]) + bytes(range(254))]
         tx = parse(self.p.run(self.p.radio, "send", "raw", big), "TX")
@@ -444,6 +468,10 @@ int main() {
                           "set espnow.secret", "set espnow.secret 0123456789abcdef", "get espnow.format x"})
     assert(run(bad) && !strncmp(reply, "Error:", 6));
   assert(fs.files.empty());
+  assert(run("set espnow.secret fleet-test") && !strcmp(reply, "OK - espnow.secret saved"));
+  // Review F9: no equality oracle; the same secret again still says saved.
+  assert(run("set espnow.secret fleet-test") && !strcmp(reply, "OK - espnow.secret saved"));
+  assert(run("set espnow.secret other") && !strcmp(reply, "OK - espnow.secret saved"));
   assert(run("set espnow.secret fleet-test") && !strcmp(reply, "OK - espnow.secret saved"));
   assert(run("get espnow.secret") && !strcmp(reply, "> set"));               // never printed
   assert(fs.files.at(path).size() == 25);

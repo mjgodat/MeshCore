@@ -7524,6 +7524,11 @@ that), so the whole link needs the secret. On a companion (head) the commands
 are accepted only from an attached local client; on a relay or repeater also
 from a remote admin. A missing or damaged record means `raw`.
 
+Wrapped is network isolation, not secrecy: the XOR has no nonce and much of
+every frame is known plaintext, so anyone who records a wrapped frame can
+recover the secret. MeshCore's own encryption still protects DMs and channel
+messages. Do not reuse the wrapped secret for anything that must stay secret.
+
 To move a whole installation from raw to wrapped without losing any node, see
 "Switching an installation to wrapped" in `docs/espnow-head/udp-transport.md`.
 
