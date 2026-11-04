@@ -763,6 +763,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   char udp_station_ssid[33] = {};
   char udp_station_password[65] = {};
   void loadUDPStationCredentials();
+  // udp.enabled on with a usable bridge.secret (pauses aside).
+  bool udpBridgeSwitchedOn() const;
   // Configured ESP-NOW bridge channel while the bridge is enabled (0 = none).
   uint8_t udpPinnedEspNowChannel() const;
   // Before an ESP-NOW bridge (re)start: a UDP station on another channel is
