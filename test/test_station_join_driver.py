@@ -41,7 +41,8 @@ struct FakeArduinoWiFi {
   wifi_mode_t getMode();
   bool mode(wifi_mode_t m);
   void persistent(bool) {}
-  bool setSleep(wifi_ps_type_t) { return true; }
+  wifi_ps_type_t sleep_cache = WIFI_PS_MIN_MODEM;
+  bool setSleep(wifi_ps_type_t m) { sleep_cache = m; return true; }
   wl_status_t status();
   IPAddress localIP() { IPAddress a; return a; }
   int32_t channel() { return 6; }
@@ -73,8 +74,10 @@ esp_err_t esp_wifi_set_channel(uint8_t c, wifi_second_chan_t s);
 ''',
     'helpers/esp32/WiFiRadioPolicy.h': r'''
 #pragma once
+#include <atomic>
 #include "esp_wifi.h"
 namespace mesh { namespace wifi {
+std::atomic<uint8_t>& bridgeEspNowChannel();
 bool espNowChannelConstrained();
 uint8_t activeEspNowChannel();
 bool stationMutationAllowed();
@@ -155,6 +158,7 @@ static esp_err_t idf_deinit() { L("esp_wifi_deinit"); drv_init = false; return E
 esp_err_t esp_wifi_get_mode(wifi_mode_t* m) { if (!drv_init) return ESP_ERR_WIFI_NOT_INIT; *m = drv_mode; return ESP_OK; }
 esp_err_t esp_wifi_get_channel(uint8_t* c, wifi_second_chan_t*) { *c = radio_channel; return ESP_OK; }
 esp_err_t esp_wifi_set_channel(uint8_t c, wifi_second_chan_t) { radio_channel = c; return ESP_OK; }
+static wifi_ps_type_t applied_ps = WIFI_PS_MIN_MODEM;
 
 // Arduino 2.0.17 WiFiGenericClass::getMode()/mode()
 wifi_mode_t FakeArduinoWiFi::getMode() {
@@ -187,6 +191,7 @@ static void bridge_start_raw() { idf_init(); drv_mode = WIFI_MODE_STA; idf_start
 static void bridge_start_arduino() { WiFi.mode(WIFI_STA); }
 
 namespace mesh { namespace wifi {
+std::atomic<uint8_t>& bridgeEspNowChannel() { static std::atomic<uint8_t> c{0}; return c; }
 bool espNowChannelConstrained() { return true; }
 uint8_t activeEspNowChannel() { return 6; }
 bool stationMutationAllowed() { return true; }
@@ -197,7 +202,7 @@ void beginStationDiagnostics(const char*) {}
 wl_status_t beginStationWithSecurity(const char*, const char*, int32_t, const uint8_t*) {
   L("join"); associated = true; queue.push_back(STA_CONNECTED); return WL_IDLE_STATUS;
 }
-esp_err_t applyStationPowerSave(wifi_ps_type_t) { return ESP_OK; }
+esp_err_t applyStationPowerSave(wifi_ps_type_t m) { applied_ps = m; return ESP_OK; }
 }}
 
 static void reset_all() {
@@ -251,6 +256,24 @@ int main() {
     (void)d.startScan(6, "net"); pump();
     (void)d.begin("net", "pw", 6, bssid); pump();
     assert(faults == 0);
+  }
+  // 4b) power save: the station's own preference only while no ESP-NOW
+  //     bridge is enabled. Boot with UDP saved on loads that preference
+  //     before the bridge runs; the join must still ask for no sleep when
+  //     the bridge is running or merely enabled (pinned, mid channel change).
+  reset_all();
+  bridge_start_arduino(); pump();
+  {
+    mesh::wifi::StationJoinDriver d; d.power_save = WIFI_PS_MIN_MODEM;
+    assert(d.begin("net", "pw", 6, bssid));
+    assert(applied_ps == WIFI_PS_MIN_MODEM && WiFi.sleep_cache == WIFI_PS_MIN_MODEM);   // no bridge
+    mesh::wifi::bridgeEspNowChannel() = 6;                                           // bridge running
+    assert(d.begin("net", "pw", 6, bssid));
+    assert(applied_ps == WIFI_PS_NONE && WiFi.sleep_cache == WIFI_PS_NONE);
+    mesh::wifi::bridgeEspNowChannel() = 0; d.pinned_channel = 6;                     // enabled, restarting
+    assert(d.begin("net", "pw", 6, bssid));
+    assert(applied_ps == WIFI_PS_NONE && WiFi.sleep_cache == WIFI_PS_NONE);
+    d.pinned_channel = 0;
   }
   // 4) pinned channel (repeater): the configured bridge channel wins while
   //    the bridge is momentarily stopped; restore puts the radio there.
