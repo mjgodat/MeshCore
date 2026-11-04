@@ -3,6 +3,9 @@
 #include <Arduino.h>
 #include <new>
 #include <Mesh.h>
+#if defined(WITH_UDP_BRIDGE)
+#include <helpers/bridges/DiscoveryKey.h>
+#endif
 #include <helpers/PacketFileLoggingConfig.h>
 #include <helpers/Radio2DiscoverTrailer.h>
 #include <helpers/PowerSavingDiagnostics.h>
@@ -1063,18 +1066,20 @@ public:
   void getObserverRuntime(mesh::espnow::ObserverRuntime& runtime) override;
 private:
 #endif
-#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)
-  // Discovery and auto-pairing (DiscoveryFrame.h): announces on the active
-  // bridges, verified replies add expiring UDP peers for the heads.
+#if defined(MESH_BRIDGE_DISCOVERY)
+  // Discovery and auto-pairing (DiscoveryFrame.h), UDP bridge builds only:
+  // announces on the active bridges, verified replies add expiring UDP peers
+  // for the heads.
   struct DiscoveryState {
     bool started = false;
     uint32_t boot = 0, counter = 0, espnow_at = 0, udp_at = 0, refresh_at = 0;
     mesh::discovery::AutoPeers peers;
-    uint32_t replies = 0, bad = 0, stale = 0, manual = 0;
+    mesh::discovery::KeyCache key;
+    uint32_t replies = 0, bad = 0, stale = 0, manual = 0, spoofed = 0;
   } _discovery;
+  const uint8_t* discoveryKey();
   void serviceDiscovery();
   static void onDiscoveryFrame(void* ctx, const uint8_t* frame, size_t len, const uint8_t* ip, uint16_t port);
-  static bool discoveryMac(void* ctx, const uint8_t* data, size_t len, uint8_t digest[32]);
   static void describeAutoPeers(void* ctx, char* out, size_t capacity);
 public:
   void getDiscoveryRuntime(mesh::discovery::DiscoveryRuntime& runtime) override;

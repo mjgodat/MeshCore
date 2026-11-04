@@ -55,6 +55,14 @@ void BridgeBase::handleReceivedPacket(mesh::Packet *packet) {
   // ordinary bridge FIFO has no expiry and would pin a lost burst forever.
   const bool ota = packet->getPayloadType() == PAYLOAD_TYPE_OTA;
   if (ota || !_seen_packets.wasSeen(packet)) {
+#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE) || defined(WITH_UDP_BRIDGE)
+    // bridge.rxlimit: only packets that are new to this bridge spend it.
+    if (!admitIngress()) {
+      _mgr->free(packet);
+      onIngressResult(IngressResult::Filtered);
+      return;
+    }
+#endif
     if (!ota) _seen_packets.markSeen(packet);
     // bridge_delay provides a buffer to prevent immediate processing conflicts in the mesh network.
     _mgr->queueInbound(packet, millis() + _prefs->bridge_delay);

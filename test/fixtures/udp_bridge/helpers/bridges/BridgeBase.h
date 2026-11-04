@@ -105,6 +105,7 @@ protected:
   };
   enum class IngressResult : uint8_t { Stopped, Filtered, Duplicate, Queued };
   virtual void onIngressResult(IngressResult) {}
+  virtual bool admitIngress() { return true; }
   bool _initialized = false;
   NodePrefs* _prefs;
   mesh::PacketManager* _mgr;
@@ -128,6 +129,7 @@ protected:
     if (packet->getPayloadType() != PAYLOAD_TYPE_OTA && _seen_packets.wasSeen(packet)) {
       onIngressResult(IngressResult::Duplicate); _mgr->free(packet); return;
     }
+    if (!admitIngress()) { onIngressResult(IngressResult::Filtered); _mgr->free(packet); return; }
     if (packet->getPayloadType() != PAYLOAD_TYPE_OTA) _seen_packets.markSeen(packet);
     onIngressResult(IngressResult::Queued);
     _mgr->received_sources.push_back(ingress_source ? *ingress_source : mesh::bridge::IngressSource());
