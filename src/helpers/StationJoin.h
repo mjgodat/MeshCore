@@ -89,6 +89,11 @@ public:
 
   explicit StationJoin(uint32_t diagnose_interval_ms = 0) : _diagnose_interval(diagnose_interval_ms) {}
 
+  // The all-channel diagnosis pauses ESP-NOW receive while the radio visits
+  // other channels: its owner allows it only when ESP-NOW has nothing to
+  // lose (a head in udp/auto mode whose ESP-NOW has gone silent).
+  void setDiagnoseAllowed(bool allowed) { _diagnose_allowed = allowed; }
+
   // Fresh start (settings changed). Cancels an own scan first (abandon()).
   void reset(Driver& d, uint32_t now) {
     abandon(d);
@@ -185,7 +190,8 @@ public:
           d.restoreChannel();
           _reason = JoinReason::NotOnChannel;
           _state = JoinState::Idle;
-          if (_diagnose_interval && (!_diagnosed_at || now - _diagnosed_at >= _diagnose_interval)
+          if (_diagnose_interval && _diagnose_allowed
+              && (!_diagnosed_at || now - _diagnosed_at >= _diagnose_interval)
               && d.startScan(0, ssid)) {
             _diagnosed_at = now | 1U;
             _state = JoinState::Diagnosing; _deadline = now + kDiagnoseTimeoutMs;
@@ -277,7 +283,7 @@ private:
   uint32_t _retry_at = 0, _deadline = 0, _backoff = kFirstBackoffMs;
   uint32_t _diagnose_interval, _diagnosed_at = 0;
   uint8_t _ap_channel = 0;
-  bool _owned = false, _scan_pending = false;
+  bool _owned = false, _scan_pending = false, _diagnose_allowed = true;
 };
 
 }}  // namespace mesh::wifi

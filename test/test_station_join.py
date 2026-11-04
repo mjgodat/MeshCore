@@ -165,6 +165,17 @@ int main() {
     run(s, j, 200000, 20);
     assert(s.all_channel_scans == 2);
   }
+  // 4b) the diagnosis only runs while its owner allows it (ESP-NOW silent):
+  //     with ESP-NOW healthy the head never leaves its channel
+  {
+    Sim s; s.aps = {{"Home", 11, -40, 1}}; StationJoin<Sim> j(600000); j.reset(s, 0);
+    j.setDiagnoseAllowed(false);
+    run(s, j, 1300000, 20);
+    assert(s.all_channel_scans == 0 && s.off_channel_ms == 0 && j.reason() == JoinReason::NotOnChannel);
+    j.setDiagnoseAllowed(true);
+    run(s, j, 130000, 20);
+    assert(s.all_channel_scans == 1 && j.apChannel() == 11);
+  }
   // 5) F1: joined on ch 6, router moves to ch 11: dropped at once, reported,
   //    rejoined only when the AP is back on ch 6
   {

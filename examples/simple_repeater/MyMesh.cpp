@@ -15103,11 +15103,15 @@ bool MyMesh::isUDPBridgeNetworkEnabled() const {
       || mesh::wireless::control().pendingDisable(mesh::wireless::WiFi)
       || mesh::wireless::control().blocked(mesh::wireless::WiFi)) return false;
   const size_t secret_length = strnlen(_prefs.bridge_secret, sizeof(_prefs.bridge_secret));
-  if (secret_length == 0 || secret_length >= sizeof(_prefs.bridge_secret)) return false;
-  for (const auto& peer : udp_bridge_settings.prefs().peers) {
-    if (peer.enabled()) return true;
-  }
-  return false;
+  // Peers only decide who gets frames: the station joins with none listed,
+  // so a head's address can be read before it is entered as udp.peer.N.
+  return secret_length != 0 && secret_length < sizeof(_prefs.bridge_secret);
+}
+
+bool MyMesh::udpBridgeSwitchedOn() const {
+  const size_t secret_length = strnlen(_prefs.bridge_secret, sizeof(_prefs.bridge_secret));
+  return udp_bridge_settings.healthy() && udp_bridge_settings.prefs().enabled
+      && secret_length != 0 && secret_length < sizeof(_prefs.bridge_secret);
 }
 
 bool MyMesh::setUDPBridgeNetworkState(bool enabled) {
@@ -15160,7 +15164,6 @@ void MyMesh::formatUDPBridgeStatus(char* reply, size_t capacity) {
       : _cli.getBoard()->isOTAUpdateRunning() ? "ota-paused"
       : udp_network_paused ? "paused"
       : !secret_length || secret_length >= sizeof(_prefs.bridge_secret) ? "no-secret"
-      : !peers ? "no-peers"
       : (WiFi.getMode() & WIFI_AP) ? "ap-mode"
       : udp_join.reason() == mesh::wifi::JoinReason::ApMoved
           || udp_join.reason() == mesh::wifi::JoinReason::WrongChannel
@@ -15272,7 +15275,16 @@ void MyMesh::serviceUDPBridge() {
   mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::UdpBridge, requested);
   if (!requested) {
     if (udp_bridge) udp_bridge->serviceNetwork(false);
-    udp_join.abandon(udp_join_driver);
+    if (!udpBridgeSwitchedOn() && udp_join.owned()) {
+      // `set udp.enabled off` (or no usable secret): leave the network this
+      // transport joined; the radio is back to the bridge alone, on its
+      // channel. A link MQTT or WebConfig made is never touched. A pause
+      // (WiFi master off, OTA) keeps the association to its own owners.
+      udp_join.stop(udp_join_driver);
+      memset(udp_station_password, 0, sizeof(udp_station_password));
+    } else {
+      udp_join.abandon(udp_join_driver);
+    }
     return;
   }
   if (!ensureUDPBridge()) return;
