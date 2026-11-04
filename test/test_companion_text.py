@@ -211,6 +211,7 @@ def build(work):
     cpp.write_text(HARNESS, encoding='ascii')
     exe = work / ('ctext' + ('.exe' if os.name == 'nt' else ''))
     built = subprocess.run([compiler, '-std=c++17', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
+                            '-DTOUCH_KEYBOARD_PC_LAYOUT=1',  # the Freenove head's keyboard
                             *sanitize, '-I', str(UI), '-I', str(UI_NEW), '-isystem', str(ROOT / 'src'),
                             '-isystem', str(ROOT / 'test' / 'mocks'), str(cpp), str(UI / 'FrameBuffer565.cpp'),
                             str(UI / 'FrameBuffer332.cpp'), str(UI / 'FbFonts.cpp'), str(UI / 'FbFontsAA.cpp'),

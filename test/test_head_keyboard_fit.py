@@ -76,14 +76,25 @@ static void check(const char* name, int w, int h, int top, int max_h, int min_ke
   if (expect_key_h > 0) CHECK(key_h == expect_key_h);
   CHECK(key_h >= min_key_h);                          // finger sized (logical px; 2x on the glass)
   CHECK(top + TouchKeyboard::kRows * key_h <= h);     // all four rows on the screen
+#if TOUCH_KEYBOARD_PC_LAYOUT
+  // PC: letters, 123, #+= (the bottom-left key); the shift key is the third
+  // row's left key on letters, abc on the symbol pages.
+  for (int page = 0; page < 3; page++) {
+#else
   for (int page = 0; page < 3; page++) {   // abc, ABC, 123
+#endif
     Recorder d(w, h);
     TouchKeyboard k;
     k.reset("", 100);
-    // Reach the mode: the mode key (third row, left) cycles abc ABC 123.
     k.draw(d, top, key_h, "OK");
+#if TOUCH_KEYBOARD_PC_LAYOUT
+    for (int i = 0; i < page; i++) k.touch(4, top + 3 * key_h + key_h / 2);
+    static const char* const kModes[3] = {"abc", "123", "#+="};
+#else
+    // Reach the mode: the mode key (third row, left) cycles abc ABC 123.
     for (int i = 0; i < page; i++) k.touch(4, top + 2 * key_h + key_h / 2);
     static const char* const kModes[3] = {"abc", "ABC", "123"};
+#endif
     CHECK(std::strcmp(k.modeLabel(), kModes[page]) == 0);
     d.rects.clear();
     k.draw(d, top, key_h, "OK");
@@ -167,6 +178,12 @@ def host_geometry():
 
 class KeyboardFitTest(unittest.TestCase):
     def test_keyboard_fits_and_only_drawn_keys_touch(self):
+        self.run_fit(False)
+
+    def test_keyboard_fits_pc_layout(self):
+        self.run_fit(True)
+
+    def run_fit(self, pc):
         compiler = shutil.which('g++') or shutil.which('clang++')
         if compiler is None:
             self.skipTest('a host C++17 compiler is required')
@@ -176,7 +193,8 @@ class KeyboardFitTest(unittest.TestCase):
             cpp.write_text(HARNESS, encoding='ascii')
             exe = Path(tmp) / ('kb' + ('.exe' if os.name == 'nt' else ''))
             at, am, ct, cm = host_geometry()
-            geometry = ['-DADMIN_TOP=%d' % at, '-DADMIN_MAX_H=%d' % am, '-DCOMPOSE_TOP=%d' % ct, '-DCOMPOSE_MAX_H=%d' % cm]
+            geometry = ['-DADMIN_TOP=%d' % at, '-DADMIN_MAX_H=%d' % am, '-DCOMPOSE_TOP=%d' % ct, '-DCOMPOSE_MAX_H=%d' % cm,
+                        '-DTOUCH_KEYBOARD_PC_LAYOUT=%d' % (1 if pc else 0)]
             built = subprocess.run([compiler, '-std=c++17', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                                     '-Wno-unused-parameter', *sanitize, *geometry, '-I', str(UI_NEW), '-I', str(ROOT / 'src'),
                                     '-I', str(ROOT / 'test'), str(cpp), '-o', str(exe)],
