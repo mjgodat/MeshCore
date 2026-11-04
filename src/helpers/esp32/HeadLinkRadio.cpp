@@ -31,7 +31,7 @@ public:
   HeadUdpLink(const hl::Config& cfg, ObserverSink sink, void* ctx)
       : _cfg(cfg), _sink(sink), _ctx(ctx), _join(kDiagnoseEveryMs) {
     _secret_len = (uint8_t)strnlen(cfg.secret, sizeof(cfg.secret));
-    _join.reset(millis());
+    _join.reset(_driver, millis());
     _driver.power_save = WIFI_PS_NONE;
     _driver.after_begin = ESPNOWRadio::forceLongRangeRate;
   }
