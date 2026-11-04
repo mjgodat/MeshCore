@@ -269,17 +269,21 @@ static void dedupe() {
 }
 
 static void diagnosis() {
-  const uint32_t f = 30000;
+  const uint32_t f = 30000, up = 600000;
   // ESP-NOW-only and both: never leave the channel
-  assert(!allChannelDiagnosisAllowed(Mode::EspNow, false, 0, f));
-  assert(!allChannelDiagnosisAllowed(Mode::Both, false, 0, f));
-  assert(!allChannelDiagnosisAllowed(Mode::Both, true, 999999, f));
+  assert(!allChannelDiagnosisAllowed(Mode::EspNow, false, 0, f, up));
+  assert(!allChannelDiagnosisAllowed(Mode::Both, false, 0, f, up));
+  assert(!allChannelDiagnosisAllowed(Mode::Both, true, 999999, f, up));
   // udp / auto: only while ESP-NOW is silent
   for (Mode m : {Mode::Udp, Mode::Auto}) {
-    assert(allChannelDiagnosisAllowed(m, false, 0, f));          // never heard
-    assert(!allChannelDiagnosisAllowed(m, true, 3000, f));       // healthy
-    assert(!allChannelDiagnosisAllowed(m, true, f - 1, f));
-    assert(allChannelDiagnosisAllowed(m, true, f, f));           // silent for the fail-over time
+    assert(allChannelDiagnosisAllowed(m, false, 0, f, up));          // never heard
+    assert(!allChannelDiagnosisAllowed(m, true, 3000, f, up));       // healthy
+    assert(!allChannelDiagnosisAllowed(m, true, f - 1, f, up));
+    assert(allChannelDiagnosisAllowed(m, true, f, f, up));           // silent for the fail-over time
+    // never heard is not yet "silent": the first scan waits one fail-over time after boot
+    assert(!allChannelDiagnosisAllowed(m, false, 0, f, 0));
+    assert(!allChannelDiagnosisAllowed(m, false, 0, f, f - 1));
+    assert(allChannelDiagnosisAllowed(m, false, 0, f, f));
   }
 }
 
@@ -339,6 +343,7 @@ class HeadTransportWiringTests(unittest.TestCase):
     def test_all_channel_diagnosis_follows_the_espnow_health(self):
         loop = method(self.radio, "void HeadLinkRadio::loop()")
         self.assertIn("_link->setDiagnoseAllowed(hl::allChannelDiagnosisAllowed(", loop)
+        self.assertIn("(uint32_t)_cfg.failover_s * 1000U, now)", loop)   # uptime gate
         self.assertLess(loop.index("setDiagnoseAllowed"), loop.index("_link->loop();"))
 
     def test_dedupe_only_when_both_transports_feed_the_ui(self):

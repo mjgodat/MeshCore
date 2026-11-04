@@ -440,7 +440,7 @@ void HeadLinkRadio::loop() {
     const uint32_t age = now - _espnow_vitals_at;
     portEXIT_CRITICAL(&_mux);
     _link->setDiagnoseAllowed(hl::allChannelDiagnosisAllowed(
-        _cfg.mode, seen, age, (uint32_t)_cfg.failover_s * 1000U));
+        _cfg.mode, seen, age, (uint32_t)_cfg.failover_s * 1000U, now));
   }
   _link->loop();
   if (_cfg.mode == hl::Mode::Auto) {
