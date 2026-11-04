@@ -12352,6 +12352,18 @@ void MyMesh::checkSerialInterface() {
 }
 
 void MyMesh::loop() {
+#if UI_REPEATER_HEAD && defined(HEAD_UDP_TRANSPORT) && HEAD_UDP_TRANSPORT
+  if (HeadLinkRadio* link = HeadLinkRadio::instance()) {
+    HeadLinkRadio::setIdentity(self_id.pub_key, _prefs.node_name);   // for discovery replies
+    // Discovery: the first repeater announced becomes home only when the head
+    // has none yet (adverts at 0 hops keep deciding as before).
+    uint8_t home[6];
+    if (link->takeAnnouncedHome(home)) {
+      headLoadHome();
+      if (!_head_home_valid) headNoteHome(home);
+    }
+  }
+#endif
 #if CARDPUTER_ADV_UI
   // Apply saved output masks before the first received packet, not only at
   // the end of the loop or after a later settings change.

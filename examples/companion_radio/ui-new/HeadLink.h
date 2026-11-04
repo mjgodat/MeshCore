@@ -97,8 +97,16 @@ class HeadLinkScreen : public UIScreen {
       case Item::Ssid: snprintf(out, cap, "WiFi: %s", c.ssid[0] ? c.ssid : "-"); break;
       case Item::Password: snprintf(out, cap, "WiFi password: %s", c.password[0] ? "set" : "-"); break;
       case Item::Repeater:
-        mesh::bridge::udp::formatPeer(c.repeater, peer, sizeof(peer));
-        snprintf(out, cap, "Repeater: %s", peer);
+        if (!c.repeater.enabled() && HeadLinkRadio::instance()->learnedPeer().enabled()) {
+          // udp.peer off: learned from the repeater's announces.
+          mesh::bridge::udp::formatPeer(HeadLinkRadio::instance()->learnedPeer(), peer, sizeof(peer));
+          snprintf(out, cap, "Repeater: auto %s", peer);
+        } else if (!c.repeater.enabled()) {
+          snprintf(out, cap, "Repeater: auto");
+        } else {
+          mesh::bridge::udp::formatPeer(c.repeater, peer, sizeof(peer));
+          snprintf(out, cap, "Repeater: %s", peer);
+        }
         break;
       case Item::Secret: snprintf(out, cap, "Secret: %s", c.secret[0] ? "set" : "-"); break;
       case Item::Port: snprintf(out, cap, "Head UDP port: %u", (unsigned)c.local_port); break;

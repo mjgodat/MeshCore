@@ -22,6 +22,7 @@
 
 #include <helpers/esp32/ESPNOWRadio.h>
 #include <helpers/HeadTransport.h>
+#include <helpers/HeadDiscovery.h>
 #include <helpers/bridges/UDPBridgeProtocol.h>
 #include <helpers/StationJoin.h>
 #include <freertos/FreeRTOS.h>
@@ -54,6 +55,14 @@ public:
 #endif
   static HeadLinkRadio* instance() { return _instance; }
 
+  // Discovery (HeadDiscovery.h): this head's key prefix and name for its
+  // replies; set once by the companion at boot.
+  static void setIdentity(const uint8_t* pub_key, const char* name);
+  // The repeater learned from announces (udp.peer off); port 0 = none yet.
+  const mesh::bridge::udp::Peer& learnedPeer() const { return _disc.learnedPeer(); }
+  // The first announced repeater, offered once as home (main loop).
+  bool takeAnnouncedHome(uint8_t out[6]) { return _disc.takeHome(out); }
+
 private:
   void ensureLoaded();
   bool save();
@@ -63,6 +72,10 @@ private:
   static void onEspNowObserver(const uint8_t* frame, size_t len, void* ctx);
   static void onUdpObserver(const uint8_t* frame, size_t len, void* ctx);
   void deliverObserver(const uint8_t* frame, size_t len, bool via_espnow);
+  static void onEspNowDiscovery(const uint8_t* frame, size_t len, void* ctx);
+  static void onUdpDiscovery(const uint8_t* frame, size_t len, const uint8_t ip[4], uint16_t port, void* ctx);
+  void queueDiscovery(const uint8_t* frame, size_t len, const uint8_t* ip, uint16_t port, bool via_espnow);
+  void serviceDiscovery();
 
   static HeadLinkRadio* _instance;
   mesh::headlink::Config _cfg;
@@ -76,6 +89,19 @@ private:
   uint32_t _espnow_vitals_at = 0, _udp_vitals_at = 0;
   bool _espnow_vitals_seen = false, _udp_vitals_seen = false;
   portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
+  // Announces handed over by the WiFi task (ESP-NOW) or the UDP link, under _mux.
+  struct PendingAnnounce {
+    uint8_t frame[mesh::discovery::MAX_FRAME];
+    uint8_t len;
+    uint8_t ip[4];
+    uint16_t port;
+    bool via_espnow;
+  };
+  static const uint8_t kPendingAnnounces = 2;
+  PendingAnnounce _pending[kPendingAnnounces];
+  uint8_t _pending_count = 0;
+  mesh::headlink::HeadDiscovery _disc;
+  uint32_t _disc_bad = 0;
 };
 
 #endif

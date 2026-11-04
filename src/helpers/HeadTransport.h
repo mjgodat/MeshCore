@@ -69,9 +69,11 @@ struct Config {
   uint16_t failover_s = kDefaultFailoverS;
 };
 
-// Everything UDP needs: network, repeater address and the shared secret.
+// Everything UDP needs: network and the shared secret. The repeater's
+// address is udp.peer, or (udp.peer off) learned from its announces
+// (HeadDiscovery.h).
 inline bool udpConfigured(const Config& c) {
-  return c.ssid[0] && c.secret[0] && c.repeater.enabled() && c.local_port;
+  return c.ssid[0] && c.secret[0] && c.local_port;
 }
 
 // ---- NVS image ---------------------------------------------------------------
@@ -257,6 +259,15 @@ struct Status {
   uint8_t local_ip[4] = {};
   uint32_t espnow_vitals_age_s = UINT32_MAX;   // UINT32_MAX = none yet
   uint32_t udp_vitals_age_s = UINT32_MAX;
+  // The repeater's latest verified announce (discovery), if any.
+  bool announce_seen = false;
+  char announce_name[17] = {};
+  uint8_t announce_channel = 0, announce_format = 0;   // its ESP-NOW channel and format (0 raw, 1 wrapped)
+  uint32_t announce_age_s = UINT32_MAX;
+  // udp.peer off: the repeater address learned from the announces.
+  bool peer_auto = false;
+  uint8_t peer_ip[4] = {};
+  uint16_t peer_port = 0;
 };
 
 // Which transport carries this head's outgoing mesh packets right now.
@@ -275,23 +286,40 @@ inline void formatAge(char* out, size_t cap, uint32_t age_s) {
 }
 
 // `get transport`: "> auto via espnow; espnow ch 6 vitals 3s; udp ready 192.168.1.60 vitals 4s"
+// Appended when known: "; repeater <name> ch 6 wrapped 3s" (its latest
+// verified announce) and ", udp.peer auto 192.168.1.50:4404" (learned).
+inline void formatAnnounce(const Config& c, const Status& s, char* out, size_t cap) {
+  if (!s.announce_seen || !cap) return;
+  char age[12];
+  formatAge(age, sizeof(age), s.announce_age_s);
+  int n = snprintf(out, cap, "; repeater %s ch %u %s %s", s.announce_name[0] ? s.announce_name : "?",
+                   (unsigned)s.announce_channel, s.announce_format ? "wrapped" : "raw", age);
+  if (n < 0 || (size_t)n >= cap) return;
+  if (!c.repeater.enabled() && s.peer_auto && s.peer_port)
+    snprintf(out + n, cap - n, ", udp.peer auto %u.%u.%u.%u:%u", s.peer_ip[0], s.peer_ip[1], s.peer_ip[2],
+             s.peer_ip[3], (unsigned)s.peer_port);
+}
+
 inline void formatStatus(const Config& c, const Status& s, char* out, size_t cap) {
   char ev[12], uv[12];
   formatAge(ev, sizeof(ev), s.espnow_vitals_age_s);
   formatAge(uv, sizeof(uv), s.udp_vitals_age_s);
+  int n;
   if (c.mode == Mode::EspNow) {
-    snprintf(out, cap, "> espnow; ch %u vitals %s", (unsigned)s.espnow_channel, ev);
-    return;
+    n = snprintf(out, cap, "> espnow; ch %u vitals %s", (unsigned)s.espnow_channel, ev);
+  } else {
+    n = snprintf(out, cap, "> %s via %s; espnow ch %u vitals %s; udp %s", modeName(c.mode),
+                 activeName(c, s), (unsigned)s.espnow_channel, ev, linkStateName(s.udp));
+    if (n < 0 || (size_t)n >= cap) return;
+    if (s.udp == LinkState::WrongChannel) {
+      n += snprintf(out + n, cap - n, " (AP on ch %u)", (unsigned)s.ap_channel);
+    } else if (s.udp == LinkState::Connected || s.udp == LinkState::Ready) {
+      n += snprintf(out + n, cap - n, " %u.%u.%u.%u:%u vitals %s", s.local_ip[0], s.local_ip[1],
+                    s.local_ip[2], s.local_ip[3], (unsigned)c.local_port, uv);
+    }
   }
-  int n = snprintf(out, cap, "> %s via %s; espnow ch %u vitals %s; udp %s", modeName(c.mode),
-                   activeName(c, s), (unsigned)s.espnow_channel, ev, linkStateName(s.udp));
   if (n < 0 || (size_t)n >= cap) return;
-  if (s.udp == LinkState::WrongChannel) {
-    snprintf(out + n, cap - n, " (AP on ch %u)", (unsigned)s.ap_channel);
-  } else if (s.udp == LinkState::Connected || s.udp == LinkState::Ready) {
-    snprintf(out + n, cap - n, " %u.%u.%u.%u:%u vitals %s", s.local_ip[0], s.local_ip[1],
-             s.local_ip[2], s.local_ip[3], (unsigned)c.local_port, uv);
-  }
+  formatAnnounce(c, s, out + n, cap - n);
 }
 
 // Masked: the password and the secret are only ever "set" / "-".
@@ -373,7 +401,7 @@ inline Result handleCommand(Config& c, const char* command, char* reply, size_t 
     }
     c.mode = m;
     snprintf(reply, cap, "OK - transport %s%s", modeName(m),
-             usesWiFi(m) && !udpConfigured(c) ? "; set udp.ssid, udp.peer and udp.secret" : "");
+             usesWiFi(m) && !udpConfigured(c) ? "; set udp.ssid and udp.secret" : "");
     return Result::Changed;
   }
   if ((v = valueAfter(command, "get udp"))) {
