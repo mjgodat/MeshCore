@@ -60,10 +60,13 @@ static_assert(MAX_RAW_WRAPPED == 231 && VITALS_FRAME <= MAX_WRAPPED_FRAME, "wrap
 // decoder accepts any length from HEALTH_FRAME_V1 up to MAX_WRAPPED_FRAME,
 // ignoring bytes it does not know; a later version only appends fields.
 constexpr uint8_t HEALTH_BODY_VERSION = 1;
+// uptime_s makes every frame unique: a head on `transport both` drops
+// byte-identical observer frames as the other transport's copy
+// (HeadTransport.h FrameDeduper), and the heap often stays the same.
 // Reset reason: the ESP-IDF esp_reset_reason_t value (0 = unknown); the
 // numbers are stable in IDF 4.4 and 5.x (resetReasonName below).
-struct Health { uint32_t free_heap, min_free_heap, largest_block; uint8_t reset_reason; };
-constexpr size_t HEALTH_FRAME_V1 = HEADER_SIZE + 1 + 4 + 4 + 4 + 1;
+struct Health { uint32_t uptime_s, free_heap, min_free_heap, largest_block; uint8_t reset_reason; };
+constexpr size_t HEALTH_FRAME_V1 = HEADER_SIZE + 1 + 4 + 4 + 4 + 4 + 1;
 static_assert(HEALTH_FRAME_V1 <= MAX_WRAPPED_FRAME, "health fits a wrapped frame");
 
 namespace detail {
@@ -140,7 +143,7 @@ inline size_t encodeHealth(const Health& h, uint8_t* out, size_t cap) {
   detail::W w{out, 0};
   w.head(Kind::Health);
   w.u8(HEALTH_BODY_VERSION);
-  w.u32(h.free_heap); w.u32(h.min_free_heap); w.u32(h.largest_block); w.u8(h.reset_reason);
+  w.u32(h.uptime_s); w.u32(h.free_heap); w.u32(h.min_free_heap); w.u32(h.largest_block); w.u8(h.reset_reason);
   return w.i;
 }
 
@@ -151,7 +154,7 @@ inline bool decodeHealth(const uint8_t* buf, size_t len, Health& out) {
   detail::R r{buf, HEADER_SIZE};
   if (r.u8() == 0) return false;
   Health h;
-  h.free_heap = r.u32(); h.min_free_heap = r.u32(); h.largest_block = r.u32(); h.reset_reason = r.u8();
+  h.uptime_s = r.u32(); h.free_heap = r.u32(); h.min_free_heap = r.u32(); h.largest_block = r.u32(); h.reset_reason = r.u8();
   out = h;
   return true;
 }

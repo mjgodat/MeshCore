@@ -337,7 +337,8 @@ class ObserverTransportWiringTests(unittest.TestCase):
         cls.udp = (ROOT / "src/helpers/bridges/UDPBridge.cpp").read_text()
 
     def test_repeater_offers_every_frame_through_the_fanout(self):
-        self.assertEqual(self.repeater.count("offerObserverFrame(frame, frame_len)"), 2)
+        # packet records, vitals and health frames (reliability round)
+        self.assertEqual(self.repeater.count("offerObserverFrame(frame, frame_len)"), 3)
         self.assertNotIn("sendObserverFrame(", self.repeater)
         offer = method(self.repeater, "void MyMesh::offerObserverFrame(")
         self.assertIn("_observer_fanout.offer(", offer)
