@@ -68,7 +68,7 @@ namespace mesh { namespace wifi {
 // StationJoin driver over the fake WiFi: no ESP-NOW channel to protect here
 // (test_station_join.py covers the constrained, scanning path).
 struct FakeJoinDriver {
- wifi_ps_type_t power_save=WIFI_PS_NONE;
+ wifi_ps_type_t power_save=WIFI_PS_NONE;uint8_t pinned_channel=0;
  uint8_t espNowChannel(){return 0;}
  bool mutationAllowed(){return mesh::wifi::stationMutationAllowed();}
  bool startScan(uint8_t,const char*){return false;}
@@ -116,6 +116,8 @@ struct MyMesh {
  UDPBridge*udp_bridge=nullptr;uint32_t udp_station_retry_at=0;bool udp_network_paused=false;
  mesh::wifi::StationJoin<FakeJoinDriver> udp_join;FakeJoinDriver udp_join_driver;
  char udp_station_ssid[33]={};char udp_station_password[65]={};void loadUDPStationCredentials();
+ bool udp_bridge_restart_wanted=false;uint32_t udp_bridge_restart_at=0;
+ uint8_t udpPinnedEspNowChannel() const {return 0;}
  MQTT* mqtt_bridge=nullptr;bool web_active=false,web_stopping=false;
  WebConfig* _webconfig=nullptr;
  ~MyMesh(){delete udp_bridge;}

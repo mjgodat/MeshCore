@@ -2304,12 +2304,22 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
   WRITE_COMMON_PREFS(&prefs->bridge_uart);                     // 862
   WRITE_COMMON_PREFS(&prefs->bridge_format);                   // 863
   WRITE_COMMON_PREFS(&prefs->primary_radio_preamble);          // appended primary tuple field
+#if defined(WITH_ESPNOW_BRIDGE) && !defined(ESPNOW_BRIDGE_MERGED) \
+    && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+  const uint8_t espnow_intent = prefs->bridge_enabled ? 1 : 0;   // dedicated bridge = ESP-NOW intent
+  WRITE_COMMON_PREFS(&espnow_intent);
+#else
   WRITE_COMMON_PREFS(&prefs->espnow_bridge_enabled);           // appended Full ESP-NOW intent
+#endif
   WRITE_COMMON_PREFS(&prefs->gps_sync_interval_hours);          // published GPS sync cadence
   WRITE_COMMON_PREFS(&prefs->usb_debug_enabled);               // appended USB debug intent
   WRITE_COMMON_PREFS(&prefs->trace_when_repeat_off);            // appended repeater trace exception
   WRITE_COMMON_PREFS(&prefs->ota_channel);                     // appended WiFi OTA channel; never shift older fields
-#ifdef ESPNOW_BRIDGE_MERGED
+#if defined(ESPNOW_BRIDGE_MERGED) || (defined(WITH_ESPNOW_BRIDGE) \
+    && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE))
+  // A dedicated ESP-NOW bridge image writes its bridge intent as the explicit
+  // ESP-NOW intent too, so a Full (merged) image flashed over it later keeps
+  // the bridge on (2026-11-03: the M5 came back with the bridge off).
   const uint8_t bridge_profile = 0xA1;
 #else
   const uint8_t bridge_profile = 0;
@@ -2564,13 +2574,20 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     file.write((uint8_t *)&_prefs->bridge_uart, sizeof(_prefs->bridge_uart));                       // 862
     file.write((uint8_t *)&_prefs->bridge_format, sizeof(_prefs->bridge_format));                   // 863
     file.write((uint8_t *)&_prefs->primary_radio_preamble, sizeof(_prefs->primary_radio_preamble)); // appended
+#if defined(WITH_ESPNOW_BRIDGE) && !defined(ESPNOW_BRIDGE_MERGED) \
+    && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+    const uint8_t espnow_intent = _prefs->bridge_enabled ? 1 : 0;   // dedicated bridge = ESP-NOW intent
+    file.write(&espnow_intent, sizeof(espnow_intent));                                            // appended
+#else
     file.write((uint8_t *)&_prefs->espnow_bridge_enabled, sizeof(_prefs->espnow_bridge_enabled));   // appended
+#endif
     file.write((uint8_t *)&_prefs->gps_sync_interval_hours, sizeof(_prefs->gps_sync_interval_hours)); // published GPS sync cadence
     file.write((uint8_t *)&_prefs->usb_debug_enabled, sizeof(_prefs->usb_debug_enabled));           // appended
     file.write((uint8_t *)&_prefs->trace_when_repeat_off, sizeof(_prefs->trace_when_repeat_off));   // appended
     file.write((uint8_t *)&_prefs->ota_channel, sizeof(_prefs->ota_channel));                       // appended WiFi OTA channel
-#ifdef ESPNOW_BRIDGE_MERGED
-    const uint8_t bridge_profile = 0xA1;
+#if defined(ESPNOW_BRIDGE_MERGED) || (defined(WITH_ESPNOW_BRIDGE) \
+    && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE))
+    const uint8_t bridge_profile = 0xA1;   // see writeCommonPrefs
 #else
     const uint8_t bridge_profile = 0;
 #endif

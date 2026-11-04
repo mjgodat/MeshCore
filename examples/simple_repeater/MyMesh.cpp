@@ -12186,7 +12186,11 @@ bool MyMesh::getWiFiCLI(char* reply) const {
 }
 
 bool MyMesh::setWiFiSSID(const char* value, char* reply) {
+  const bool clearing = value && (!value[0] || !strcmp(value, "off"));
   if (WebConfigServer::setStandaloneWiFiSSID(value, reply, 160, canonicalWiFiLegacyPrefs())) {
+#ifdef WITH_UDP_BRIDGE
+    if (clearing) forgetUDPStationCredentials();
+#endif
     if (_webconfig) {
       _webconfig->reloadStandaloneWiFi();
       _webconfig->requestRestart();
@@ -12195,7 +12199,7 @@ bool MyMesh::setWiFiSSID(const char* value, char* reply) {
     if (_prefs.bridge_enabled && mqtt_bridge
         && !_cli.getBoard()->isOTAUpdateRunning()) mqtt_bridge->requestRestart();
 #endif
-    strcpy(reply, "OK - WiFi SSID saved; reconnect scheduled");
+    strcpy(reply, clearing ? "OK - WiFi network cleared" : "OK - WiFi SSID saved; reconnect scheduled");
   }
   return true;
 }
@@ -15157,6 +15161,7 @@ void MyMesh::formatUDPBridgeStatus(char* reply, size_t capacity) {
       : !peers ? "no-peers"
       : (WiFi.getMode() & WIFI_AP) ? "ap-mode"
       : udp_join.reason() == mesh::wifi::JoinReason::ApMoved
+          || udp_join.reason() == mesh::wifi::JoinReason::WrongChannel
           || udp_join.reason() == mesh::wifi::JoinReason::NotOnChannel
           || udp_join.reason() == mesh::wifi::JoinReason::NoCredentials
           || udp_join.reason() == mesh::wifi::JoinReason::JoinTimeout
@@ -15188,6 +15193,46 @@ bool MyMesh::sendUDPBridgeTest(uint8_t peer_index, uint32_t nonce) {
 bool MyMesh::resetUDPBridgeStats() {
   if (udp_bridge) udp_bridge->resetStats();
   return true;
+}
+
+uint8_t MyMesh::udpPinnedEspNowChannel() const {
+#if defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
+  const bool wanted = _prefs.espnow_bridge_enabled != 0;
+#else
+  const bool wanted = _prefs.bridge_enabled != 0;
+#endif
+  return wanted && mesh::wifi::isValidEspNowChannel(_prefs.bridge_channel) ? _prefs.bridge_channel : 0;
+#else
+  return 0;
+#endif
+}
+
+void MyMesh::prepareUdpForBridgeChannel() {
+  udp_join_driver.pinned_channel = udpPinnedEspNowChannel();
+  const uint8_t channel = udp_join_driver.pinned_channel;
+  if (!channel) return;
+  udp_bridge_restart_wanted = true;   // serviceUDPBridge retries until it runs
+  udp_bridge_restart_at = millis() + 2000U;
+  if (!(WiFi.getMode() & WIFI_STA) || WiFi.status() != WL_CONNECTED
+      || static_cast<uint8_t>(WiFi.channel()) == channel) return;
+#ifdef WITH_MQTT_BRIDGE
+  // An MQTT-owned station keeps its own channel policy.
+  if (mqtt_bridge && (mqtt_bridge->isRunning() || mqtt_bridge->isStopping())) return;
+#endif
+  // The ESP-NOW channel wins: drop WiFi (UDP pauses, wrong-channel) and let
+  // the bridge take the new channel. Bounded wait for the disassociation.
+  udp_join.dropForChannelChange(udp_join_driver, millis());
+  wifi_ap_record_t ap = {};
+  for (int i = 0; i < 100 && esp_wifi_sta_get_ap_info(&ap) == ESP_OK; ++i) delay(1);
+  udp_join_driver.restoreChannel();
+}
+
+void MyMesh::forgetUDPStationCredentials() {
+  memset(udp_station_password, 0, sizeof(udp_station_password));
+  memset(udp_station_ssid, 0, sizeof(udp_station_ssid));
+  udp_join.stop(udp_join_driver);
+  udp_join.reset(udp_join_driver, millis());
 }
 
 void MyMesh::loadUDPStationCredentials() {
@@ -15226,6 +15271,22 @@ void MyMesh::serviceUDPBridge() {
     return;
   }
   if (!ensureUDPBridge()) return;
+  udp_join_driver.pinned_channel = udpPinnedEspNowChannel();
+#if defined(WITH_ESPNOW_BRIDGE)
+  // A bridge restart that lost a race with the disassociation is retried
+  // here, never left stopped (and nothing is ever saved as off).
+  if (udp_bridge_restart_wanted) {
+    if (isEspNowBridgeRunning() || !udpPinnedEspNowChannel()) udp_bridge_restart_wanted = false;
+    else if (millisHasNowPassed(udp_bridge_restart_at) && !_cli.getBoard()->isOTAUpdateRunning()) {
+      udp_bridge_restart_at = millis() + 2000U;
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
+      setEspNowBridgeState(true);
+#else
+      restartBridge();
+#endif
+    }
+  }
+#endif
   wifi_mode_t sdk_mode = WIFI_MODE_NULL;
   const bool linked = WiFi.getMode() == WIFI_STA
       && esp_wifi_get_mode(&sdk_mode) == ESP_OK && sdk_mode == WIFI_MODE_STA

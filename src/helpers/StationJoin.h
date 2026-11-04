@@ -46,7 +46,8 @@ enum class JoinReason : uint8_t {
   NotOnChannel,   // network not found on the ESP-NOW channel
   ApMoved,        // was joined; the access point left the ESP-NOW channel
   JoinTimeout,    // found but did not associate / get an address in time
-  ScanFailed
+  ScanFailed,
+  WrongChannel    // dropped: the ESP-NOW channel was changed away from the AP's
 };
 
 inline const char* joinReasonName(JoinReason r) {
@@ -57,6 +58,7 @@ inline const char* joinReasonName(JoinReason r) {
     case JoinReason::ApMoved: return "ap-moved-off-espnow-channel";
     case JoinReason::JoinTimeout: return "join-timeout";
     case JoinReason::ScanFailed: return "scan-failed";
+    case JoinReason::WrongChannel: return "wrong-channel";
     default: return "none";
   }
 }
@@ -108,6 +110,21 @@ public:
     if (_state != JoinState::Idle || d.linkUp()) { d.disconnect(); d.restoreChannel(); }
     _state = JoinState::Idle;
     _owned = false;
+  }
+
+  // The ESP-NOW channel is being moved away from the joined access point
+  // (`set bridge.channel`): drop the association so ESP-NOW can take the new
+  // channel, report wrong-channel, and back off. Rejoins only on the new
+  // channel (the next scan looks there only).
+  void dropForChannelChange(Driver& d, uint32_t now) {
+    if (_state == JoinState::Scanning || _state == JoinState::Diagnosing) cancelScan(d);
+    if (d.linkUp() || _state == JoinState::Joining || _state == JoinState::Connected) d.disconnect();
+    d.restoreChannel();
+    _owned = false;
+    _state = JoinState::Idle;
+    _reason = JoinReason::WrongChannel;
+    _backoff = kFirstBackoffMs;
+    fail(now);
   }
 
   // True when poll() will need the credentials on its next call (they can be
