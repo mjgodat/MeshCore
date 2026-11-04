@@ -82,6 +82,16 @@ public:
   bool ready() const { return _socket >= 0 && _session.remote; }
   void setDiagnoseAllowed(bool allowed) { _join.setDiagnoseAllowed(allowed); }
   uint8_t apChannel() const { return _join.apChannel(); }
+#ifdef FREENOVE_UITEST
+  void joinDebug(char* out, size_t cap) {
+    snprintf(out, cap, "JOIN state=%u reason=%s ap=%u ch=%u scan=%d pending=%d diag=%d diag_at=%lu retry_in=%ld backoff=%lu link=%d now=%lu",
+             (unsigned)_join.state(), mesh::wifi::joinReasonName(_join.reason()), (unsigned)_join.apChannel(),
+             (unsigned)_driver.espNowChannel(), _driver.scanResult(), (int)_join.scanPending(),
+             (int)_join.diagnoseAllowed(), (unsigned long)_join.diagnosedAt(),
+             (long)(_join.retryAt() - millis()), (unsigned long)_join.backoffMs(), (int)_driver.linkUp(),
+             (unsigned long)millis());
+  }
+#endif
   uint32_t localAddress() const { return _local; }
 
 private:
@@ -314,6 +324,13 @@ bool HeadLinkRadio::sendingEspNow() const {
   return _cfg.mode == hl::Mode::EspNow || _cfg.mode == hl::Mode::Both
       || (_cfg.mode == hl::Mode::Auto && !_auto.onUdp());
 }
+
+#ifdef FREENOVE_UITEST
+void HeadLinkRadio::joinDebug(char* out, size_t cap) {
+  if (_link) _link->joinDebug(out, cap);
+  else snprintf(out, cap, "JOIN no-link");
+}
+#endif
 
 void HeadLinkRadio::status(hl::Status& s) {
   ensureLoaded();

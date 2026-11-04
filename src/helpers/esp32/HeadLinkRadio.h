@@ -49,6 +49,9 @@ public:
 
   const mesh::headlink::Config& config();
   void status(mesh::headlink::Status& out);
+#ifdef FREENOVE_UITEST
+  void joinDebug(char* out, size_t cap);
+#endif
   static HeadLinkRadio* instance() { return _instance; }
 
 private:
