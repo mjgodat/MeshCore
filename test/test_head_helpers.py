@@ -192,6 +192,56 @@ int main() {
 '''
 
 
+# The PC layout (TOUCH_KEYBOARD_PC_LAYOUT=1, the Freenove head): the same
+# drawn-keys harness as KEYBOARD_HARNESS, with this main().
+KEYBOARD_PC_MAIN = r'''
+int main() {
+  TouchKeyboard k;
+  k.reset("", 3);
+  CHECK(std::strcmp(k.modeLabel(), "abc") == 0);
+  CHECK(tap(k, 5, 5) == R::Changed);           // q
+  CHECK(std::strcmp(k.text(), "q") == 0);
+  CHECK(tap(k, 2, 49) == R::Changed);          // shift (left of z row)
+  CHECK(std::strcmp(k.modeLabel(), "ABC") == 0);
+  CHECK(tap(k, 21, 5) == R::Changed);          // w -> W, shift releases
+  CHECK(std::strcmp(k.modeLabel(), "abc") == 0);
+  CHECK(tap(k, 37, 5) == R::Changed);          // e
+  CHECK(std::strcmp(k.text(), "qWe") == 0);
+  CHECK(tap(k, 53, 5) == R::Changed);          // r ignored: max length 3
+  CHECK(std::strcmp(k.text(), "qWe") == 0);
+  CHECK(tap(k, 150, 49) == R::Changed);        // delete
+  CHECK(std::strcmp(k.text(), "qW") == 0);
+  CHECK(tap(k, 40, 71) == R::Changed);         // space (2u..6u)
+  CHECK(std::strcmp(k.text(), "qW ") == 0);
+  CHECK(tap(k, 100, 71) == R::Cancel);         // X (6u..7.5u)
+  CHECK(tap(k, 150, 71) == R::Submit);
+  CHECK(tap(k, 80, 200) == R::None);           // below the keyboard
+  k.reset("", 10);
+  CHECK(tap(k, 5, 71) == R::Changed);          // 123 (bottom left)
+  CHECK(std::strcmp(k.modeLabel(), "123") == 0);
+  CHECK(tap(k, 5, 5) == R::Changed);           // 1
+  CHECK(tap(k, 21, 5) == R::Changed);          // 2
+  CHECK(tap(k, 5, 27) == R::Changed);          // ! (shifted 1)
+  CHECK(tap(k, 21, 27) == R::Changed);         // @ (shifted 2)
+  CHECK(tap(k, 5, 71) == R::Changed);          // #+= page
+  CHECK(std::strcmp(k.modeLabel(), "#+=") == 0);
+  CHECK(tap(k, 5, 5) == R::Changed);           // ~
+  CHECK(tap(k, 2, 49) == R::Changed);          // abc: back to letters
+  CHECK(std::strcmp(k.modeLabel(), "abc") == 0);
+  CHECK(tap(k, 5, 5) == R::Changed);           // q
+  CHECK(std::strcmp(k.text(), "12!@~q") == 0);
+  TouchKeyboard undrawn;
+  CHECK(undrawn.touch(5, 5) == R::None);       // nothing drawn: nothing to touch
+  k.reset("abcdefghijklmnop", 5);              // initial text is clamped
+  CHECK(std::strcmp(k.text(), "abcde") == 0);
+  CHECK(k.length() == 5);
+  if (failures) return 1;
+  std::printf("PASS keyboard_pc\n");
+  return 0;
+}
+'''
+
+
 NODES_HARNESS = r'''
 #include <helpers/bridges/ESPNowNodeTable.h>
 #include <cstdio>
@@ -386,6 +436,20 @@ class HeadHelpersTest(unittest.TestCase):
             '"../examples/companion_radio/ui-new/TouchKeyboard.h"',
             '"' + (ROOT / 'examples/companion_radio/ui-new/TouchKeyboard.h').as_posix() + '"'),
             'PASS keyboard', ('-Wno-unused-parameter',))
+
+    def test_touch_keyboard_pc_layout(self):
+        harness = KEYBOARD_HARNESS[:KEYBOARD_HARNESS.index('int main() {')] + KEYBOARD_PC_MAIN
+        self.build_and_run('keyboard_pc', harness.replace(
+            '"../examples/companion_radio/ui-new/TouchKeyboard.h"',
+            '"' + (ROOT / 'examples/companion_radio/ui-new/TouchKeyboard.h').as_posix() + '"'),
+            'PASS keyboard_pc', ('-Wno-unused-parameter', '-DTOUCH_KEYBOARD_PC_LAYOUT=1'))
+
+    def test_keyboard_layout_per_head(self):
+        # The Freenove head keeps the PC layout; the CYD the mode key.
+        fn = (ROOT / 'variants' / 'freenove_s3_35_head' / 'platformio.ini').read_text(encoding='utf-8')
+        cyd = (ROOT / 'variants' / 'cyd_espnow_head' / 'platformio.ini').read_text(encoding='utf-8')
+        self.assertIn('-D TOUCH_KEYBOARD_PC_LAYOUT=1', fn)
+        self.assertNotIn('TOUCH_KEYBOARD_PC_LAYOUT', cyd)
 
     def test_preset_reply_parsing(self):
         self.build_and_run('presets', PRESETS_HARNESS.replace(

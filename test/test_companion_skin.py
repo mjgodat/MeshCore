@@ -345,8 +345,7 @@ static int preview(const char* dir) {
     drawHeaderButton(d, 80, 160, "As:CaptCallahan");
     TouchKeyboard kb; kb.reset("Test Ab");
     { HostDisplay s; kb.draw(s, 32, 22, "Send"); }   // drawn keys only: draw, then tap
-    kb.touch(4, 32 + 2 * 22 + 10);                  // mode: ABC
-    kb.touch(4, 32 + 2 * 22 + 10);                  // mode: 123
+    kb.touch(10, 32 + 3 * 22 + 10);                 // 123 (the Freenove's PC layout)
     d.setColor(UIColor::primary_txt); kb.drawText(d, 21);
     d.setColor(UIColor::secondary_txt); d.drawRect(0, 19, 240, 12);
     kb.draw(d, 32, 22, "Send");
@@ -391,6 +390,7 @@ def build(work):
     cpp.write_text(HARNESS, encoding='ascii')
     exe = work / ('cskin' + ('.exe' if os.name == 'nt' else ''))
     built = subprocess.run([compiler, '-std=c++17', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
+                            '-DTOUCH_KEYBOARD_PC_LAYOUT=1',  # the Freenove head's keyboard
                             *sanitize, '-I', str(UI), '-I', str(UI_NEW), '-isystem', str(ROOT / 'src'),
                             '-isystem', str(ROOT / 'test' / 'mocks'), str(cpp), str(UI / 'FrameBuffer565.cpp'),
                             str(UI / 'FrameBuffer332.cpp'), str(UI / 'FbFonts.cpp'), str(UI / 'FbFontsAA.cpp'),
