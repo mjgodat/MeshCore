@@ -262,6 +262,23 @@ int main() {
     Sim w; w.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> x; w.now = 0xFFFFF000u; x.reset(w, w.now);
     run(w, x, 10000); assert(x.connected());
   }
+  // 12) `set bridge.channel` away from the joined AP: WiFi is dropped
+  //     (wrong-channel), the radio goes to the new channel, and the station
+  //     rejoins only on that channel (the AP is not there: it stays off)
+  {
+    Sim s; s.aps = {{"Home", 6, -50, 1}}; StationJoin<Sim> j; j.reset(s, 0);
+    run(s, j, 5000);
+    assert(j.connected() && s.linked);
+    s.espnow = 2;                          // the bridge's new channel
+    j.dropForChannelChange(s, s.now);
+    assert(!s.linked && !j.connected() && j.reason() == JoinReason::WrongChannel && s.radio_channel == 2);
+    const int begins = s.begins;
+    run(s, j, 300000, 20);
+    assert(s.begins == begins && !s.linked && s.radio_channel == 2);
+    s.aps[0].channel = 2;                  // the router follows to channel 2
+    run(s, j, 130000, 20);
+    assert(j.connected() && s.link_channel == 2);
+  }
   std::printf("worst poll %.2f ms\n", worst);
   return 0;
 }
@@ -271,6 +288,57 @@ int main() {
 class StationJoinTests(unittest.TestCase):
     def test_never_blocks_never_leaves_the_espnow_channel(self):
         build_and_run(self, CHECKS)
+
+
+class BridgeChannelChangeTests(unittest.TestCase):
+    """`set bridge.channel` while the UDP station is joined (2026-11-03 step 6)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repeater = (ROOT / "examples/simple_repeater/MyMesh.cpp").read_text()
+        cls.header = (ROOT / "examples/simple_repeater/MyMesh.h").read_text()
+        cls.cli = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
+        cls.bridge = (ROOT / "src/helpers/bridges/ESPNowBridge.cpp").read_text()
+
+    def test_every_espnow_bridge_start_drops_an_off_channel_udp_station_first(self):
+        for anchor in ("    configureBridgeFilter(active_bridge);\n    active_bridge->begin();",
+                       "    configureBridgeFilter(&espnow_bridge);\n    espnow_bridge.begin();"):
+            at = self.header.index(anchor)
+            self.assertIn("prepareUdpForBridgeChannel();", self.header[at - 160:at])
+        prep = method(self.repeater, "void MyMesh::prepareUdpForBridgeChannel()")
+        self.assertIn("udp_join.dropForChannelChange(udp_join_driver, millis());", prep)
+        self.assertIn("udp_bridge_restart_wanted = true;", prep)
+        self.assertIn("udp_join_driver.restoreChannel();", prep)
+
+    def test_failed_restart_is_retried_and_never_saved_off(self):
+        body = method(self.cli, "void CommonCLI::handleSetCmd(")
+        start = body.index('memcmp(config, "bridge.channel ", 15)')
+        handler = body[start:body.index('memcmp(config, "bridge.secret ", 14)')]
+        self.assertNotIn("bridge_enabled =", handler)
+        self.assertNotIn("bridge_enabled=", handler)
+        service = method(self.repeater, "void MyMesh::serviceUDPBridge()")
+        self.assertIn("if (udp_bridge_restart_wanted)", service)
+        self.assertIn("udp_join_driver.pinned_channel = udpPinnedEspNowChannel();", service)
+
+    def test_idle_station_never_blocks_the_bridge_channel(self):
+        begin = method(self.bridge, "void ESPNowBridge::begin()")
+        self.assertIn("esp_wifi_sta_get_ap_info(&associated_ap) != ESP_OK", begin)
+
+    def test_dedicated_bridge_image_writes_the_espnow_intent_marker(self):
+        for marker in ("const uint8_t bridge_profile = 0xA1;", "const uint8_t bridge_profile = 0xA1;   // see"):
+            self.assertIn(marker, self.cli)
+        self.assertEqual(self.cli.count("const uint8_t espnow_intent = "), 2)
+
+    def test_wifi_ssid_clear_wipes_the_udp_station_copies(self):
+        ssid = method(self.repeater, "bool MyMesh::setWiFiSSID(")
+        self.assertIn('!strcmp(value, "off")', ssid)
+        self.assertIn("forgetUDPStationCredentials();", ssid)
+        forget = method(self.repeater, "void MyMesh::forgetUDPStationCredentials()")
+        self.assertIn("memset(udp_station_password, 0, sizeof(udp_station_password));", forget)
+        web = (ROOT / "src/helpers/esp32/WebConfigServer.cpp").read_text()
+        clear = method(web, "bool WebConfigServer::setStandaloneWiFiSSID(")
+        self.assertIn("standalone_clear", clear)
+        self.assertIn("memset(credentials.password, 0, sizeof(credentials.password));", clear)
 
 
 class StationJoinWiringTests(unittest.TestCase):
