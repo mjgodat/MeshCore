@@ -227,3 +227,9 @@ disassociation is retried every 2 s; the bridge is never saved as off.
 `set wifi.ssid off` clears the saved network and its password on builds
 without MQTT (an empty value still clears on MQTT builds), and wipes the UDP
 station's copies in RAM.
+
+On repeater builds with the ESP-NOW bridge and UDP, the station joins as
+soon as `udp.enabled` is on (with `bridge.secret` and WiFi credentials set):
+peers only decide who receives frames, so a head's address can be read
+before it is listed. `set udp.enabled off` leaves the network again when the
+UDP transport joined it; a network MQTT or WebConfig joined is left alone.
