@@ -327,7 +327,8 @@ void ESPNowBridge::begin() {
   // bridge needs the radio awake whichever started first. Arduino's cached
   // preference is moved too, so a later STA_START cannot restore sleep.
   if (shared_wifi) {
-    (void)WiFi.setSleep(WIFI_PS_NONE);
+    const bool cache_changed = WiFi.setSleep(WIFI_PS_NONE);  // false: already NONE
+    (void)cache_changed;
     (void)esp_wifi_set_ps(WIFI_PS_NONE);
   }
 
@@ -419,7 +420,8 @@ void ESPNowBridge::keepRadioAwake() {
   if (esp_wifi_get_ps(&power_save) != ESP_OK || power_save == WIFI_PS_NONE) return;
   // Someone (an owner's reconnect, Arduino's STA_START replaying its cached
   // preference) enabled modem sleep behind the bridge: undo it.
-  (void)WiFi.setSleep(WIFI_PS_NONE);
+  const bool cache_changed = WiFi.setSleep(WIFI_PS_NONE);  // false: already NONE
+  (void)cache_changed;
   if (esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK) ++_awake_repairs;
 }
 

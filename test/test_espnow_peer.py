@@ -172,12 +172,15 @@ int main(){
    assert(!bridge._initialized&&added_peers.size()==before&&!espnow_active);
    assert(bridge._stats.error.stage==mesh::bridge::diag::Stage::PeerConfig); }
  mesh::bridge::peer_settings_ready=true;
- // Shared WiFi owns its modem policy; bridge startup must leave it alone.
+ // Shared WiFi: while the bridge runs the radio stays awake (modem sleep
+ // makes ESP-NOW deaf between beacons; 2026-11-03 hardware finding). The
+ // owner's preference is not restored by the bridge: its next join or
+ // setting change applies it (test_bridge_awake covers the orderings).
  backend.wifi=true;sdk_initialized=sdk_started=true;sdk_mode=WIFI_STA;
  wifi_ps=WIFI_PS_MIN_MODEM;const unsigned previous_ps=ps_writes;
  { ESPNowBridge bridge(&prefs,&mgr,&rtc);bridge.begin();
-   assert(bridge._initialized&&ps_writes==previous_ps&&wifi_ps==WIFI_PS_MIN_MODEM);
-   bridge.end();assert(sdk_started&&wifi_ps==WIFI_PS_MIN_MODEM); }
+   assert(bridge._initialized&&ps_writes>previous_ps&&wifi_ps==WIFI_PS_NONE);
+   bridge.end();assert(sdk_started&&wifi_ps==WIFI_PS_NONE); }
  backend.wifi=false;failure=19;
  { ESPNowBridge bridge(&prefs,&mgr,&rtc);bridge.begin();
    assert(!bridge._initialized&&!espnow_active&&!sdk_initialized);
@@ -220,11 +223,13 @@ int main(){
   assert(!sdk_initialized&&!espnow_active);pending_sta_events=0;
  }
  failure=0;prefs.bridge_format=mesh::bridge::ESPNOW_FORMAT_WRAPPED;
- // Shared startup never changes the owner's cache or actual modem policy.
+ // Shared startup keeps the radio awake: Arduino's cache too, so a later
+ // STA_START cannot restore sleep. The bridge does not own the preference.
  assert(WiFi.mode(WIFI_STA));(void)WiFi.setSleep(WIFI_PS_MAX_MODEM);deliverArduinoStaStart();backend.wifi=true;
  {ESPNowBridge bridge(&prefs,&mgr,&rtc);const auto writes=ps_writes;bridge.begin();
-  assert(bridge._initialized&&!bridge._wifi_sleep_preference_owned&&ps_writes==writes&&WiFi.getSleep()==WIFI_PS_MAX_MODEM);
-  bridge.end();assert(WiFi.getSleep()==WIFI_PS_MAX_MODEM&&wifi_ps==WIFI_PS_MAX_MODEM&&sdk_started);}
+  assert(bridge._initialized&&!bridge._wifi_sleep_preference_owned&&ps_writes>writes&&WiFi.getSleep()==WIFI_PS_NONE);
+  assert(wifi_ps==WIFI_PS_NONE);
+  bridge.end();assert(WiFi.getSleep()==WIFI_PS_NONE&&wifi_ps==WIFI_PS_NONE&&sdk_started);}
  backend.wifi=false;assert(WiFi.mode(WIFI_OFF));(void)WiFi.setSleep(WIFI_PS_MIN_MODEM);
  // An owner adopting a dedicated driver keeps its newer cached preference.
  {ESPNowBridge bridge(&prefs,&mgr,&rtc);bridge.begin();assert(WiFi.mode(WIFI_STA));backend.wifi=true;
