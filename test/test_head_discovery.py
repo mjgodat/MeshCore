@@ -24,19 +24,15 @@ CHECKS = r'''
 #include <cstring>
 #include <SHA256.h>
 #include <helpers/HeadDiscovery.h>
+#include <helpers/bridges/DiscoveryKey.h>
 #include <helpers/HeadTransport.h>
 using namespace mesh::discovery;
 using mesh::headlink::HeadDiscovery;
 using mesh::bridge::udp::Peer;
-static bool mac(void* ctx, const uint8_t* data, size_t len, uint8_t digest[32]) {
-  const char* key = static_cast<const char*>(ctx);
-  if (!key || !*key) return false;
-  SHA256 sha; sha.resetHMAC(reinterpret_cast<const uint8_t*>(key), strlen(key));
-  sha.update(kDomain, sizeof(kDomain)); sha.update(data, len);
-  sha.finalizeHMAC(reinterpret_cast<const uint8_t*>(key), strlen(key), digest, 32);
-  return true;
-}
-static char key[] = "fleet-test";
+// The devices' tag: HMAC with the PBKDF2-derived key (DiscoveryKey.h).
+static KeyCache keys;
+static uint8_t* key_for(const char* secret) { return const_cast<uint8_t*>(keys.get(secret)); }
+static Mac mac = keyedMac;
 static Announce announce(uint8_t id, uint8_t ip_last, uint32_t boot = 0x1234, uint32_t counter = 1) {
   Announce a; a.boot = boot; a.counter = counter;
   for (int i = 0; i < 6; ++i) a.prefix[i] = uint8_t(id + i);
@@ -50,22 +46,38 @@ int main() {
   const uint8_t local[4] = {192, 168, 1, 77};
   assert(!d.seen() && !d.learnedPeer().enabled() && !d.shouldReply(now, local, 4404));
   // learn the address from the first verified announce
-  assert(d.noteAnnounce(announce(1, 50), true, now));
+  assert(d.noteAnnounce(announce(1, 50), true, now) == HeadDiscovery::PeerChanged);
   assert(d.learnedPeer().enabled() && d.learnedPeer().ip[3] == 50 && d.learnedPeer().port == 4404);
-  assert(!d.noteAnnounce(announce(1, 50, 0x1234, 2), false, now + 5000));   // same: unchanged
+  assert(d.noteAnnounce(announce(1, 50, 0x1234, 2), false, now + 5000) == HeadDiscovery::Kept);   // same: unchanged
   // manual udp.peer wins
   Peer manual; manual.ip[0] = 10; manual.ip[1] = 0; manual.ip[2] = 0; manual.ip[3] = 9; manual.port = 4500;
   assert(HeadDiscovery::effectivePeer(manual, d.learnedPeer()).port == 4500);
   assert(HeadDiscovery::effectivePeer(Peer(), d.learnedPeer()).ip[3] == 50);
   // another repeater does not move it while the first is heard
-  assert(!d.noteAnnounce(announce(9, 99), true, now + 6000) && d.learnedPeer().ip[3] == 50 && d.ignored() == 1);
+  assert(d.noteAnnounce(announce(9, 99), true, now + 6000) == HeadDiscovery::Ignored && d.learnedPeer().ip[3] == 50 && d.ignored() == 1);
   // the same repeater moving its address does
-  assert(d.noteAnnounce(announce(1, 51, 0x1234, 3), true, now + 7000) && d.learnedPeer().ip[3] == 51);
+  assert(d.noteAnnounce(announce(1, 51, 0x1234, 3), true, now + 7000) == HeadDiscovery::PeerChanged && d.learnedPeer().ip[3] == 51);
   // ... and another one after two minutes of silence
-  assert(d.noteAnnounce(announce(9, 99), true, now + 7000 + HeadDiscovery::kSwitchAfterMs) && d.learnedPeer().ip[3] == 99);
+  assert(d.noteAnnounce(announce(9, 99), true, now + 7000 + HeadDiscovery::kSwitchAfterMs) == HeadDiscovery::PeerChanged && d.learnedPeer().ip[3] == 99);
   // an announce without UDP clears the learned address
-  Announce no_udp = announce(9, 99); no_udp.caps = CAP_ESPNOW; no_udp.port = 0;
-  assert(d.noteAnnounce(no_udp, true, now + 130000) && !d.learnedPeer().enabled());
+  Announce no_udp = announce(9, 99, 0x1234, 2); no_udp.caps = CAP_ESPNOW; no_udp.port = 0;
+  assert(d.noteAnnounce(no_udp, true, now + 130000) == HeadDiscovery::PeerChanged && !d.learnedPeer().enabled());
+
+  // review F7: replays and stale boots
+  {
+    HeadDiscovery r; uint32_t t = 1000;
+    assert(r.noteAnnounce(announce(1, 50, 0xAAAA, 10), true, t) == HeadDiscovery::PeerChanged);
+    assert(r.noteAnnounce(announce(1, 50, 0xAAAA, 10), true, t + 1) == HeadDiscovery::Ignored);   // same counter
+    assert(r.noteAnnounce(announce(1, 60, 0xAAAA, 9), true, t + 2) == HeadDiscovery::Ignored);    // older
+    assert(r.learnedPeer().ip[3] == 50 && r.replays() == 2);
+    // an old boot's announce, replayed while the current boot is heard: refused
+    assert(r.noteAnnounce(announce(1, 60, 0x5555, 99), true, t + 1000) == HeadDiscovery::Ignored);
+    assert(r.noteAnnounce(announce(1, 50, 0xAAAA, 11), true, t + 5000) == HeadDiscovery::Kept);
+    // a real reboot: the old boot falls silent; the new one is taken after 15 s
+    assert(r.noteAnnounce(announce(1, 51, 0xBBBB, 1), true, t + 5000 + 14999) == HeadDiscovery::Ignored);
+    assert(r.noteAnnounce(announce(1, 51, 0xBBBB, 2), true, t + 5000 + HeadDiscovery::kNewBootAfterMs) == HeadDiscovery::PeerChanged);
+    assert(r.last().boot == 0xBBBB && r.learnedPeer().ip[3] == 51);
+  }
   // home: the first announced repeater, offered once
   uint8_t home[6];
   assert(d.takeHome(home) && home[0] == 1 && !d.takeHome(home));
@@ -80,26 +92,29 @@ int main() {
   h.noteReplied(now, local, 4404);
   assert(!h.shouldReply(now + 29999, local, 4404) && h.shouldReply(now + 30000, local, 4404));
   const uint8_t moved[4] = {192, 168, 1, 78};
-  assert(h.shouldReply(now + 1, moved, 4404) && h.shouldReply(now + 1, local, 4405));
-  h.noteAnnounce(announce(1, 50, 0x9999, 1), true, now + 2);   // repeater rebooted
-  assert(h.shouldReply(now + 3, local, 4404));
+  assert(h.shouldReply(now + 1000, moved, 4404) && h.shouldReply(now + 1000, local, 4405));
+  // review F7: never more than one reply a second, whatever changed
+  h.noteReplied(now + 30000, local, 4404);
+  assert(!h.shouldReply(now + 30000 + 999, moved, 4404) && h.shouldReply(now + 30000 + 1000, moved, 4404));
+  h.noteAnnounce(announce(1, 50, 0x9999, 1), true, now + 30000 + HeadDiscovery::kNewBootAfterMs);   // repeater rebooted
+  assert(h.shouldReply(now + 30000 + HeadDiscovery::kNewBootAfterMs + 1, local, 4404));
   Announce no_pair = announce(1, 50); no_pair.caps &= uint8_t(~CAP_AUTOPAIR);
   HeadDiscovery np; np.noteAnnounce(no_pair, true, now); assert(!np.shouldReply(now, local, 4404));
 
   // end to end: the head's signed reply passes the repeater's checks
   Announce a = announce(1, 50, 0xABCD, 40);
   uint8_t f[MAX_FRAME];
-  const size_t an = encodeAnnounce(a, mac, key, f, sizeof(f));
-  Announce heard; assert(an && decodeAnnounce(f, an, mac, key, heard));
+  const size_t an = encodeAnnounce(a, mac, key_for("fleet-test"), f, sizeof(f));
+  Announce heard; assert(an && decodeAnnounce(f, an, mac, key_for("fleet-test"), heard));
   HeadDiscovery e; e.noteAnnounce(heard, false, 1000);
   const uint8_t self[6] = {0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6};
-  const Reply r = e.reply(self, "CYD head with a long name", local, 4404, true);
-  const size_t rn = encodeReply(r, mac, key, f, sizeof(f));
-  Reply got; assert(rn == REPLY_FRAME && decodeReply(f, rn, mac, key, got));
+  const Reply r = e.reply(self, "CYD head with a long name", local, 4404);
+  const size_t rn = encodeReply(r, mac, key_for("fleet-test"), f, sizeof(f));
+  Reply got; assert(rn == REPLY_FRAME && decodeReply(f, rn, mac, key_for("fleet-test"), got));
   assert(freshReply(got, 0xABCD, 40) && freshReply(got, 0xABCD, 51) && !freshReply(got, 0xABCD, 52));
-  assert(!strcmp(got.name, "CYD head with a ") && got.flags == REPLY_WANTS_OBSERVER);
+  assert(!strcmp(got.name, "CYD head with a ") && got.flags == 0);   // review F8: reserved
   AutoPeers table; assert(table.offer(got, 1000) == PairResult::Added && table.slot(0).ip[3] == 77);
-  char wrong[] = "other"; Reply bad; assert(!decodeReply(f, rn, mac, wrong, bad));
+  Reply bad; assert(!decodeReply(f, rn, mac, key_for("other"), bad));
 
   // get transport shows the announce (and the learned address while udp.peer is off)
   using namespace mesh::headlink;
@@ -139,6 +154,13 @@ class HeadDiscoveryTests(unittest.TestCase):
         self.assertLess(service.index("noteAnnounce("), service.index("encodeReply("))
         self.assertIn("sendDatagram(frame, n, a.ip, a.port)", service)
         self.assertIn("savedEspNowLinkSecret(", service)
+        self.assertIn("keyedMac", service)                         # derived key (DiscoveryKey.h)
+        self.assertIn("HeadDiscovery::Ignored", service)          # review F7
+        queue = radio[radio.index("void HeadLinkRadio::queueDiscovery("):]
+        queue = queue[:queue.index("\n}\n")]
+        self.assertIn("drop the oldest", queue)
+        header = (ROOT / "src/helpers/esp32/HeadLinkRadio.h").read_text()
+        self.assertIn("kPendingAnnounces = 4", header)
         self.assertIn("effectivePeer(_cfg.repeater, _disc.learnedPeer())", radio)
         # the UDP link takes announces from any address, mesh only from the repeater
         self.assertIn("isDiscoveryFrame(bytes, (size_t)n)", radio)
