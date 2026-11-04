@@ -57,7 +57,10 @@ protected:
   // bridge.rxlimit hook: asked once per new (not duplicate) packet just
   // before it is queued; false drops it (Filtered, not marked seen). The
   // ESP-NOW and UDP bridges share one budget; others always admit.
-  virtual bool admitIngress() { return true; }
+  // `shared_key` is the packet's seen-table hash (null for OTA, whose
+  // retries repeat the same bytes): the same packet admitted by the other
+  // bridge does not spend the budget again (DiscoveryFrame.h RxLimiter).
+  virtual bool admitIngress(const uint8_t* shared_key) { (void)shared_key; return true; }
 #endif
 
   /** Tracks bridge state */

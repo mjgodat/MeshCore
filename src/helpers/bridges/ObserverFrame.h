@@ -24,7 +24,7 @@ namespace mesh { namespace observer {
 
 constexpr uint8_t MAGIC0 = 0xB0, MAGIC1 = 0x42, MAGIC2 = 0x53, MAGIC3 = 0x4F;
 constexpr uint8_t VERSION = 1;
-enum class Kind : uint8_t { Packet = 1, Vitals = 2 };
+enum class Kind : uint8_t { Packet = 1, Vitals = 2, Health = 3 };
 enum class Disposition : uint8_t { Unknown = 0, Forwarded = 1, Duplicate = 2, Dropped = 3 };
 
 // One ESP-NOW frame (250) minus the 15-byte packet header. MeshCore packets are
@@ -49,6 +49,23 @@ constexpr size_t MAX_WRAPPED_FRAME = 246;
 constexpr size_t MAX_RAW_WRAPPED = MAX_WRAPPED_FRAME - PACKET_FIXED;
 static_assert(MAX_RAW_WRAPPED == 231 && VITALS_FRAME <= MAX_WRAPPED_FRAME, "wrapped observer frames");
 
+// Health (kind 3): the repeater's heap and last reset reason, sent next to
+// the vitals (MyMesh: with the first vitals after a start, then every
+// kHealthEveryVitals-th). A separate kind, not a longer vitals frame:
+// deployed heads check the vitals length exactly and would drop all vitals.
+// Those heads ignore kind 3 (not an observer frame for them; MeshCore then
+// rejects its first byte, see the collision analysis above). Newer heads
+// treat a missing health frame as "unknown".
+// Forward compatible: the body starts with its own version byte, and a
+// decoder accepts any length from HEALTH_FRAME_V1 up to MAX_WRAPPED_FRAME,
+// ignoring bytes it does not know; a later version only appends fields.
+constexpr uint8_t HEALTH_BODY_VERSION = 1;
+// Reset reason: the ESP-IDF esp_reset_reason_t value (0 = unknown); the
+// numbers are stable in IDF 4.4 and 5.x (resetReasonName below).
+struct Health { uint32_t free_heap, min_free_heap, largest_block; uint8_t reset_reason; };
+constexpr size_t HEALTH_FRAME_V1 = HEADER_SIZE + 1 + 4 + 4 + 4 + 1;
+static_assert(HEALTH_FRAME_V1 <= MAX_WRAPPED_FRAME, "health fits a wrapped frame");
+
 namespace detail {
 struct W {
   uint8_t* p; size_t i;  // no default member init: C++11 aggregate (ESP32 gnu++11)
@@ -68,11 +85,12 @@ struct R {
 }  // namespace detail
 
 // Magic + version + kind + exact length implied by kind (packet: header-consistent
-// 15 + len; vitals: fixed size).
+// 15 + len; vitals: fixed size; health: at least its version-1 size).
 inline bool isObserverFrame(const uint8_t* buf, size_t len) {
   if (buf == nullptr || len < HEADER_SIZE) return false;
   if (buf[0] != MAGIC0 || buf[1] != MAGIC1 || buf[2] != MAGIC2 || buf[3] != MAGIC3 || buf[4] != VERSION) return false;
   if (buf[5] == (uint8_t)Kind::Vitals) return len == VITALS_FRAME;
+  if (buf[5] == (uint8_t)Kind::Health) return len >= HEALTH_FRAME_V1 && len <= MAX_WRAPPED_FRAME;
   if (buf[5] == (uint8_t)Kind::Packet) return len >= PACKET_FIXED && buf[PACKET_FIXED - 1] <= MAX_RAW && len == PACKET_FIXED + buf[PACKET_FIXED - 1];
   return false;
 }
@@ -110,6 +128,39 @@ inline size_t encodeVitals(const Vitals& v, uint8_t* out, size_t cap) {
   w.u32((uint32_t)v.lat_e6); w.u32((uint32_t)v.lon_e6); w.u8(v.has_pos ? 1 : 0);
   w.f32(v.freq); w.f32(v.bw); w.u8(v.sf); w.u8(v.cr); w.u8(v.preset_slot);
   return w.i;
+}
+
+// Status frames (vitals, health) bypass the packet-record rate limit.
+inline bool isStatusFrame(const uint8_t* buf, size_t len) {
+  return isObserverFrame(buf, len) && (buf[5] == (uint8_t)Kind::Vitals || buf[5] == (uint8_t)Kind::Health);
+}
+
+inline size_t encodeHealth(const Health& h, uint8_t* out, size_t cap) {
+  if (out == nullptr || cap < HEALTH_FRAME_V1) return 0;
+  detail::W w{out, 0};
+  w.head(Kind::Health);
+  w.u8(HEALTH_BODY_VERSION);
+  w.u32(h.free_heap); w.u32(h.min_free_heap); w.u32(h.largest_block); w.u8(h.reset_reason);
+  return w.i;
+}
+
+// Accepts body version 1 and later (fields appended after the version-1
+// ones are ignored); version 0 is invalid.
+inline bool decodeHealth(const uint8_t* buf, size_t len, Health& out) {
+  if (!isObserverFrame(buf, len) || buf[5] != (uint8_t)Kind::Health) return false;
+  detail::R r{buf, HEADER_SIZE};
+  if (r.u8() == 0) return false;
+  Health h;
+  h.free_heap = r.u32(); h.min_free_heap = r.u32(); h.largest_block = r.u32(); h.reset_reason = r.u8();
+  out = h;
+  return true;
+}
+
+// Short name of an esp_reset_reason_t value (Health::reset_reason).
+inline const char* resetReasonName(uint8_t reason) {
+  static const char* const kNames[] = {"unknown", "power-on", "ext reset", "software", "panic", "int wdt",
+                                       "task wdt", "wdt", "deep sleep", "brownout", "sdio"};
+  return reason < sizeof(kNames) / sizeof(kNames[0]) ? kNames[reason] : "other";
 }
 
 inline bool decodePacket(const uint8_t* buf, size_t len, PacketRecord& out) {

@@ -135,6 +135,12 @@
 #include <helpers/radiolib/RXPowerSaving.h>
 #include "CLIReplyCopy.h"
 
+#if defined(ESP32_PLATFORM)
+// Defined by the ESP32 repeater (examples/simple_repeater/main.cpp); other
+// firmware links none and `powerlog` prints only the reset reason.
+size_t meshFormatResetHistory(char* out, size_t cap) __attribute__((weak));
+#endif
+
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
   uint32_t n = 0;
@@ -4529,6 +4535,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #endif
     } else if (memcmp(command, "powerlog", 8) == 0) {
       sprintf(reply, "Last reset reason: %s", _board->getResetReasonString(_board->getResetReason()));
+#if defined(ESP32_PLATFORM)
+      // The ESP32 repeater's reset history (ResetHistory.h), when linked in.
+      if (meshFormatResetHistory) {
+        const size_t used = strlen(reply);
+        meshFormatResetHistory(reply + used, 160 - used);
+      }
+#endif
 #if defined(NRF52_PLATFORM)
       sprintf(reply + strlen(reply), "\r\nLast shutdown reason: %s",
               _board->getShutdownReasonString(_board->getShutdownReason()));

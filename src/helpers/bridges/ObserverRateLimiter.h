@@ -5,7 +5,7 @@
 //
 // Policy:
 // - Packet records pass a token bucket (default 20/s, burst 40).
-// - Vitals bypass the bucket.
+// - Status frames (vitals, health) bypass the bucket.
 // - While mesh traffic is queued on the bridge, new packet records are
 //   dropped (mesh frames always win). Vitals still queue and wait.
 // - The outbox is small. When full, the oldest packet record is evicted
@@ -22,6 +22,8 @@ constexpr uint16_t kPacketRatePerSecond = 20;
 constexpr uint16_t kPacketBurst = 40;
 constexpr uint8_t kOutboxDepth = 4;
 constexpr uint32_t kVitalsIntervalMs = 5000;
+// A health frame (heap, reset reason) every this many vitals ticks (30 s).
+constexpr uint8_t kHealthEveryVitals = 6;
 
 // Integer token bucket in milli-tokens; wrap-safe on a 32-bit millisecond clock.
 class TokenBucket {
@@ -78,7 +80,7 @@ public:
 private:
   Offer offerImpl(const uint8_t* frame, size_t len, const uint32_t* now_ms, bool mesh_pending) {
     if (!isObserverFrame(frame, len) || len > MAX_PACKET_FRAME) return Offer::Invalid;
-    const bool vitals = frame[5] == (uint8_t)Kind::Vitals;
+    const bool vitals = isStatusFrame(frame, len);   // vitals and health
     if (!vitals) {
       if (mesh_pending) { ++_stats.preempt_drops; return Offer::Preempted; }
       if (now_ms && !_bucket.take(*now_ms)) { ++_stats.rate_drops; return Offer::RateLimited; }
@@ -149,7 +151,7 @@ public:
   // Returns how many transports queued the frame.
   uint8_t offer(const uint8_t* frame, size_t len, uint32_t now_ms, FanoutSink* const* sinks, uint8_t count) {
     if (!isObserverFrame(frame, len) || len > MAX_PACKET_FRAME) return 0;
-    const bool vitals = frame[5] == (uint8_t)Kind::Vitals;
+    const bool vitals = isStatusFrame(frame, len);   // vitals and health
     uint8_t eligible = 0, queued = 0;
     bool pending[kMaxSinks] = {};
     if (count > kMaxSinks) count = kMaxSinks;
