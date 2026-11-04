@@ -156,7 +156,7 @@ On the bridge repeater (`docs/cli_commands.md` has the full text):
 | `set bridge.announce auto\|on\|off` | `auto` | UDP-bridge builds only. auto = while the UDP bridge runs: announce every 5 s (ESP-NOW) / 10 s (UDP), tag keyed from `udp.secret` (else `bridge.secret`) via PBKDF2; heads learn the UDP address and are auto-paired (`get bridge.autopeers`) |
 | `set udp.secret <1-15>\|off` | `off` | UDP-bridge builds only: own key for UDP sessions and discovery (off = `bridge.secret`); never printed |
 | `set bridge.rxlimit <0-6000>` | `0` (off) | New (not duplicate) packets/min admitted from the ESP-NOW and UDP bridges; suggested `300` (burst 60); `get bridge.rxlimit` shows `passed= dropped= shared=` (shared = the other bridge's copy of an admitted packet, not charged) |
-| `powerlog` | | ESP32 repeaters: last reset reason, then the previous run (`Prev run 3d4h~, alive <UTC time>, heap>=N`; `~` = from the last 10-min checkpoint, exact after a software/panic/watchdog reset), boots and abnormal ends (panic, watchdogs, brownout) |
+| `powerlog` | | ESP32 repeaters: last reset reason, then the previous run (`Prev run 3d4h~, alive <UTC time>, heap>=N`; `~` = from the last 10-min checkpoint, exact after a software/panic/watchdog reset; `Prev run <1m, not checkpointed` when it stopped within its first minute), boots and abnormal ends (panic, watchdogs, brownout) |
 | `stats-core` | | ESP32 repeaters add `heap_free`, `heap_min` (lowest since boot), `heap_max_block` |
 
 On the heads: `set transport espnow|udp|both|auto` and `udp.*` (see
@@ -253,17 +253,28 @@ Full reference, wire format and owner test plan:
   to wrapped in the same session.
 - The M5 bridge envs fail their build above 97% of the app slot
   (`variants/thinknode_m5/flash_budget.py`).
-- The ThinkNode M5 envs watch the repeater's loop: a `loop()` that does not
-  return within 30 s ends in a task-watchdog reset (Arduino-ESP32 2.0.17
-  watches only core 0's idle task by default). OTA apply/download and a
-  filesystem format pause it; power-save sleeps are capped at 15 s. Other
-  boards keep it off (`-D MESH_LOOP_WATCHDOG_SECS=<s>` turns it on). No
-  scheduled reboot is added. `powerlog` reports how the previous run ended
-  and when it was last alive, so the next stop leaves evidence.
+- The ThinkNode M5 repeater envs (`ThinkNode_M5_Repeater`, the bridge envs)
+  watch the repeater's loop: a `loop()` that does not return within 30 s
+  ends in a task-watchdog reset (Arduino-ESP32 2.0.17 watches only core 0's
+  idle task by default). Re-arming the task WDT at 30 s also relaxes every
+  other task it watches (core 0's idle task, AsyncTCP when the web server
+  runs) from 5 s to 30 s. Other M5 envs and other boards leave it off
+  (`-D MESH_LOOP_WATCHDOG_SECS=<s>` turns it on; only the repeater acts on
+  it). The OTA apply and a filesystem format pause it. `ota update` keeps
+  it fed while its download task works, for at most 10 minutes; then the
+  loop gives up, tells the task to abort without committing and carries on
+  (a new `ota update` is refused until that task has returned). An e-ink
+  panel whose BUSY line sticks makes GxEPD2 wait 10 s per step: the busy
+  callback feeds the watchdog, and after a wait over 5 s the display stops
+  refreshing for 10 minutes (one log line) instead of the repeater
+  rebooting. Power-save sleeps are capped at 15 s. No scheduled reboot is
+  added. `powerlog` reports how the previous run ended and when it was last
+  alive, so the next stop leaves evidence.
 - The repeater's heap reaches the heads as an observer health frame (kind 3,
   every 30 s): TELEMETRY shows free heap, its 8-hour low-water trend and
-  the minimum since boot. Heads from before ignore the frame; the vitals
-  frame is unchanged.
+  the minimum since boot. Older heads and ESP-NOW relays drop it, counting
+  it as a malformed packet (cosmetic, like the announces); the vitals frame
+  is unchanged.
 - `espnow.format` defaults to `raw`: an upgraded head or relay talks
   exactly as before until it is switched and rebooted.
 - `espnow.repeat` defaults to 1 (send once, unchanged behaviour). OTA payloads
