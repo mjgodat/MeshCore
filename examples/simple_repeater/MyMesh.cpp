@@ -43,6 +43,8 @@ mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertSlowBank() {
 #endif
 #if defined(WITH_ESPNOW_BRIDGE)
 #include <helpers/ObserverSettings.h>
+#include <helpers/BridgeAwake.h>
+#include <helpers/esp32/WiFiRadioPolicy.h>
 #include <helpers/bridges/ObserverFrame.h>
 #include <helpers/bridges/ObserverRateLimiter.h>
 #endif
@@ -12180,7 +12182,11 @@ bool MyMesh::getWiFiStatus(char* reply) const {
 }
 
 bool MyMesh::getWiFiPowerSave(char* reply) const {
-  return WebConfigServer::formatWiFiPowerSave(reply, 160, canonicalWiFiLegacyPrefs());
+  const bool ok = WebConfigServer::formatWiFiPowerSave(reply, 160, canonicalWiFiLegacyPrefs());
+#if defined(WITH_ESPNOW_BRIDGE)
+  mesh::wifi::annotatePowerSaveReply(reply, 160, mesh::wifi::bridgeEspNowChannel().load() != 0, false);
+#endif
+  return ok;
 }
 
 bool MyMesh::getWiFiCLI(char* reply) const {
@@ -12226,6 +12232,10 @@ bool MyMesh::setWiFiPowerSave(const char* value, char* reply) {
       && _webconfig) {
     _webconfig->reloadStandaloneWiFi();
   }
+#if defined(WITH_ESPNOW_BRIDGE)
+  if (value && strcmp(value, "none") != 0)
+    mesh::wifi::annotatePowerSaveReply(reply, 160, mesh::wifi::bridgeEspNowChannel().load() != 0, true);
+#endif
   return true;
 }
 

@@ -34,6 +34,7 @@ inline wifi_power_t stationTransmitPower(wifi_ps_type_t mode) {
 // bridge keeps the TX power it set.
 inline esp_err_t applyStationPowerSave(wifi_ps_type_t mode) {
 #if defined(WITH_ESPNOW_BRIDGE)
+  noteOwnerPowerSave(static_cast<uint8_t>(mode));   // handed back when the bridge stops
   if (bridgeEspNowChannel().load() != 0) return esp_wifi_set_ps(WIFI_PS_NONE);
 #endif
   const esp_err_t result = esp_wifi_set_ps(mode);

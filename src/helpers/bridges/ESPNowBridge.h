@@ -159,6 +159,11 @@ private:
   static constexpr uint32_t kAwakeCheckMs = 250;
   uint32_t _awake_check_at = 0;
   uint32_t _awake_repairs = 0;
+  // A refused "stay awake" (e.g. Bluetooth needs modem sleep) backs off
+  // 500 ms .. 10 s and is logged once per streak.
+  uint32_t _awake_refusals = 0;
+  uint32_t _awake_backoff_ms = 0;
+  bool _awake_refusal_logged = false;
   void keepRadioAwake();
 
   /** Raw-mode fragment assemblies, keyed by source MAC. */

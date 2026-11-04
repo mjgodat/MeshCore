@@ -3607,10 +3607,10 @@ bool CommonCLI::handleEspNowDiagnosticCommand(uint32_t sender_timestamp,
       _callbacks->formatEspNowStats("", reply, capacity);
     } else if (strcmp(page, " mac") == 0 || strcmp(page, " rx") == 0 || strcmp(page, " tx") == 0
                || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0
-               || strcmp(page, " obs") == 0) {
+               || strcmp(page, " obs") == 0 || strcmp(page, " awake") == 0) {
       _callbacks->formatEspNowStats(page + 1, reply, capacity);
     } else {
-      mesh::cli::formatError(reply, capacity, "use get espnow.stats [mac|rx|tx|drops|test|obs]");
+      mesh::cli::formatError(reply, capacity, "use get espnow.stats [mac|rx|tx|drops|test|obs|awake]");
     }
     return true;
   }

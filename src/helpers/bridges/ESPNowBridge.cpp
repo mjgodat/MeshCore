@@ -5,6 +5,7 @@
 #include <helpers/esp32/WiFiRadioPolicy.h>
 #include <helpers/ESPNowPeerSettings.h>
 #include <helpers/bridges/ObserverFrame.h>
+#include <helpers/BridgeAwake.h>
 #include <stdio.h>
 
 #ifdef WITH_ESPNOW_BRIDGE
@@ -327,9 +328,13 @@ void ESPNowBridge::begin() {
   // bridge needs the radio awake whichever started first. Arduino's cached
   // preference is moved too, so a later STA_START cannot restore sleep.
   if (shared_wifi) {
+    // The station owner's preference comes back when the bridge stops.
+    mesh::wifi::bridgeStartsShared(static_cast<uint8_t>(WiFi.getSleep()));
     const bool cache_changed = WiFi.setSleep(WIFI_PS_NONE);  // false: already NONE
     (void)cache_changed;
     (void)esp_wifi_set_ps(WIFI_PS_NONE);
+  } else {
+    mesh::wifi::bridgeStartsDedicated();
   }
 
   // Range: transmit at the radio's maximum (20 dBm; the SDK clamps per chip).
@@ -377,6 +382,16 @@ void ESPNowBridge::end() {
 
   // Infrastructure WiFi may still own this shared radio.
   mesh::wifi::bridgeEspNowChannel().store(0);
+  {
+    // Started on a shared station: hand the owner its modem-sleep preference
+    // back now, not at its next join.
+    const int owner_preference = mesh::wifi::bridgeStopsShared();
+    if (owner_preference > 0) {
+      const bool cache_changed = WiFi.setSleep(static_cast<wifi_ps_type_t>(owner_preference));
+      (void)cache_changed;
+      (void)esp_wifi_set_ps(static_cast<wifi_ps_type_t>(owner_preference));
+    }
+  }
   mesh::wifi::setLongRangeOwner(mesh::wifi::kLongRangeBridgeOwner, false);
   stopBridgeWiFiAndReleaseSleepPreference(_wifi_sleep_preference_owned,
       _previous_wifi_sleep, _sdk_teardown_failed);
@@ -417,19 +432,36 @@ void ESPNowBridge::end() {
 
 void ESPNowBridge::keepRadioAwake() {
   wifi_ps_type_t power_save = WIFI_PS_NONE;
-  if (esp_wifi_get_ps(&power_save) != ESP_OK || power_save == WIFI_PS_NONE) return;
+  if (esp_wifi_get_ps(&power_save) != ESP_OK || power_save == WIFI_PS_NONE) {
+    _awake_backoff_ms = 0;
+    _awake_refusal_logged = false;
+    return;
+  }
   // Someone (an owner's reconnect, Arduino's STA_START replaying its cached
   // preference) enabled modem sleep behind the bridge: undo it.
   const bool cache_changed = WiFi.setSleep(WIFI_PS_NONE);  // false: already NONE
   (void)cache_changed;
-  if (esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK) ++_awake_repairs;
+  const esp_err_t result = esp_wifi_set_ps(WIFI_PS_NONE);
+  if (result == ESP_OK) {
+    ++_awake_repairs;
+    _awake_backoff_ms = 0;
+    _awake_refusal_logged = false;
+    return;
+  }
+  // Refused (Bluetooth coexistence needs modem sleep): back off, log once.
+  ++_awake_refusals;
+  _awake_backoff_ms = mesh::wifi::nextAwakeBackoff(_awake_backoff_ms);
+  if (!_awake_refusal_logged) {
+    _awake_refusal_logged = true;
+    BRIDGE_DEBUG_PRINTLN("Modem sleep cannot be disabled (%d); ESP-NOW receive may suffer\n", (int)result);
+  }
 }
 
 void ESPNowBridge::loop() {
   if (!_initialized) { emitDebug(); return; }
   if (static_cast<int32_t>(millis() - _awake_check_at) >= 0) {
-    _awake_check_at = millis() + kAwakeCheckMs;
     keepRadioAwake();
+    _awake_check_at = millis() + (_awake_backoff_ms ? _awake_backoff_ms : kAwakeCheckMs);
   }
   pumpTransmitQueue();
   if (!_initialized) { emitDebug(); return; }
@@ -1192,6 +1224,13 @@ void ESPNowBridge::formatStats(const char* page, char* reply, size_t reply_size)
         (unsigned long)s.probe.tx_timeout, (unsigned long)s.probe.rx_ok,
         (unsigned long)s.probe.rx_bad, (unsigned long)s.probe.last_tx_nonce,
         (unsigned long)s.probe.last_rx_nonce);
+  } else if (strcmp(page, "awake") == 0) {
+    // Modem sleep kept off while the bridge runs.
+    wifi_ps_type_t power_save = WIFI_PS_NONE;
+    const bool ps_ok = esp_wifi_get_ps(&power_save) == ESP_OK;
+    snprintf(reply, reply_size, "> ps=%d repairs=%lu refused=%lu backoff_ms=%lu",
+        ps_ok ? static_cast<int>(power_save) : -1, (unsigned long)_awake_repairs,
+        (unsigned long)_awake_refusals, (unsigned long)_awake_backoff_ms);
   } else if (strcmp(page, "obs") == 0) {
     // Observer feed over ESP-NOW (observer.transport espnow|both).
     const auto& o = _observer.stats();
@@ -1200,7 +1239,7 @@ void ESPNowBridge::formatStats(const char* page, char* reply, size_t reply_size)
         (unsigned long)o.timeouts, (unsigned long)o.rate_drops,
         (unsigned long)o.preempt_drops, (unsigned long)o.overflow_drops);
   } else {
-    snprintf(reply, reply_size, "Error: use get espnow.stats [mac|rx|tx|drops|test|obs]");
+    snprintf(reply, reply_size, "Error: use get espnow.stats [mac|rx|tx|drops|test|obs|awake]");
   }
 }
 

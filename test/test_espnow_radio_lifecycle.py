@@ -226,6 +226,7 @@ int esp_wifi_get_mode(wifi_mode_t* mode){*mode=WIFI_STA;return wifi_initialized?
 int esp_wifi_get_channel(uint8_t* channel,wifi_second_chan_t*){*channel=wifi_channel;return 0;}
 int esp_wifi_set_channel(int channel,int){wifi_channel=channel;return 0;}
 int esp_now_del_peer(const uint8_t*){return 0;}
+#include <helpers/BridgeAwake.h>
 namespace mesh {namespace wifi {
  std::atomic<uint8_t>& bridgeEspNowChannel(){static std::atomic<uint8_t> channel{0};return channel;}
 }}
