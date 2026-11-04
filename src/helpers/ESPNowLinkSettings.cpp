@@ -211,13 +211,12 @@ bool handleEspNowLinkCommand(const char* command, char* reply, size_t capacity,
     snprintf(reply, capacity, "Error: secret must be 1-%u characters", (unsigned)(SecretSize - 1));
     return true;
   }
-  const bool unchanged = healthy && !strncmp(saved_secret, value, SecretSize);
+  // Always "saved" (review F9): the reply never tells whether a guess matched.
   if (!save(saved_wrapped, value)) {
     snprintf(reply, capacity, "Error: espnow.secret not saved");
     return true;
   }
-  snprintf(reply, capacity, unchanged ? "OK - espnow.secret unchanged"
-      : active_wrapped || saved_wrapped ? "OK - espnow.secret saved; reboot to apply"
+  snprintf(reply, capacity, active_wrapped || saved_wrapped ? "OK - espnow.secret saved; reboot to apply"
       : "OK - espnow.secret saved");
   return true;
 }

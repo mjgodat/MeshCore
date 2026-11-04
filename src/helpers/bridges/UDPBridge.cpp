@@ -41,8 +41,9 @@ bool UDPBridge::authenticate(void* context, const uint8_t* data, size_t size, ui
 void UDPBridge::begin() {
   if (_initialized || !_network_ready || !_settings || !_settings->enabled) return;
   _active = *_settings;
+  const char* key = mesh::discovery::udpSessionSecret(_prefs->bridge_secret);
   _secret_length = 0;
-  while (_secret_length < sizeof(_prefs->bridge_secret) && _prefs->bridge_secret[_secret_length]) ++_secret_length;
+  while (_secret_length < sizeof(_prefs->bridge_secret) && key[_secret_length]) ++_secret_length;
   _secret_valid = _secret_length > 0 && _secret_length < sizeof(_prefs->bridge_secret);
   if (!_secret_valid || !udp::validPrefs(_active)) { error(EINVAL); return; }
   for (const auto& peer : _active.peers) {
@@ -54,7 +55,7 @@ void UDPBridge::begin() {
       error(EADDRNOTAVAIL); return;
     }
   }
-  memcpy(_secret, _prefs->bridge_secret, _secret_length);
+  memcpy(_secret, key, _secret_length);
   _socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (_socket < 0) { error(errno); return; }
   const int flags = fcntl(_socket, F_GETFL, 0);
@@ -103,9 +104,10 @@ void UDPBridge::serviceNetwork(bool ready, uint32_t local_address, uint32_t netm
   // The shared bridge secret can change without a transport-specific restart
   // callback. End the old authenticated session before any more socket work.
   if (_initialized) {
-    const size_t length = strnlen(_prefs->bridge_secret, sizeof(_prefs->bridge_secret));
+    const char* key = mesh::discovery::udpSessionSecret(_prefs->bridge_secret);
+    const size_t length = strnlen(key, sizeof(_prefs->bridge_secret));
     if (!length || length >= sizeof(_prefs->bridge_secret) || length != _secret_length
-        || memcmp(_secret, _prefs->bridge_secret, length)) {
+        || memcmp(_secret, key, length)) {
       end(); _retry_at = millis();
     }
   }
@@ -269,15 +271,11 @@ void UDPBridge::drainReceive() {
   onPacketReceived(packet);
 }
 void UDPBridge::onPacketReceived(mesh::Packet* packet) {
-  if (!packet) return;
-  // bridge.rxlimit: one shared budget for packets entering from the bridges.
-  if (!mesh::discovery::rxLimiter().admit(millis())) {
-    _mgr->free(packet);
-    onIngressResult(IngressResult::Filtered);
-    return;
-  }
-  packet->udp_bridge_ingress = true;
-  handleReceivedPacket(packet);
+  if (packet) { packet->udp_bridge_ingress = true; handleReceivedPacket(packet); }
+}
+bool UDPBridge::admitIngress() {
+  // bridge.rxlimit: one budget shared with the ESP-NOW bridge, new packets only.
+  return mesh::discovery::rxLimiter().admit(millis());
 }
 void UDPBridge::onIngressResult(IngressResult result) {
   switch (result) {

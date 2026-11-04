@@ -202,6 +202,7 @@ private:
   void recordError(mesh::bridge::diag::Stage stage, int32_t code);
   void emitDebug();
   void onIngressResult(IngressResult result) override;
+  bool admitIngress() override;
 
   /**
    * Wraps one payload (a MeshCore packet or an observer frame) in the

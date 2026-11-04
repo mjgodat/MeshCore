@@ -105,5 +105,6 @@ private:
   void note(uint32_t& value);
   void error(int code);
   void onIngressResult(IngressResult result) override;
+  bool admitIngress() override;
 };
 #endif

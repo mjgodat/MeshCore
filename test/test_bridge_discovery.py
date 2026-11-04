@@ -81,11 +81,11 @@ int main() {
   assert(!isDiscoveryFrame(observer, 6));
 
   Reply r; r.boot = a.boot; r.counter = 7; memcpy(r.prefix, prefix, 6); strcpy(r.name, "CYD head");
-  r.flags = REPLY_WANTS_OBSERVER; const uint8_t hip[4] = {192, 168, 1, 77}; memcpy(r.ip, hip, 4); r.port = 4404;
+  r.flags = 0; const uint8_t hip[4] = {192, 168, 1, 77}; memcpy(r.ip, hip, 4); r.port = 4404;
   uint8_t g[MAX_FRAME];
   const size_t m = encodeReply(r, mac, key, g, sizeof(g));
   assert(m == REPLY_FRAME && isReply(g, m));
-  Reply q; assert(decodeReply(g, m, mac, key, q) && q.port == 4404 && q.flags == 1 && !strcmp(q.name, "CYD head"));
+  Reply q; assert(decodeReply(g, m, mac, key, q) && q.port == 4404 && q.flags == 0 && !strcmp(q.name, "CYD head"));
   assert(!decodeReply(g, m, mac, other, q));
   assert(!decodeAnnounce(g, m, mac, key, b));
   // freshness: this boot, one of the last 12 counters
@@ -99,8 +99,13 @@ int main() {
     h[i] = r; h[i].prefix[0] = uint8_t(i); h[i].ip[3] = uint8_t(10 + i);
   }
   assert(peers.offer(h[0], now) == PairResult::Added && peers.count() == 1);
+  // review F2: a recorded reply (same or older counter) cannot be replayed
+  assert(peers.offer(h[0], now + 5) == PairResult::Replay && peers.replays() == 1);
+  h[0].counter = 8;
   assert(peers.offer(h[0], now + 10) == PairResult::Refreshed && peers.count() == 1);
-  Reply moved = h[0]; moved.ip[3] = 99;
+  Reply old = h[0]; old.counter = 7; old.ip[3] = 66;
+  assert(peers.offer(old, now + 11) == PairResult::Replay && peers.slot(0).ip[3] == 10);
+  Reply moved = h[0]; moved.ip[3] = 99; moved.counter = 9;
   assert(peers.offer(moved, now + 20) == PairResult::Moved && peers.slot(peers.last()).ip[3] == 99);
   assert(peers.offer(h[1], now) == PairResult::Added && peers.offer(h[2], now) == PairResult::Added);
   assert(peers.offer(h[3], now) == PairResult::Added && peers.count() == 4);
@@ -108,6 +113,7 @@ int main() {
   Reply bad = h[4]; bad.ip[0] = 127; assert(peers.offer(bad, now) == PairResult::Invalid);
   bad = h[4]; bad.port = 0; assert(peers.offer(bad, now) == PairResult::Invalid);
   // expiry: refreshed ones live on
+  h[1].counter = 8;
   assert(peers.offer(h[1], now + 200000) == PairResult::Refreshed);
   const uint8_t gone = peers.expire(now + kAutoPeerTtlMs + 100);
   assert(peers.count() == 1 && (gone & 0x0F) == 0x0D);
@@ -128,16 +134,20 @@ int main() {
   assert(rl2.offer(h[4], 100 + 15000) == PairResult::Added);
   assert(rl2.offer(h[5], 100 + 15001) == PairResult::RateLimited);
 
-  // RxLimiter: default 120/min burst 30; 0 = no limit
+  // RxLimiter: default 0 (no limit, review F1); suggested 300/min, burst 60
   RxLimiter l;
-  assert(l.rate() == 120 && l.burst() == 30);
+  assert(kRxLimitDefault == 0 && l.rate() == 0 && l.burst() == 0);
+  for (int i = 0; i < 1000; ++i) assert(l.admit(5));
+  l.configure(kRxLimitSuggested);
+  assert(l.rate() == 300 && l.burst() == 60);
   int passed = 0;
   for (int i = 0; i < 100; ++i) passed += l.admit(10) ? 1 : 0;
-  assert(passed == 30 && l.dropped() == 70);
-  assert(!l.admit(10 + 499) && l.admit(10 + 500 + 1));   // 2 per second
+  assert(passed == 60 && l.dropped() == 40);
+  assert(!l.admit(10 + 199) && l.admit(10 + 200 + 1));   // 5 per second
   l.configure(0);
   for (int i = 0; i < 1000; ++i) assert(l.admit(20));
   l.configure(3); assert(l.burst() == 1 && l.admit(0) && !l.admit(1) && l.admit(20001));
+  l.configure(10); assert(l.burst() == 2);
   l.configure(9000); assert(l.rate() == kRxLimitMax);
   assert(&rxLimiter() == &rxLimiter());
   return 0;
@@ -163,35 +173,75 @@ static bool run(const char* command, const DiscoveryRuntime* rt = nullptr) {
 int main() {
   MemoryFS fs; const char* path = "/bridge_discovery";
   loadBridgeDiscoverySettings(&fs);
-  assert(bridgeAnnounceEnabled() && bridgeRxLimit() == 120 && fs.files.empty());
-  assert(rxLimiter().rate() == 120);
-  assert(run("get bridge.announce") && !strcmp(reply, "> on"));
-  assert(run("get bridge.rxlimit") && !strncmp(reply, "> 120/min (burst 30) passed=", 28));
+  // defaults: announce auto (only while UDP runs), rxlimit 0 = off (review F1, F3)
+  assert(bridgeAnnounceMode() == AnnounceMode::Auto && bridgeRxLimit() == 0 && fs.files.empty());
+  assert(!bridgeAnnounceActive(false) && bridgeAnnounceActive(true));
+  assert(rxLimiter().rate() == 0);
+  assert(run("get bridge.announce") && !strcmp(reply, "> auto"));
+  assert(run("get bridge.rxlimit") && !strncmp(reply, "> 0 (no limit) passed=", 22));
+  // udp.secret: keys UDP and discovery; off = bridge.secret; never printed (review F6)
+  assert(run("get udp.secret") && !strcmp(reply, "> off (bridge.secret)") && !udpSecretOverride()[0]);
+  assert(!strcmp(udpSessionSecret("bridge-key"), "bridge-key"));
+  assert(run("set udp.secret lan-key") && !strcmp(reply, "OK - udp.secret saved; UDP sessions restart"));
+  assert(!strcmp(udpSessionSecret("bridge-key"), "lan-key"));
+  assert(run("set udp.secret lan-key") && !strcmp(reply, "OK - udp.secret saved; UDP sessions restart"));
+  assert(run("get udp.secret") && !strcmp(reply, "> set"));
+  for (const char* bad : {"set udp.secret", "set udp.secret 0123456789abcdef"})
+    assert(run(bad) && !strncmp(reply, "Error:", 6));
+  loadBridgeDiscoverySettings(&fs); assert(!strcmp(udpSessionSecret("x"), "lan-key"));
+  assert(run("set udp.secret off") && !strcmp(udpSessionSecret("bridge-key"), "bridge-key"));
+  fs.files.clear(); loadBridgeDiscoverySettings(&fs);
   assert(run("get bridge.autopeers") && !strcmp(reply, "> none"));
   DiscoveryRuntime rt; rt.describe_peers = peers;
   assert(run("get bridge.autopeers", &rt) && !strcmp(reply, "> 1 10.0.0.5:4404/A1B2/290s"));
-  for (const char* bad : {"set bridge.announce", "set bridge.announce 1", "set bridge.rxlimit",
+  for (const char* bad : {"set bridge.announce", "set bridge.announce 1", "set bridge.announce AUTO", "set bridge.rxlimit",
                           "set bridge.rxlimit -1", "set bridge.rxlimit 6001", "set bridge.rxlimit 10x",
                           "get bridge.rxlimit x", "get bridge.autopeers x"})
     assert(run(bad) && !strncmp(reply, "Error:", 6));
   assert(fs.files.empty());
   assert(run("set bridge.rxlimit 600") && !strcmp(reply, "OK - bridge.rxlimit saved"));
-  assert(bridgeRxLimit() == 600 && rxLimiter().rate() == 600 && fs.files.at(path).size() == 11);
-  assert(run("set bridge.announce off") && !strcmp(reply, "OK - bridge.announce saved") && !bridgeAnnounceEnabled());
+  assert(bridgeRxLimit() == 600 && rxLimiter().rate() == 600 && fs.files.at(path).size() == 27);
+  assert(run("set bridge.announce off") && !strcmp(reply, "OK - bridge.announce saved"));
+  assert(bridgeAnnounceMode() == AnnounceMode::Off && !bridgeAnnounceActive(true));
   assert(run("set bridge.announce off") && !strcmp(reply, "OK - bridge.announce unchanged"));
   assert(run("set bridge.rxlimit 0") && !strcmp(reply, "OK - bridge.rxlimit saved"));
   assert(run("get bridge.rxlimit") && !strncmp(reply, "> 0 (no limit)", 14));
   loadBridgeDiscoverySettings(&fs);
-  assert(!bridgeAnnounceEnabled() && bridgeRxLimit() == 0 && rxLimiter().rate() == 0);
+  assert(bridgeAnnounceMode() == AnnounceMode::Off && bridgeRxLimit() == 0 && rxLimiter().rate() == 0);
   fs.files[path][5] ^= 1; loadBridgeDiscoverySettings(&fs);
-  assert(bridgeAnnounceEnabled() && bridgeRxLimit() == 120);
+  assert(bridgeAnnounceMode() == AnnounceMode::Auto && bridgeRxLimit() == 0);
   assert(run("get bridge.announce") && strstr(reply, "unavailable"));
-  assert(run("set bridge.announce on") && !strcmp(reply, "OK - bridge.announce saved"));
+  assert(run("set bridge.announce on") && !strcmp(reply, "OK - bridge.announce saved") && bridgeAnnounceActive(false));
   fs.fail_write = true;
-  assert(run("set bridge.rxlimit 5") && !strcmp(reply, "Error: bridge.rxlimit not saved") && bridgeRxLimit() == 120);
+  assert(run("set bridge.rxlimit 5") && !strcmp(reply, "Error: bridge.rxlimit not saved") && bridgeRxLimit() == 0);
   fs.fail_write = false;
   for (const char* other : {"get bridge.format", "set bridge.secret x", "get bridge.announces", "set bridge.rxlimits 4"})
     assert(!run(other) && !strcmp(reply, "untouched"));
+  return 0;
+}
+'''
+
+
+ESPNOW_ONLY_SETTINGS = r'''
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <initializer_list>
+#include <vector>
+#include "BridgeDiscoverySettings.h"
+#include "settings_under_test.cpp"
+#ifdef MESH_BRIDGE_DISCOVERY
+#error discovery must be compiled out without the UDP bridge
+#endif
+using namespace mesh::discovery;
+int main() {
+  MemoryFS fs; loadBridgeDiscoverySettings(&fs);
+  char reply[160];
+  assert(handleBridgeDiscoveryCommand("set bridge.rxlimit 300", reply, 157) && !strcmp(reply, "OK - bridge.rxlimit saved"));
+  for (const char* c : {"get bridge.announce", "set bridge.announce on", "get bridge.autopeers", "get udp.secret",
+                        "set udp.secret x"}) {
+    strcpy(reply, "untouched"); assert(!handleBridgeDiscoveryCommand(c, reply, 157) && !strcmp(reply, "untouched"));
+  }
   return 0;
 }
 '''
@@ -274,6 +324,26 @@ static void manual_wins() {
   const uint8_t ninth[4] = {10, 11, 12, 40};
   assert(a.bridge.addAutoPeer(ninth, 4404) == -1);
 }
+static void session_key() {
+  // review F6: udp.secret on the repeater keys the UDP session instead of bridge.secret
+  Node a(1, 2), b(2, 1);
+  strcpy(mesh::discovery::udpSecretOverride(), "lan-key");
+  a.start(); run(a, b, 1);
+  strcpy(mesh::discovery::udpSecretOverride(), "");
+  strcpy(b.prefs.bridge_secret, "lan-key"); b.start();
+  // a and b run in one process: give each loop its own key
+  for (unsigned i = 0; i < 60; ++i) {
+    test_now += 100;
+    strcpy(mesh::discovery::udpSecretOverride(), "lan-key"); a.bridge.loop();
+    strcpy(mesh::discovery::udpSecretOverride(), ""); b.bridge.loop();
+  }
+  assert(a.status().find("ready=1") != std::string::npos && b.status().find("ready=1") != std::string::npos);
+  // a key change ends the session at once
+  strcpy(mesh::discovery::udpSecretOverride(), "other");
+  a.bridge.serviceNetwork(true, address(1), 0x00ffffff);
+  assert(a.status().find("ready=0") != std::string::npos);
+  strcpy(mesh::discovery::udpSecretOverride(), "");
+}
 static void rx_limit() {
   Node a(1, 2), b(2, 1);
   a.start(); b.start(); run(a, b, 60);
@@ -292,6 +362,7 @@ int main(int argc, char** argv) {
   if (name == "discovery") discovery_runtime();
   else if (name == "manual") manual_wins();
   else if (name == "rxlimit") rx_limit();
+  else if (name == "sessionkey") session_key();
   else return 2;
   printf("%s passed\n", argv[1]);
   return 0;
@@ -345,7 +416,26 @@ int main(int argc, char** argv) {
   assert(got.size() == 1 && got[0].size() == sizeof(reply) && mgr.received.empty() && bridge.discoveryReceived() == 1);
   // a raw discovery frame on a wrapped link is foreign (strict)
   if (wrapped) { bridge.queueReceivedFrame(mac, reply, sizeof(reply)); bridge.loop(); assert(got.size() == 1); }
+  // review F1: duplicates (repeat copies, relay echoes) never spend the
+  // budget: one fresh packet, five copies of it, then a fresh one still passes.
+  mesh::discovery::rxLimiter().configure(10);   // burst 2
+  {
+    const size_t before = mgr.received.size();
+    auto send = [&](uint8_t id) {
+      auto q = packet(id); uint8_t buf[250]; size_t len = q.length;
+      if (wrapped) len = mesh::bridge::wrapFrame(q.data, q.length, prefs.bridge_secret, sizeof(prefs.bridge_secret), buf, sizeof(buf));
+      else memcpy(buf, q.data, q.length);
+      bridge.queueReceivedFrame(mac, buf, (int)len); bridge.loop();
+    };
+    send(0x61); for (int i = 0; i < 5; ++i) send(0x61);
+    send(0x62);
+    assert(mgr.received.size() == before + 2 && mesh::discovery::rxLimiter().dropped() == 0);
+    send(0x63);   // the third new packet within the burst is dropped
+    assert(mgr.received.size() == before + 2 && mesh::discovery::rxLimiter().dropped() == 1);
+  }
   // bridge.rxlimit: packets from ESP-NOW share the budget
+  mesh::discovery::rxLimiter().configure(0);
+  mesh::discovery::rxLimiter().resetCounters();
   mesh::discovery::rxLimiter().configure(4);
   for (int i = 0; i < 3; ++i) {
     auto q = packet(uint8_t(0x20 + i)); uint8_t buf[250]; size_t len = q.length;
@@ -353,11 +443,64 @@ int main(int argc, char** argv) {
     else memcpy(buf, q.data, q.length);
     bridge.queueReceivedFrame(mac, buf, (int)len); bridge.loop();
   }
-  assert(mgr.received.size() == 1 && mesh::discovery::rxLimiter().dropped() == 2 && mgr.allocs == mgr.frees);
+  assert(mgr.received.size() == 3 && mesh::discovery::rxLimiter().dropped() == 2 && mgr.allocs == mgr.frees);
   bridge.end();
   return 0;
 }
 '''
+
+
+KEY_CHECKS = r'''
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <helpers/bridges/DiscoveryKey.h>
+using namespace mesh::discovery;
+int main() {
+  uint8_t key[KEY_SIZE];
+  assert(deriveKey("fleet-test", 10, key));
+  printf("KEY ");
+  for (uint8_t b : key) printf("%02x", b);
+  printf("\n");
+  KeyCache cache;
+  const uint8_t* k1 = cache.get("fleet-test");
+  assert(k1 && !memcmp(k1, key, KEY_SIZE) && cache.derivations() == 1);
+  assert(cache.get("fleet-test") == k1 && cache.derivations() == 1);       // cached, not per frame
+  assert(cache.get("other") && cache.derivations() == 2);
+  assert(!cache.get("") && !cache.get(nullptr) && !cache.get("0123456789abcdef"));
+  Announce a; a.boot = 1; a.counter = 2; a.caps = CAP_UDP; a.port = 4404; a.ip[0] = 10; a.ip[3] = 5;
+  uint8_t f[MAX_FRAME];
+  const size_t n = encodeAnnounce(a, keyedMac, key, f, sizeof(f));
+  assert(n == ANNOUNCE_FRAME);
+  printf("FRAME ");
+  for (size_t i = 0; i < n; ++i) printf("%02x", f[i]);
+  printf("\n");
+  Announce b; assert(decodeAnnounce(f, n, keyedMac, key, b) && b.counter == 2);
+  uint8_t wrong[KEY_SIZE]; deriveKey("fleet-tesu", 10, wrong);
+  assert(!decodeAnnounce(f, n, keyedMac, wrong, b));
+  return 0;
+}
+'''
+
+
+class DiscoveryKeyTests(unittest.TestCase):
+    def test_pbkdf2_key_and_tag_match_python(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "t.cpp").write_text(KEY_CHECKS)
+            from test_espnow_repeat import compiler, sanitizer_flags
+            built = subprocess.run([compiler(), "-std=c++11", "-O1", "-g", "-Wall", "-Wextra", *sanitizer_flags(),
+                                    "-I", str(ROOT / "test/mocks"), "-I", str(ROOT / "src"),
+                                    str(folder / "t.cpp"), "-o", str(folder / "t")],
+                                   capture_output=True, text=True, timeout=120)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            run = subprocess.run([str(folder / "t")], capture_output=True, text=True, timeout=120)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        key = hashlib.pbkdf2_hmac("sha256", b"fleet-test", b"MeshCore discovery key v1", 2048, 32)
+        self.assertEqual(run.stdout.split("KEY ", 1)[1].split()[0], key.hex())
+        frame = bytes.fromhex(run.stdout.split("FRAME ", 1)[1].split()[0])
+        self.assertEqual(frame[-8:], tag(key, frame[:-8]))
+        self.assertNotEqual(frame[-8:], tag(b"fleet-test", frame[:-8]))   # never the raw secret
 
 
 class DiscoveryCodecTests(unittest.TestCase):
@@ -389,6 +532,15 @@ class DiscoverySettingsTests(unittest.TestCase):
             (folder / "BridgeDiscoverySettings.h").write_bytes((ROOT / "src/helpers/BridgeDiscoverySettings.h").read_bytes())
             (folder / "settings_under_test.cpp").write_bytes((ROOT / "src/helpers/BridgeDiscoverySettings.cpp").read_bytes())
             build_and_run(self, SETTINGS_CHECKS, includes=[folder, ROOT / "src/helpers", ROOT / "src"],
+                          defines=["ESP32_PLATFORM=1", "WITH_ESPNOW_BRIDGE=1", "WITH_UDP_BRIDGE=1"], strict=False)
+
+    def test_without_the_udp_bridge_only_rxlimit_exists(self):
+        # review F3: no announce, autopeers or udp.secret in ESP-NOW-only builds
+        with tempfile.TemporaryDirectory(prefix="bridge-discovery-") as tmp:
+            folder = settings_folder(tmp)
+            (folder / "BridgeDiscoverySettings.h").write_bytes((ROOT / "src/helpers/BridgeDiscoverySettings.h").read_bytes())
+            (folder / "settings_under_test.cpp").write_bytes((ROOT / "src/helpers/BridgeDiscoverySettings.cpp").read_bytes())
+            build_and_run(self, ESPNOW_ONLY_SETTINGS, includes=[folder, ROOT / "src/helpers", ROOT / "src"],
                           defines=["ESP32_PLATFORM=1", "WITH_ESPNOW_BRIDGE=1"], strict=False)
 
 
@@ -433,6 +585,9 @@ class UdpDiscoveryTests(unittest.TestCase):
 
     def test_rx_limit_drops_udp_floods(self):
         self.check("rxlimit")
+
+    def test_udp_secret_keys_the_session(self):
+        self.check("sessionkey")
 
 
 class EspNowDiscoveryTests(unittest.TestCase):
@@ -511,21 +666,31 @@ class RepeaterWiringTests(unittest.TestCase):
         handler = source[source.index("void MyMesh::onDiscoveryFrame("):source.index("void MyMesh::serviceDiscovery()")]
         verify = handler.index("decodeReply(")
         fresh = handler.index("freshReply(")
+        spoof = handler.index("memcmp(ip, reply.ip, 4) || port != reply.port")   # review F2
         manual = handler.index("equalPeer(manual, wanted)")
+        self.assertLess(fresh, spoof)
+        self.assertLess(spoof, manual)
+        self.assertNotIn("memcpy(reply.ip, ip, 4)", handler)
+        self.assertIn("keyedMac", handler)
         offer = handler.index("d.peers.offer(")
         add = handler.index("addAutoPeer(")
         self.assertLess(verify, fresh)
         self.assertLess(fresh, manual)
         self.assertLess(manual, offer)
         self.assertLess(offer, add)
-        loop = source[source.index("serviceUDPBridge();\n#endif\n#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)"):]
+        loop = source[source.index("serviceUDPBridge();\n#endif\n#if defined(MESH_BRIDGE_DISCOVERY)"):]
         self.assertIn("serviceDiscovery();", loop[:200])
         service = source[source.index("void MyMesh::serviceDiscovery()"):source.index("void MyMesh::describeAutoPeers(")]
-        self.assertIn("bridgeAnnounceEnabled()", service)
+        self.assertIn("bridgeAnnounceActive(udp_on)", service)
+        self.assertIn("discoveryKey()", service)
+        self.assertIn("#if defined(MESH_BRIDGE_DISCOVERY)\n  serviceDiscovery();", source)
+        self.assertNotIn("#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)\n  serviceDiscovery();", source)
         self.assertIn("sendAuxFrame(frame, n)", service)
         self.assertIn("sendDiscovery(frame, n)", service)
         cli = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
         self.assertIn("handleBridgeDiscoveryCommand(", cli)
+        # udp.secret is answered before Cascade's udp.* parser refuses it
+        self.assertLess(cli.index("handleBridgeDiscoveryCommand("), cli.index("handleUDPBridgeCommand(sender_timestamp"))
         self.assertIn("loadBridgeDiscoverySettings(", cli)
 
 
