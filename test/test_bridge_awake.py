@@ -99,6 +99,44 @@ class BridgeAwakeTests(unittest.TestCase):
  assert(bridge._awake_repairs == 2);              // nothing to repair when nothing changed
  bridge.end();''')
 
+    def test_refused_awake_backs_off_and_is_counted(self):
+        # L4: when the driver refuses WIFI_PS_NONE (Bluetooth coexistence)
+        # the watch backs off 500 ms .. 10 s instead of retrying every 250 ms.
+        self.scenario(r'''
+ shared_station_up();
+ ESPNowBridge bridge(&prefs,&mgr,&rtc); bridge.begin();
+ wifi_ps = WIFI_PS_MIN_MODEM; failure = 19;       // esp_wifi_set_ps now refused
+ const unsigned writes = ps_writes;
+ run_loops(bridge, 60000);
+ const unsigned attempts = ps_writes - writes;
+ assert(bridge._awake_refusals >= 6 && bridge._awake_refusals <= 12);   // not 240
+ assert(attempts <= 2 * bridge._awake_refusals + 2);
+ assert(bridge._awake_backoff_ms == 10000);
+ char reply[160]; bridge.formatStats("awake", reply, sizeof(reply));
+ assert(strstr(reply, "refused=") && strstr(reply, "backoff_ms=10000"));
+ failure = 0;                                     // accepted again: back to 250 ms
+ run_loops(bridge, 10500);
+ assert(wifi_ps == WIFI_PS_NONE && bridge._awake_backoff_ms == 0);
+ bridge.end();''')
+
+    def test_powersave_replies_while_the_bridge_runs(self):
+        # L5: the saved setting and what the radio does differ while the bridge runs.
+        self.scenario(r'''
+ char r[160];
+ strcpy(r, "OK - WiFi power save saved; reboot to apply");
+ mesh::wifi::annotatePowerSaveReply(r, sizeof(r), true, true);
+ assert(!strcmp(r, "OK - saved (radio kept awake while the ESP-NOW bridge runs)"));
+ strcpy(r, "Error: power save must be none, min, or max");
+ mesh::wifi::annotatePowerSaveReply(r, sizeof(r), true, true); assert(!strncmp(r, "Error", 5));
+ strcpy(r, "OK - WiFi power save saved; reboot to apply");
+ mesh::wifi::annotatePowerSaveReply(r, sizeof(r), false, true); assert(strstr(r, "reboot to apply"));
+ strcpy(r, "> min"); mesh::wifi::annotatePowerSaveReply(r, sizeof(r), true, false);
+ assert(!strcmp(r, "> min (saved; effective none while the ESP-NOW bridge runs)"));
+ strcpy(r, "> none"); mesh::wifi::annotatePowerSaveReply(r, sizeof(r), true, false); assert(!strcmp(r, "> none"));
+ strcpy(r, "> min"); mesh::wifi::annotatePowerSaveReply(r, sizeof(r), false, false); assert(!strcmp(r, "> min"));
+ char tiny[8] = "> min"; mesh::wifi::annotatePowerSaveReply(tiny, sizeof(tiny), true, false);
+ assert(strlen(tiny) < sizeof(tiny));''')
+
     def test_bridge_restart_and_release(self):
         # Bridge restarted (channel change) while the station owner keeps
         # asking for sleep; once the bridge stops the owner's choice applies.
@@ -109,8 +147,14 @@ class BridgeAwakeTests(unittest.TestCase):
    bridge.begin(); assert(bridge._initialized && wifi_ps == WIFI_PS_NONE);
    owner_applies(WIFI_PS_MIN_MODEM); assert(wifi_ps == WIFI_PS_NONE);
    bridge.end();
-   owner_applies(WIFI_PS_MIN_MODEM); assert(wifi_ps == WIFI_PS_MIN_MODEM);   // released
- }''')
+   // L3: the owner's preference is back at once, cache included
+   assert(wifi_ps == WIFI_PS_MIN_MODEM && WiFi.getSleep() == WIFI_PS_MIN_MODEM);
+ }
+ // an owner that changed its mind while the bridge ran gets the newer choice
+ bridge.begin(); owner_applies(WIFI_PS_MAX_MODEM); assert(wifi_ps == WIFI_PS_NONE);
+ bridge.end(); assert(wifi_ps == WIFI_PS_MAX_MODEM && WiFi.getSleep() == WIFI_PS_MAX_MODEM);
+ // an owner that wants no sleep keeps none
+ owner_applies(WIFI_PS_NONE); bridge.begin(); bridge.end(); assert(wifi_ps == WIFI_PS_NONE);''')
 
 
 if __name__ == "__main__":

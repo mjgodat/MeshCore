@@ -88,7 +88,7 @@ int main() {
   };
   assert(command("get espnow.status", 77));
   assert(callbacks.statuses == 1 && callbacks.capacity == 157);
-  for (const char* page : {"", "mac", "rx", "tx", "drops", "test", "obs"}) {
+  for (const char* page : {"", "mac", "rx", "tx", "drops", "test", "obs", "awake"}) {
     const std::string text = std::string("get espnow.stats") + (*page ? " " : "") + page;
     assert(command(text.c_str(), 77));
     assert(callbacks.page == page && callbacks.capacity == 157);
@@ -114,7 +114,7 @@ int main() {
     assert(strncmp(reply, "Error:", 6) == 0 && callbacks.count() == before);
   }
   assert(command("get espnow.stats unknown"));
-  assert(strstr(reply, "[mac|rx|tx|drops|test|obs]"));
+  assert(strstr(reply, "[mac|rx|tx|drops|test|obs|awake]"));
   for (const char* text : {"espnowtest", "espnowx test", "get espnow.enabled", "get repeat"}) {
     const int before = callbacks.count();
     assert(!command(text));
