@@ -125,15 +125,29 @@ static void commands() {
   }
   // udp.*
   assert(run(c, "set udp.ssid My Wifi 5") == Result::Changed && !strcmp(c.ssid, "My Wifi 5"));
-  assert(run(c, "set udp.ssid") == Result::Handled && !strncmp(reply, "Error:", 6) && !strcmp(c.ssid, "My Wifi 5"));
   assert(run(c, "set udp.ssid 123456789012345678901234567890123") == Result::Handled && !strcmp(c.ssid, "My Wifi 5"));
+  // clearing: empty or off, the whole buffer zeroed
+  assert(run(c, "set udp.ssid off") == Result::Changed && !strcmp(reply, "OK - udp.ssid cleared"));
+  for (char ch : c.ssid) assert(ch == 0);
+  assert(run(c, "set udp.ssid My Wifi 5") == Result::Changed);
+  assert(run(c, "set udp.ssid") == Result::Changed && !c.ssid[0]);
+  assert(run(c, "set udp.ssid My Wifi 5") == Result::Changed);
   assert(run(c, "set udp.password short") == Result::Handled && !strncmp(reply, "Error:", 6) && !c.password[0]);
   assert(run(c, "set udp.password long enough pw") == Result::Changed && !strcmp(c.password, "long enough pw"));
   assert(!strstr(reply, "long enough"));   // never echoed
   assert(run(c, "set udp.password") == Result::Changed && !c.password[0] && strstr(reply, "cleared"));
-  assert(run(c, "set udp.secret") == Result::Handled && !c.secret[0]);
   assert(run(c, "set udp.secret 1234567890123456") == Result::Handled && !c.secret[0]);
+  assert(run(c, "set udp.secret abcdefgh") == Result::Changed && !strcmp(c.secret, "abcdefgh") && !strstr(reply, "abcdefgh"));
   assert(run(c, "set udp.secret abc") == Result::Changed && !strcmp(c.secret, "abc") && !strstr(reply, "abc"));
+  for (size_t i = 4; i < sizeof(c.secret); ++i) assert(c.secret[i] == 0);   // no tail of the longer one
+  assert(run(c, "set udp.secret off") == Result::Changed && !strcmp(reply, "OK - udp.secret cleared"));
+  for (char ch : c.secret) assert(ch == 0);
+  assert(run(c, "set udp.secret abc") == Result::Changed);
+  assert(run(c, "set udp.secret") == Result::Changed && !c.secret[0]);
+  assert(run(c, "set udp.secret abc") == Result::Changed);
+  assert(run(c, "set udp.password long enough pw") == Result::Changed);
+  assert(run(c, "set udp.password off") == Result::Changed && !c.password[0] && strstr(reply, "cleared"));
+  for (char ch : c.password) assert(ch == 0);
   for (const char* bad : {"set udp.peer", "set udp.peer 10.0.0.1", "set udp.peer 127.0.0.1:4404", "set udp.peer 10.0.0.1:0",
                           "set udp.peer 224.0.0.1:4404", "set udp.peer 10.0.0.256:1"})
     assert(run(c, bad) == Result::Handled && !strncmp(reply, "Error:", 6) && !c.repeater.enabled());
