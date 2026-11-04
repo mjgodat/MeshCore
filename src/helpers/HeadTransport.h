@@ -370,27 +370,41 @@ inline Result handleCommand(Config& c, const char* command, char* reply, size_t 
   }
   if ((v = valueAfter(command, "set udp.ssid"))) {
     const size_t n = strlen(v);
-    if (n == 0 || n > kSsidMax) { snprintf(reply, cap, "Error: udp.ssid is 1-32 characters"); return Result::Handled; }
+    if (n == 0 || !strcmp(v, "off")) {   // clear (Cascade style: empty or off)
+      memset(c.ssid, 0, sizeof(c.ssid));
+      snprintf(reply, cap, "OK - udp.ssid cleared");
+      return Result::Changed;
+    }
+    if (n > kSsidMax) { snprintf(reply, cap, "Error: udp.ssid is 1-32 characters, or off"); return Result::Handled; }
+    memset(c.ssid, 0, sizeof(c.ssid));
     memcpy(c.ssid, v, n + 1);
     snprintf(reply, cap, "OK - udp.ssid saved");
     return Result::Changed;
   }
   if ((v = valueAfter(command, "set udp.password"))) {
-    const size_t n = strlen(v);   // empty = open network
+    if (!strcmp(v, "off")) v = "";   // clear
+    const size_t n = strlen(v);   // empty = open network / cleared
     if (n > kPasswordMax || (n > 0 && n < 8)) {
       snprintf(reply, cap, "Error: udp.password is 8-63 characters (empty for an open network)");
       return Result::Handled;
     }
+    memset(c.password, 0, sizeof(c.password));
     memcpy(c.password, v, n + 1);
     snprintf(reply, cap, "OK - udp.password %s", n ? "saved" : "cleared");
     return Result::Changed;
   }
   if ((v = valueAfter(command, "set udp.secret"))) {
     const size_t n = strlen(v);
-    if (n == 0 || n > kSecretMax) {
-      snprintf(reply, cap, "Error: udp.secret is the repeater's bridge.secret, 1-15 characters");
+    if (n == 0 || !strcmp(v, "off")) {
+      memset(c.secret, 0, sizeof(c.secret));
+      snprintf(reply, cap, "OK - udp.secret cleared");
+      return Result::Changed;
+    }
+    if (n > kSecretMax) {
+      snprintf(reply, cap, "Error: udp.secret is the repeater's bridge.secret, 1-15 characters, or off");
       return Result::Handled;
     }
+    memset(c.secret, 0, sizeof(c.secret));
     memcpy(c.secret, v, n + 1);
     snprintf(reply, cap, "OK - udp.secret saved");
     return Result::Changed;
