@@ -975,8 +975,6 @@ class HomeScreen : public UIScreen {
 #endif
 
 public:
-#if UI_POCKET_GUI
-  bool isPocketBoard() const { return _page == HomePage::FIRST; }
 #if UI_REPEATER_HEAD
   // Test consoles: the carousel page.
   int pageIndex() const { return _page; }
@@ -990,6 +988,8 @@ public:
     }
   }
 #endif
+#if UI_POCKET_GUI
+  bool isPocketBoard() const { return _page == HomePage::FIRST; }
   void pocketMessageAdded(int channel) {
     if (channel == _task->pocketSettings().channel) _pocket.messageAdded();
   }
