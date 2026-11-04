@@ -34,6 +34,8 @@ mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertSlowBank() {
 #endif
 #if defined(ESP32_PLATFORM)
 #include <helpers/esp32/BootFileSystem.h>
+#include <helpers/esp32/HeapHealth.h>
+#include <helpers/esp32/LoopWatchdog.h>
 #include <helpers/WiFiNetworkPowerPolicy.h>
 #if defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_UDP_BRIDGE) \
     || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))
@@ -1461,6 +1463,7 @@ void MyMesh::serviceObserverVitals() {
   if (!w.started) {
     w.rates.reset();
     w.sf = 0;  // Re-read the preset slot after every (re)start.
+    w.health_wait = 0;  // and send the heap at once
   }
   const mesh::observer::VitalsCounters counters = {now, rx, tx, dup, (uint32_t)airtime};
   mesh::observer::VitalsRates rates = {};
@@ -1498,6 +1501,16 @@ void MyMesh::serviceObserverVitals() {
     const size_t frame_len = mesh::observer::encodeVitals(v, frame, sizeof(frame));
     if (frame_len) offerObserverFrame(frame, frame_len);
   }
+  // Heap and reset reason (kind 3, ObserverFrame.h): slow-moving, so one
+  // frame per kHealthEveryVitals vitals ticks (30 s) after the first.
+  if (w.health_wait == 0) {
+    const mesh::observer::Health h = mesh::esp32::heapHealth();
+    uint8_t frame[mesh::observer::HEALTH_FRAME_V1];
+    const size_t frame_len = mesh::observer::encodeHealth(h, frame, sizeof(frame));
+    if (frame_len) offerObserverFrame(frame, frame_len);
+    w.health_wait = mesh::observer::kHealthEveryVitals;
+  }
+  --w.health_wait;
   w.started = true;
   w.at_ms = now;
 }
@@ -5982,6 +5995,7 @@ bool MyMesh::formatFileSystem() {
 #elif defined(RP2040_PLATFORM)
   return LittleFS.format();
 #elif defined(ESP32)
+  mesh::esp32::LoopWatchdogPause watchdog_pause;   // a full erase can take seconds
   return SPIFFS.format();
 #else
 #error "need to implement file system erase"
@@ -12070,6 +12084,9 @@ void MyMesh::onManualClockSet() {
 
 void MyMesh::formatStatsReply(char *reply) {
   StatsFormatHelper::formatCoreStats(reply, board, *_ms, _err_flags, _mgr);
+#if defined(ESP32_PLATFORM)
+  mesh::esp32::appendHeapStats(reply, 160);   // CLI replies are 160 bytes
+#endif
 }
 
 void MyMesh::formatRadioStatsReply(char *reply) {

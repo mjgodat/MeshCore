@@ -1041,6 +1041,7 @@ private:
     mesh::observer::VitalsWindow rates;   // per-minute rates over the last minute
     float freq, bw;
     uint8_t sf, cr, preset_slot;
+    uint8_t health_wait;   // vitals ticks until the next health frame
     bool started;
   } _observer_window = {};
   // observer.transport: one shared rate limiter, one outbox per transport.

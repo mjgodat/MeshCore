@@ -16,6 +16,7 @@
   #if defined(OTA_FLASH_STORE)
     #include "OtaStoreFlashEsp32.h"   // flash-staged container (delta patch / full image in the slot)
     #include "OtaSelf.h"              // SelfFwInfo / ota_self_firmware (running-image base_hash gate)
+    #include <helpers/esp32/LoopWatchdog.h>   // the apply may outlast the loop watchdog
   #endif
 #elif defined(NRF52_PLATFORM)
   extern "C" void meshRegulatorCleanReset() __attribute__((weak));
@@ -282,6 +283,7 @@ static bool esp32_inplace_apply(OtaStoreFlashEsp32& store, const MotaManifest& m
 // The result is verified (signature/trust up front, image_hash after) and the slot armed; the caller
 // reboots once the confirmation reply has gone out.
 bool ota_apply_detools_mota(OtaStoreFlashEsp32& store, const SignerAllowlist& allow, ApplyState& st, char* msg) {
+  mesh::esp32::LoopWatchdogPause watchdog_pause;   // erase + decode of a whole image: tens of seconds
   st = ApplyState();
   const esp_partition_t* slot = store.partition();
   if (!slot || store.staged_size() < 16) { strcpy(msg, "no staged update"); return false; }

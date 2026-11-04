@@ -150,6 +150,26 @@ int main() {
   l.configure(10); assert(l.burst() == 2);
   l.configure(9000); assert(l.rate() == kRxLimitMax);
   assert(&rxLimiter() == &rxLimiter());
+  // One token per unique packet across both bridges (reliability round):
+  // the second bridge's copy of an admitted packet passes free (shared).
+  {
+    RxLimiter s; s.configure(5);   // burst 1
+    const uint8_t a[8] = {0xA1, 2, 3, 4, 5, 6, 7, 8}, b[8] = {0xB2, 2, 3, 4, 5, 6, 7, 8};
+    assert(s.admit(0, a) && s.passed() == 1);
+    assert(s.admit(1, a) && s.shared() == 1 && s.dropped() == 0 && s.passed() == 1);   // the other bridge's copy
+    assert(!s.admit(2, b) && s.dropped() == 1);      // a new packet still needs a token
+    assert(!s.admit(3, b) && s.dropped() == 2);      // a refused packet is not remembered
+    assert(s.admit(12003, b) && s.passed() == 2);    // 5/min: one token per 12 s
+    assert(s.admit(12004, b) && s.shared() == 2);
+    assert(!s.admit(12005) && s.dropped() == 3);     // no key (OTA): always charged
+    // the table holds the last kSharedKeys admitted packets
+    s.configure(0); s.resetCounters();
+    uint8_t k[8] = {};
+    for (int i = 0; i < RxLimiter::kSharedKeys + 1; ++i) { k[0] = uint8_t(i); assert(s.admit(20000, k)); }
+    assert(s.passed() == RxLimiter::kSharedKeys + 1u && s.shared() == 0);
+    k[0] = 0; assert(s.admit(20000, k) && s.shared() == 0);   // evicted: counted as passed again
+    k[0] = RxLimiter::kSharedKeys; assert(s.admit(20000, k) && s.shared() == 1);
+  }
   return 0;
 }
 '''
@@ -178,7 +198,7 @@ int main() {
   assert(!bridgeAnnounceActive(false) && bridgeAnnounceActive(true));
   assert(rxLimiter().rate() == 0);
   assert(run("get bridge.announce") && !strcmp(reply, "> auto"));
-  assert(run("get bridge.rxlimit") && !strncmp(reply, "> 0 (no limit) passed=", 22));
+  assert(run("get bridge.rxlimit") && !strncmp(reply, "> 0 (no limit) passed=", 22) && strstr(reply, " shared=0"));
   // udp.secret: keys UDP and discovery; off = bridge.secret; never printed (review F6)
   assert(run("get udp.secret") && !strcmp(reply, "> off (bridge.secret)") && !udpSecretOverride()[0]);
   assert(!strcmp(udpSessionSecret("bridge-key"), "bridge-key"));
@@ -354,6 +374,17 @@ static void rx_limit() {
   mesh::discovery::rxLimiter().configure(0);
   mesh::Packet p; p.payload = {0x50, 1, 2}; b.bridge.sendPacket(&p); run(a, b, 2);
   assert(a.manager.received.size() == 2);
+  // A packet the ESP-NOW bridge already admitted (same seen-table key)
+  // passes the UDP bridge without spending the budget (reliability round).
+  mesh::discovery::rxLimiter().configure(5);   // burst 1
+  mesh::discovery::rxLimiter().resetCounters();
+  const uint8_t espnow_key[8] = {0x51, 1, 2, 0, 0, 0, 0, 0};
+  assert(mesh::discovery::rxLimiter().admit(millis(), espnow_key));   // the ESP-NOW copy took the token
+  mesh::Packet q; q.payload = {0x51, 1, 2}; b.bridge.sendPacket(&q); run(a, b, 2);
+  assert(a.manager.received.size() == 3);
+  assert(mesh::discovery::rxLimiter().dropped() == 0 && mesh::discovery::rxLimiter().shared() == 1);
+  mesh::Packet r; r.payload = {0x52, 1, 2}; b.bridge.sendPacket(&r); run(a, b, 2);   // new: no token left
+  assert(a.manager.received.size() == 3 && mesh::discovery::rxLimiter().dropped() == 1);
   mesh::discovery::rxLimiter().configure(mesh::discovery::kRxLimitDefault);
 }
 int main(int argc, char** argv) {
@@ -444,6 +475,34 @@ int main(int argc, char** argv) {
     bridge.queueReceivedFrame(mac, buf, (int)len); bridge.loop();
   }
   assert(mgr.received.size() == 3 && mesh::discovery::rxLimiter().dropped() == 2 && mgr.allocs == mgr.frees);
+  // one token per unique packet across bridges (reliability round): the
+  // ESP-NOW copy of a packet the UDP bridge already admitted is free, and
+  // the reverse; the fixture's seen key is the first byte (Seen::seenKey).
+  mesh::discovery::rxLimiter().configure(0);
+  mesh::discovery::rxLimiter().resetCounters();
+  mesh::discovery::rxLimiter().configure(5);   // burst 1
+  {
+    now_ms += 60000;   // refill
+    auto send = [&](uint8_t id) {
+      auto q = packet(id); uint8_t buf[250]; size_t len = q.length;
+      if (wrapped) len = mesh::bridge::wrapFrame(q.data, q.length, prefs.bridge_secret, sizeof(prefs.bridge_secret), buf, sizeof(buf));
+      else memcpy(buf, q.data, q.length);
+      bridge.queueReceivedFrame(mac, buf, (int)len); bridge.loop();
+    };
+    const uint8_t udp_key[8] = {0x41};   // type 0, not OTA
+    assert(mesh::discovery::rxLimiter().admit(now_ms, udp_key));   // the UDP copy took the only token
+    const size_t before = mgr.received.size();
+    send(0x41);
+    assert(mgr.received.size() == before + 1 && mesh::discovery::rxLimiter().dropped() == 0);
+    assert(mesh::discovery::rxLimiter().shared() == 1);
+    now_ms += 12001;   // one more token
+    send(0x45);
+    const uint8_t again[8] = {0x45};
+    assert(mesh::discovery::rxLimiter().admit(now_ms, again));     // its UDP copy: free
+    assert(mgr.received.size() == before + 2 && mesh::discovery::rxLimiter().shared() == 2);
+    assert(mesh::discovery::rxLimiter().dropped() == 0 && mesh::discovery::rxLimiter().passed() == 2);
+  }
+  mesh::discovery::rxLimiter().configure(0);
   bridge.end();
   return 0;
 }

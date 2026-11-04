@@ -56,8 +56,10 @@ void BridgeBase::handleReceivedPacket(mesh::Packet *packet) {
   const bool ota = packet->getPayloadType() == PAYLOAD_TYPE_OTA;
   if (ota || !_seen_packets.wasSeen(packet)) {
 #if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE) || defined(WITH_UDP_BRIDGE)
-    // bridge.rxlimit: only packets that are new to this bridge spend it.
-    if (!admitIngress()) {
+    // bridge.rxlimit: only packets that are new to this bridge spend it,
+    // and a packet the other bridge already admitted spends nothing.
+    const auto shared_key = _seen_packets.seenKey(*packet);
+    if (!admitIngress(ota ? nullptr : shared_key.hash)) {
       _mgr->free(packet);
       onIngressResult(IngressResult::Filtered);
       return;
