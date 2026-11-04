@@ -21,17 +21,23 @@ On the repeater: `set espnow.enabled on`, `set bridge.format raw`, and
 `bridge.channel` equal to the head's `espnow.channel` (default 6); for the
 pages also `set espnow.observer on`.
 
-## On-screen keyboard (both heads)
+## On-screen keyboard (per head)
 
-One mode key (left of the third row, labelled with the current mode, lit
-when not lower case) cycles abc -> ABC -> 123 -> abc; ABC stays capitals
-until cycled. 123 is the phone layout: `1234567890`, `-/:;()$&@`,
-`.,?!'"#`. The bottom row is space, X (cancel) and the action key. Not
-typeable on screen: `% ^ * + = _ ~ { } [ ] < > \ |` and the backtick (use
-the USB terminal for those). Every key that can be touched is drawn; on the
-CYD's HEAD page the rows shrink (32 / 36 px) so all four fit. On the Freenove
-the new keyboard is checked by host previews only so far (not yet on the
-glass).
+- **Freenove (PC layout, `TOUCH_KEYBOARD_PC_LAYOUT=1`):** a shift key
+  (abc / ABC, one capital) left of the third row; the bottom row is 123 /
+  #+=, space, X (cancel) and the action key. 123 holds the digits, their
+  shifted symbols `!@#$%^&*()` and `-_=+.,?`; #+= holds
+  `` ~`{}[]<>\| ``, `;:'"/` and `-_=+.,?`; abc returns to letters.
+  Checked on the glass (2026-11-04).
+- **CYD (mode key):** one mode key (left of the third row, labelled with
+  the current mode, lit when not lower case) cycles abc -> ABC -> 123 ->
+  abc; ABC stays capitals until cycled. 123 is the phone layout:
+  `1234567890`, `-/:;()$&@`, `.,?!'"#`. The bottom row is space, X and the
+  action key. Not typeable on the CYD's screen keyboard:
+  `% ^ * + = _ ~ { } [ ] < > \ |` and the backtick (use the USB terminal).
+
+On both, every key that can be touched is drawn; on the CYD's HEAD page the
+rows shrink (32 / 36 px) so all four fit.
 
 ## Screen timeout and gesture hints (both heads)
 
@@ -41,8 +47,9 @@ glass).
   cycle 30 s, 1 min, 2 min, 5 min, Never. Saved with the display settings
   (`display.timeout` / `display.mode`). A touch on a dark screen only wakes
   it.
-- Faint chevron tiles show where the screen swipes or scrolls: left / right
-  on the companion home carousel (they are its Previous / Next touch zones),
+- Faint chevrons show where the screen swipes or scrolls: left / right on
+  the companion home carousel (its Previous / Next touch zones, drawn as
+  columns with a thin divider),
   up / down at the ends of the NODES list and of the chats conversation
   list (only where there is more). Each is a real tap target (a page per
   tap) and brightens for 1.5 s when the screen appears or moves. The chats
@@ -85,5 +92,5 @@ from a device.
 | ![MAP](images/map.png) MAP: node positions from adverts | ![NODES](images/nodes.png) NODES: sortable, SNR and the relay it came through |
 | ![Node card](images/node_card.png) Node detail card | ![Chats](images/chats.png) Chats list |
 | ![Thread](images/chat_thread.png) Chat thread | ![Picker](images/repeater_picker.png) Repeater picker, home repeater first |
-| ![Login](images/login.png) Login (password masked; outdated keyboard: before the single mode key) | ![Presets](images/presets.png) Radio presets |
-| ![Keyboard](images/keyboard_123.png) Keyboard (outdated: the layout before the single mode key, see above) | |
+| ![Login](images/login.png) Login (password masked) | ![Presets](images/presets.png) Radio presets |
+| ![Keyboard](images/keyboard_123.png) Keyboard, PC-style 123 page (the Freenove's layout) | |
