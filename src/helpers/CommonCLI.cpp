@@ -29,6 +29,10 @@
 #include "ESPNowPeerSettings.h"
 #endif
 #include "ESPNowRepeatSettings.h"
+#include "ESPNowLinkSettings.h"
+#if defined(MESH_ESPNOW_LINK_SETTINGS) && defined(ESP32)
+#include <helpers/esp32/ESPNOWRadio.h>
+#endif
 #include "ObserverSettings.h"
 #include "RadioDirectionSettings.h"
 #if defined(ESP32_PLATFORM)
@@ -1090,8 +1094,14 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #if defined(MESH_ESPNOW_REPEAT_SETTINGS)
   mesh::espnow::loadEspNowRepeatSettings(fs);
 #endif
+#if defined(MESH_ESPNOW_LINK_SETTINGS)
+  mesh::espnow::loadEspNowLinkSettings(fs);
+#endif
 #if defined(MESH_ESPNOW_OBSERVER_SETTINGS)
   mesh::espnow::loadEspNowObserverSettings(fs);
+#endif
+#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)
+  mesh::discovery::loadBridgeDiscoverySettings(fs);
 #endif
 #if MESH_ENABLE_RADIO_DIRECTION
   mesh::radioDirection::loadDirectionSettings(fs);
@@ -3755,12 +3765,30 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #if defined(MESH_ESPNOW_REPEAT_SETTINGS)
     if (mesh::espnow::handleEspNowRepeatCommand(command, reply, 157)) return;
 #endif
+#if defined(MESH_ESPNOW_LINK_SETTINGS)
+    {
+      // espnow.format / espnow.secret (primary ESP-NOW relays); applies at reboot.
+      mesh::espnow::LinkCounters link_counters;
+#if defined(ESP32)
+      ESPNOWRadio::linkRejects(link_counters.foreign, link_counters.checksum);
+#endif
+      if (mesh::espnow::handleEspNowLinkCommand(command, reply, 157, &link_counters)) return;
+    }
+#endif
 #if defined(MESH_ESPNOW_OBSERVER_SETTINGS)
     // Reached remotely only by full admins: not in the manager allow lists.
     if (strstr(command, "observer") != nullptr) {
       mesh::espnow::ObserverRuntime observer_runtime;
       _callbacks->getObserverRuntime(observer_runtime);
       if (mesh::espnow::handleEspNowObserverCommand(command, reply, 157, &observer_runtime)) return;
+    }
+#endif
+#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)
+    // Reached remotely only by full admins: not in the manager allow lists.
+    if (strstr(command, "bridge.") != nullptr) {
+      mesh::discovery::DiscoveryRuntime discovery_runtime;
+      _callbacks->getDiscoveryRuntime(discovery_runtime);
+      if (mesh::discovery::handleBridgeDiscoveryCommand(command, reply, 157, &discovery_runtime)) return;
     }
 #endif
 #if defined(WITH_ESPNOW_BRIDGE)

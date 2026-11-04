@@ -35,6 +35,7 @@
 #include <helpers/UDPBridgePrefs.h>
 #endif
 #include <helpers/ObserverSettings.h>
+#include <helpers/BridgeDiscoverySettings.h>
 #if MESH_ENABLE_FLEET_CONTROL
 #include <helpers/FleetChannel.h>
 #endif
@@ -743,6 +744,10 @@ public:
 #if defined(MESH_ESPNOW_OBSERVER_SETTINGS)
   // observer.transport: channels and per-transport state for the CLI.
   virtual void getObserverRuntime(mesh::espnow::ObserverRuntime& runtime) { (void)runtime; }
+#endif
+#if defined(MESH_BRIDGE_DISCOVERY_SETTINGS)
+  // bridge.announce / bridge.rxlimit / bridge.autopeers: auto-paired heads.
+  virtual void getDiscoveryRuntime(mesh::discovery::DiscoveryRuntime& runtime) { (void)runtime; }
 #endif
 
   virtual void restartBridgeSlot(int slot) {

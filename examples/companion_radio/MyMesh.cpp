@@ -158,6 +158,8 @@ static bool isCompanionReaderRequest(const char* command) {
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
 #include <helpers/esp32/WiFiRadioPolicy.h>
 #include <helpers/ESPNowRepeatSettings.h>
+#include <helpers/ESPNowLinkSettings.h>
+#include <helpers/esp32/ESPNOWRadio.h>
 #endif
 
 #include <helpers/CLICommandUtils.h>
@@ -3334,6 +3336,8 @@ void MyMesh::begin(bool has_display, bool radio_available,
   mesh::loadMorseSettings(_store->getPrimaryFS());
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
   mesh::espnow::loadEspNowRepeatSettings(_store->getPrimaryFS());
+  // espnow.format / espnow.secret: the first load decides this boot's format.
+  mesh::espnow::loadEspNowLinkSettings(_store->getPrimaryFS());
 #endif
 #if defined(ENABLE_OTA)
   mesh::ota::beginSpeedConfig(_store->getPrimaryFS());
@@ -11787,6 +11791,12 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
   // espnow.repeat / espnow.repeat.gap: attached (local) clients only.
   if (sender_timestamp == 0
       && mesh::espnow::handleEspNowRepeatCommand(command, reply, reply_capacity)) return true;
+  if (sender_timestamp == 0) {
+    // espnow.format / espnow.secret: local clients only; applies at reboot.
+    mesh::espnow::LinkCounters link_counters;
+    ESPNOWRadio::linkRejects(link_counters.foreign, link_counters.checksum);
+    if (mesh::espnow::handleEspNowLinkCommand(command, reply, reply_capacity, &link_counters)) return true;
+  }
 #endif
   if (handleNotificationCommand(command, reply, reply_capacity)) return true;
 

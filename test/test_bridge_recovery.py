@@ -22,6 +22,7 @@ MOCKS = r'''
 #include <helpers/bridges/ESPNowBridgeDiagnostics.h>
 #include <helpers/bridges/ESPNowNodeTable.h>
 #include <helpers/bridges/ObserverRateLimiter.h>
+#include <helpers/bridges/DiscoveryFrame.h>
 #include <helpers/BridgeIngressProfile.h>
 #define MAX_TRANS_UNIT 255
 #define PAYLOAD_TYPE_OTA 0x0c
@@ -383,7 +384,7 @@ int main(){
  assert(mgr.received.size()==2&&mgr.allocs==mgr.frees);
  bridge.end();prefs.bridge_format=mesh::bridge::ESPNOW_FORMAT_WRAPPED;bridge.begin();
  auto wrapped=packet(4);uint8_t bytes[8]={0xc0,0x3e};uint16_t sum=BridgeBase::fletcher16(wrapped.data,4);
- bytes[2]=sum>>8;bytes[3]=sum;memcpy(bytes+4,wrapped.data,4);assert(bridge.xorCrypt(bytes+2,6));
+ bytes[2]=sum>>8;bytes[3]=sum;memcpy(bytes+4,wrapped.data,4);mesh::bridge::wrappedXor(bytes+2,6,prefs.bridge_secret,strlen(prefs.bridge_secret));
  bridge.queueReceivedFrame(mac,bytes,sizeof(bytes));mgr.exhausted=true;bridge.loop();
  assert(bridge._rx_count==1);mgr.exhausted=false;bridge.loop();
  assert((mgr.received==std::vector<uint8_t>{1,2,4}));

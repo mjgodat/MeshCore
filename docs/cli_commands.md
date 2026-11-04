@@ -6766,6 +6766,59 @@ record means `off`, and `get espnow.observer` reports an error until it is saved
 again. Over LoRa only full admins can read or change it (it is not in the region
 or filter manager allow lists).
 
+#### Discovery and auto-pairing for visual heads (`bridge.announce`, `bridge.autopeers`)
+
+```text
+get bridge.announce
+set bridge.announce on|off
+get bridge.autopeers
+```
+
+Repeaters with the ESP-NOW and/or the UDP bridge. Default `on`: the repeater
+announces itself every 5 s over the ESP-NOW bridge (raw, or wrapped when
+`bridge.format` is `wrapped`) and every 10 s over the UDP bridge (to the subnet
+broadcast address on `udp.port` and to every UDP peer). An announce carries the
+repeater's name, the first 6 bytes of its public key, its ESP-NOW channel and
+format, its UDP address and port, and what it offers (bridge, UDP, observer
+feed). It never carries WiFi credentials or secrets. It is authenticated with an
+8-byte tag (HMAC-SHA256 keyed with `bridge.secret`); a node without the secret
+ignores it. Frame format: `src/helpers/bridges/DiscoveryFrame.h` (magic
+`B0 42 44 43`, which today's MeshCore rejects as a packet).
+
+A visual head that has the secret (`udp.secret`) learns the repeater's UDP
+address from the announce, so its `udp.peer` can stay `off`. It answers over UDP
+with its own address (also authenticated, echoing one of the repeater's last 12
+announces, about a minute). The repeater then adds that head as a UDP peer at run
+time: at most 4 heads, each kept for 5 minutes after its last answer (heads answer
+every 30 s), at most 4 new heads per minute, and only into a free `udp.peer`
+slot. A head listed in `udp.peer.1..8` is never added twice: manual peers always
+win. Auto peers are never saved; after a reboot or UDP restart the heads are
+added again within a minute. `get bridge.autopeers` lists them
+(`> 1 192.168.1.77:4404/A1B2/290s replies=12 bad=0 stale=0 full=0 limited=0`: address, the head's key
+prefix, seconds left; `bad` = tag did not verify, `stale` = echoed an old
+announce). `get udp.status` shows `auto=<n>`.
+
+`set bridge.announce off` stops the announces; heads must then use `udp.peer`
+and the repeater `udp.peer.N` (manual pairing, as before). Over LoRa only full
+admins can read or change these settings.
+
+#### Rate limit for packets from the bridges (`bridge.rxlimit`)
+
+```text
+get bridge.rxlimit
+set bridge.rxlimit <0-6000>
+```
+
+Packets per minute admitted from the ESP-NOW and UDP bridges into the repeater
+(and so towards its LoRa airtime), one shared budget. Default `120`, with bursts
+of a quarter of that (30); `0` = no limit. Excess packets are dropped and counted
+(`get bridge.rxlimit`: `> 120/min (burst 30) passed=812 dropped=0`; they also
+show as filtered in `get espnow.stats drops` / `get udp.stats drops`). Nothing
+changes on the wire. The limit protects the LoRa channel against a flood from a
+misbehaving or hostile ESP-NOW/UDP node; raise it for a busy bridge-to-bridge
+link. Saved with `bridge.announce` in `/bridge_discovery`; a missing or damaged
+record means `on` / `120`.
+
 #### Observer feed transport (`observer`, `observer.transport`)
 
 ```text
@@ -7404,6 +7457,10 @@ raw MeshCore frames. Coordinate the format and channel on every ESP-NOW peer;
 there is no automatic dual-format receive mode because it would permit
 ambiguous, asymmetric bridge deployments.
 
+Primary ESP-NOW nodes speak `raw` by default; with `espnow.format wrapped` and
+the same secret (`espnow.secret`) they speak `wrapped` too (see below).
+In `wrapped` the bridge also wraps its observer feed.
+
 Use `raw` to connect a LoRa-primary `*_repeater_bridge_espnow` node to
 `Generic_ESPNOW`, `SenseCapIndicator-ESPNow`, or another primary-ESP-NOW node.
 Raw mode enables the ESP-NOW LR PHY and sends at the same LR rate used by those
@@ -7430,6 +7487,45 @@ magic and checksum overhead, and drops larger packets instead of truncating
 them.
 
 ---
+
+#### Wrapped format on primary ESP-NOW nodes (`espnow.format`, `espnow.secret`)
+
+```text
+get espnow.format
+set espnow.format raw|wrapped
+get espnow.secret
+set espnow.secret <1-15 characters>|off
+```
+
+Primary ESP-NOW firmware (the visual heads, the ESP32 DevKit relay,
+`Generic_ESPNOW_*`). Default `raw`: plain serialized MeshCore packets, exactly
+as before. `wrapped` is byte-for-byte the bridge's `bridge.format wrapped`
+(magic `C0 3E`, Fletcher-16, XOR with the secret; one shared codec,
+`src/helpers/bridges/ESPNowWrappedFrame.h`), so these nodes can join a wrapped
+bridge link. `espnow.secret` must equal the bridge's `bridge.secret`; set it
+before `set espnow.format wrapped` (refused without a secret). The secret is
+never printed (`get espnow.secret` shows `set` or `not set`); `off` clears it
+and is refused while the saved format is `wrapped`.
+
+Both settings are saved at once and apply at the **next reboot**, so a node can
+be prepared over the mesh while it still talks the old format.
+`get espnow.format` shows a pending change (`> wrapped (saved; raw until
+reboot)`) and, while wrapped is active, the frames refused since boot
+(`> wrapped (refused: not wrapped 0, wrong secret 0)`).
+
+Receive is strict, as on the bridge: a wrapped node drops every frame that is
+not wrapped with its secret (raw MeshCore frames, raw observer frames, other
+ESP-NOW users on the channel); a raw node passes wrapped frames to MeshCore,
+which cannot parse them. Wrapped packets carry at most 246 bytes (the bridge's
+limit); longer packets are not sent. Observer frames are wrapped too in
+wrapped mode (the repeater wraps its feed when `bridge.format` is `wrapped`; a
+packet record then carries at most 231 raw bytes, marked truncated beyond
+that), so the whole link needs the secret. On a companion (head) the commands
+are accepted only from an attached local client; on a relay or repeater also
+from a remote admin. A missing or damaged record means `raw`.
+
+To move a whole installation from raw to wrapped without losing any node, see
+"Switching an installation to wrapped" in `docs/espnow-head/udp-transport.md`.
 
 #### Set the ESP-Now secret
 **Usage:** 
