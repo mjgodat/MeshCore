@@ -28,20 +28,24 @@ CODEC = r'''
 #include "helpers/bridges/ObserverRateLimiter.h"
 using namespace mesh::observer;
 int main() {
-  Health h; h.free_heap = 0x00012345; h.min_free_heap = 0x0000F00D; h.largest_block = 0x00008000; h.reset_reason = 6;
+  Health h; h.uptime_s = 0x00015180; h.free_heap = 0x00012345; h.min_free_heap = 0x0000F00D; h.largest_block = 0x00008000; h.reset_reason = 6;
   uint8_t f[260];
   assert(encodeHealth(h, f, HEALTH_FRAME_V1 - 1) == 0);
   const size_t n = encodeHealth(h, f, sizeof(f));
-  assert(n == HEALTH_FRAME_V1 && n == 20);
+  assert(n == HEALTH_FRAME_V1 && n == 24);
   printf("HEALTH ");
   for (size_t i = 0; i < n; ++i) printf("%02x", f[i]);
   printf("\n");
   assert(isObserverFrame(f, n) && isStatusFrame(f, n));
   Health d; memset(&d, 0xEE, sizeof(d));
-  assert(decodeHealth(f, n, d) && d.free_heap == h.free_heap && d.min_free_heap == h.min_free_heap
+  assert(decodeHealth(f, n, d) && d.uptime_s == 86400 && d.free_heap == h.free_heap && d.min_free_heap == h.min_free_heap
          && d.largest_block == h.largest_block && d.reset_reason == 6);
   Vitals v; assert(!decodeVitals(f, n, v));
   PacketRecord p; assert(!decodePacket(f, n, p));
+  // the same heap 30 s later is a different frame (a head on transport
+  // both drops byte-identical frames as the other transport's copy)
+  { Health later = h; later.uptime_s += 30; uint8_t f2[64];
+    assert(encodeHealth(later, f2, sizeof(f2)) == n && memcmp(f, f2, n) != 0); }
   // forward compatible: a newer body (version 2, appended fields) decodes
   uint8_t g[64]; memcpy(g, f, n); g[6] = 2; for (int i = 0; i < 8; ++i) g[n + i] = 0x5A;
   assert(isObserverFrame(g, n + 8) && decodeHealth(g, n + 8, d) && d.free_heap == h.free_heap);
@@ -110,8 +114,8 @@ int main() {
   mesh::esp32::appendHeapStats(reply, sizeof(reply));
   assert(!strcmp(reply, "{\"battery_mv\":4131,\"uptime_secs\":74,\"errors\":0,\"queue_len\":0,"
                         "\"heap_free\":123456,\"heap_min\":81234,\"heap_max_block\":65524}"));
-  const mesh::observer::Health h = mesh::esp32::heapHealth();
-  assert(h.free_heap == 123456 && h.min_free_heap == 81234 && h.largest_block == 65524 && h.reset_reason == 4);
+  const mesh::observer::Health h = mesh::esp32::heapHealth(77);
+  assert(h.uptime_s == 77 && h.free_heap == 123456 && h.min_free_heap == 81234 && h.largest_block == 65524 && h.reset_reason == 4);
   // left alone when it would not fit, or when it is not a JSON object
   std::string longer(120, 'x'); longer = "{\"" + longer + "\":1}";
   char small[160]; strcpy(small, longer.c_str());
@@ -150,8 +154,9 @@ class HealthFrameTests(unittest.TestCase):
         out = compile_and_run(self, CODEC, lambda folder: [ROOT / "src"])
         self.assertIn("PASS health", out)
         frame = bytes.fromhex(out.split("HEALTH ", 1)[1].split()[0])
-        # B0 42 53 4F, frame version 1, kind 3, body version 1, then LE fields
-        self.assertEqual(frame.hex(), "b042534f0103" "01" "45230100" "0df00000" "00800000" "06")
+        # B0 42 53 4F, frame version 1, kind 3, body version 1, then LE fields:
+        # uptime 86400 s, free, min free, largest block, reset reason 6
+        self.assertEqual(frame.hex(), "b042534f0103" "01" "80510100" "45230100" "0df00000" "00800000" "06")
 
     def test_stats_core_heap_fields(self):
         def includes(folder):
@@ -174,7 +179,7 @@ class RepeaterSendsHealthTests(unittest.TestCase):
         pump = pump[:pump.index("\n}\n")]
         self.assertIn("w.health_wait = 0;", pump)                       # at once after a (re)start
         self.assertIn("encodeHealth(h, frame, sizeof(frame))", pump)
-        self.assertIn("mesh::esp32::heapHealth()", pump)
+        self.assertIn("mesh::esp32::heapHealth((uint32_t)(uptime_millis / 1000))", pump)
         self.assertIn("w.health_wait = mesh::observer::kHealthEveryVitals;", pump)
         self.assertLess(pump.index("encodeHealth"), pump.index("w.started = true;"))
         stats = source[source.index("void MyMesh::formatStatsReply(char *reply) {"):]

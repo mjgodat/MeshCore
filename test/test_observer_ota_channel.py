@@ -220,6 +220,7 @@ struct NetworkLink {
   void unlockSwitching() { ++releases; }
 } network;
 NetworkLink& activeNetworkLink() { return network; }
+namespace mesh { namespace esp32 { struct LoopWatchdogPause { LoopWatchdogPause() {} }; } }   // LoopWatchdog.h: no WDT here
 struct ESP32Board {
   bool otaFromManifest(const char*, const char*, bool, char[]);
   bool otaFromManifestImpl(const char* base, const char* version, bool dry, char[]) {

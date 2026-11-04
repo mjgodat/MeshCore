@@ -14,8 +14,9 @@
 namespace mesh {
 namespace esp32 {
 
-inline mesh::observer::Health heapHealth() {
+inline mesh::observer::Health heapHealth(uint32_t uptime_s = 0) {
   mesh::observer::Health h;
+  h.uptime_s = uptime_s;
   h.free_heap = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_8BIT));
   h.min_free_heap = static_cast<uint32_t>(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
   h.largest_block = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
