@@ -388,7 +388,10 @@ limited, like vitals). Decoders accept 24 to 246 bytes and ignore what
 follows the fields they know, so later versions only append. Heads from
 before this frame do not know kind 3 and drop it (MeshCore rejects its first
 byte); the vitals frame itself is unchanged, because those heads check its
-length exactly.
+length exactly. Like the announces, it reaches every ESP-NOW node on the
+channel: older heads and ESP-NOW relays (DevKit, `Generic_ESPNOW_*`) count
+it as a malformed packet (`recv_errors` / `packet_bad`) every 30 s, which is
+cosmetic. In `raw` format it goes out in clear; it carries no secrets.
 
 The same observer frames travel over ESP-NOW (one frame per ESP-NOW
 message); there is one format for both transports.

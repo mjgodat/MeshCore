@@ -21,6 +21,17 @@ const char meshcore_capability_display_autodetect_techo_lite[] =
   SPIClass SPI1 = SPIClass(FSPI);
 #endif
 
+#if GXEPD_BUSY_WATCH
+#include <helpers/esp32/LoopWatchdog.h>
+// GxEPD2 calls this about every millisecond while the panel's BUSY line is
+// asserted (instead of its own delay(1)); EinkBusyWatch.h explains why.
+void GxEPDDisplay::onPanelBusy(const void* self) {
+  const_cast<GxEPDDisplay*>(static_cast<const GxEPDDisplay*>(self))->_busy_watch.onBusy(millis());
+  mesh::esp32::feedLoopWatchdog();   // each wait stays bounded by GxEPD2's 10 s timeout
+  delay(1);
+}
+#endif
+
 #ifndef EPD_WASHING_MACHINE_CYCLES
   #define EPD_WASHING_MACHINE_CYCLES 0
 #endif
@@ -48,6 +59,9 @@ bool GxEPDDisplay::begin() {
   if (_init) return true;
 #endif
   display.epd2.selectSPI(SPI1, SPISettings(4000000, MSBFIRST, SPI_MODE0));
+#if GXEPD_BUSY_WATCH
+  display.epd2.setBusyCallback(onPanelBusy, this);
+#endif
 #ifdef ESP32
   SPI1.begin(PIN_DISPLAY_SCLK, PIN_DISPLAY_MISO, PIN_DISPLAY_MOSI, PIN_DISPLAY_CS);
 #else
@@ -285,12 +299,21 @@ void GxEPDDisplay::endFrame() {
     display.epd2.finishRefresh();
   }
 #else
+  // A stuck BUSY line pauses refreshes (EinkBusyWatch.h); the frame is drawn
+  // again once they resume, because its CRC is not taken as shown.
+#if GXEPD_BUSY_WATCH
+  if (!_busy_watch.refreshAllowed(millis())) return;
+#endif
   if (crc != last_display_crc_value) {
     display.display(true);
     if (_cycles_before_full_refresh > 0) {
       _cycles_before_full_refresh--;
     }
   }
+#if GXEPD_BUSY_WATCH
+  if (_busy_watch.takeStuckEvent())
+    Serial.println("e-ink: BUSY stuck; display updates paused for 10 min");
+#endif
 #endif
   last_display_crc_value = crc;
 }
