@@ -82,7 +82,7 @@ the repeater to join WiFi at all.
 - If the head's network is on another channel, the head does not join it.
   In udp or auto mode, once ESP-NOW has been silent for the fail-over time
   (counted from boot when it was never heard), it runs one all-channel scan for that network (at most every 10 minutes;
-  ESP-NOW receive pauses about 1.5 s while the radio visits the other
+  ESP-NOW receive pauses about 2-3 s while the radio visits the other
   channels, which costs nothing then) and reports it:
   `udp wrong-channel (AP on ch 11)` in `get transport`, a warning header on
   the Link screen and the Link page. While ESP-NOW is healthy the head never
@@ -330,7 +330,8 @@ equals the M5's table before writing app-only at 0x10000.
 4. **Channel change while joined.** `set bridge.channel 6` with WiFi on 2:
    reply `OK`, `get espnow.status` `ready ch=6/6`, `get udp.status`
    `wrong-channel`, ESP-NOW heads on 6 keep working; `get espnow.enabled`
-   stays on. Then `set bridge.channel 2`: the station rejoins within 2 min.
+   stays on. Then `set bridge.channel 2`: the station looks on the new
+   channel within about 1 s and rejoins.
 5. **LoRa during UDP**: `stats-packets` recv climbing throughout.
 6. **Clearing and roll back.** Repeater: `set udp.enabled off`,
    `set wifi.ssid off` (`get wifi.ssid` empty), `observer.transport espnow`,
@@ -385,7 +386,7 @@ climbing throughout.
 | Radio awake: runtime enable, off/on, bridge channel change, reboot with UDP on (AP on and off the bridge channel), bridge off/on | PASS: `ps=0 awake=1` and `get espnow.stats awake` `ps=0 repairs=0 refused=0` every time |
 | `set wifi.powersave min` while the bridge runs | PASS: `OK - saved (radio kept awake while the ESP-NOW bridge runs)`; `get` `min (saved; effective none while the ESP-NOW bridge runs)` |
 | Head: no all-channel scan while ESP-NOW is healthy | PASS: only scans of the ESP-NOW channel |
-| Head: all-channel diagnosis when ESP-NOW is silent | **FAIL**: the scan runs but its result is lost, so `get transport` shows `udp joining` instead of `udp wrong-channel (AP on ch N)` (see Known limits) |
+| Head: all-channel diagnosis when ESP-NOW is silent | FAIL, fixed since: the result was lost to Arduino's early scan timeout; re-tested on the CYD alone: `udp wrong-channel (AP on ch 2)` (fix round 8) |
 | Clear with `off`, roll back | PASS |
 
 ### Known limits
@@ -403,13 +404,12 @@ climbing throughout.
 - The upstream `ThinkNode_M5_Repeater_bridge_espnow` env keeps upstream's
   partition table (`min_spiffs.csv`), unlike the owner's M5; the
   `_udp` env matches it.
-- The head's all-channel diagnosis does not report yet: Arduino 2.0.17
-  gives up on an asynchronous scan after 20 x the per-channel time
-  (2.2 s here) and reports it failed, but on the CYD the all-channel scan
-  took longer: the head drops it as failed and the late result is lost. The head still never leaves its
-  channel while ESP-NOW is healthy, and joining is unaffected.
 - The M5 UDP station itself asks for no modem sleep while the bridge is
   enabled, so when the bridge stops the radio stays awake until the next
   join; the saved `wifi.powersave` applies from then on.
 - The refusal back-off (`refused=`) is host-tested only: the M5 repeater has
   no Bluetooth to make the driver refuse.
+- The prompt retry after a channel change (fix round 8) is host-tested only;
+  the M5 was not used for it. Between channel changes the station still
+  backs off up to 2 min while the access point stays off the ESP-NOW
+  channel (no beacon watching).
