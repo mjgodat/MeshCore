@@ -109,7 +109,7 @@ bridge-to-bridge links; primary ESP-NOW nodes now speak it too with
 format, applied at the next reboot). Then the whole ESP-NOW link, observer
 feed and announces included, needs the secret. Receive is strict per
 format, so switch every node; the order of steps is in
-[udp-transport.md](docs/espnow-head/udp-transport.md#switching-an-installation-to-wrapped). In `raw`,
+[udp-transport.md](docs/espnow-head/udp-transport.md#switching-an-installation-to-wrapped-optional-procedure). In `raw`,
 MeshCore's own encryption still protects DMs and channel messages; public
 frames and routing metadata are visible to anyone on the channel. Raw mode
 does not start while the repeater runs a WiFi AP.
