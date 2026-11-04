@@ -71,7 +71,7 @@ MeshModel::MeshModel(size_t node_capacity, size_t ring_capacity, const ModelAllo
     : _nodes(nullptr), _lru(nullptr), _node_cap(0), _node_count(0), _lru_seq(0),
       _feed(nullptr), _feed_cap(0), _feed_count(0), _feed_head(0), _feed_seq(0),
       _has_clock(false), _clock_raw(0), _clock_ms(0),
-      _has_vitals(false), _vitals_ms(0), _path_len(0), _path_seq(0), _path_item_seq(0), _has_head_key(false), _has_rep_key(false), _rep_by_pos(false), _digest_head(0), _digest_count(0), _names(nullptr) {
+      _has_vitals(false), _vitals_ms(0), _has_health(false), _health_ms(0), _path_len(0), _path_seq(0), _path_item_seq(0), _has_head_key(false), _has_rep_key(false), _rep_by_pos(false), _digest_head(0), _digest_count(0), _names(nullptr) {
   _alloc.alloc = defaultAlloc;
   _alloc.release = defaultRelease;
   _alloc.ctx = nullptr;
@@ -83,6 +83,10 @@ MeshModel::MeshModel(size_t node_capacity, size_t ring_capacity, const ModelAllo
   memset(_nf_min, 0, sizeof(_nf_min));
   memset(_nf_valid, 0, sizeof(_nf_valid));
   memset(&_vitals, 0, sizeof(_vitals));
+  memset(&_health, 0, sizeof(_health));
+  memset(_heap_low, 0, sizeof(_heap_low));
+  memset(_heap_slot, 0, sizeof(_heap_slot));
+  memset(_heap_valid, 0, sizeof(_heap_valid));
   memset(_path, 0, sizeof(_path));
   memset(_digest, 0, sizeof(_digest));
   memset(_head_key, 0, sizeof(_head_key));
@@ -154,6 +158,31 @@ void MeshModel::onVitals(const observer::Vitals& v, uint32_t now_ms) {
         if (_has_rep_key && memcmp(n.pub_prefix, _rep_key, sizeof(_rep_key)) == 0) break;
       }
     }
+  }
+}
+
+void MeshModel::onHealth(const observer::Health& h, uint32_t now_ms) {
+  advance(now_ms);
+  _health = h;
+  _health_ms = now_ms;
+  _has_health = true;
+  const uint64_t s = _clock_ms / kHeapSlotMs;
+  const size_t slot = (size_t)(s % kHeapSlots);
+  if (!_heap_valid[slot] || _heap_slot[slot] != s || h.free_heap < _heap_low[slot]) _heap_low[slot] = h.free_heap;
+  _heap_slot[slot] = s;
+  _heap_valid[slot] = true;
+}
+
+void MeshModel::heapLowPerSlot(uint32_t out[kHeapSlots], bool has[kHeapSlots]) const {
+  const uint64_t now = _clock_ms / kHeapSlotMs;
+  for (size_t k = 0; k < kHeapSlots; k++) {
+    out[k] = 0;
+    has[k] = false;
+    const uint64_t back = kHeapSlots - 1 - k;
+    if (!_has_clock || now < back) continue;
+    const uint64_t s = now - back;
+    const size_t slot = (size_t)(s % kHeapSlots);
+    if (_heap_valid[slot] && _heap_slot[slot] == s) { out[k] = _heap_low[slot]; has[k] = true; }
   }
 }
 

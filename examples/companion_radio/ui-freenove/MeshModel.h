@@ -112,6 +112,9 @@ class MeshModel {
 
   void onObserverPacket(const observer::PacketRecord& rec, uint32_t now_ms);
   void onVitals(const observer::Vitals& v, uint32_t now_ms);
+  // The repeater's heap and reset reason (observer kind 3, every ~30 s;
+  // repeaters older than the reliability round never send it).
+  void onHealth(const observer::Health& h, uint32_t now_ms);
   // Packets the head receives over the bridge: no signal data, no rate count.
   void onBridgedPacket(const uint8_t* raw, size_t len, uint32_t now_ms);
   // Advance the head clock without input (rates window rolls forward).
@@ -138,6 +141,16 @@ class MeshModel {
   bool repeaterPosition(int32_t& lat, int32_t& lon) const;
   const observer::Vitals* vitals() const { return _has_vitals ? &_vitals : nullptr; }
   uint32_t vitalsMs() const { return _vitals_ms; }   // head clock of the last vitals
+  const observer::Health* health() const { return _has_health ? &_health : nullptr; }
+  uint32_t healthMs() const { return _health_ms; }   // head clock of the last health frame
+
+  // The repeater's free heap, lowest value reported in each kHeapSlotMs
+  // slot over the last kHeapSlots slots (8 h): out[kHeapSlots - 1] = the
+  // current slot. A leak shows as a falling line. has[k] false for slots
+  // without a health frame.
+  static const size_t kHeapSlots = 48;
+  static const uint32_t kHeapSlotMs = 600000UL;   // 10 min
+  void heapLowPerSlot(uint32_t out[kHeapSlots], bool has[kHeapSlots]) const;
 
   // RX packets per minute (observer records, head clock):
   // out[59] = current minute, out[0] = 59 minutes ago.
@@ -212,6 +225,12 @@ class MeshModel {
   observer::Vitals _vitals;
   bool _has_vitals;
   uint32_t _vitals_ms;
+  observer::Health _health;
+  bool _has_health;
+  uint32_t _health_ms;
+  uint32_t _heap_low[kHeapSlots];
+  uint64_t _heap_slot[kHeapSlots];
+  bool _heap_valid[kHeapSlots];
   PathHash _path[65];
   size_t _path_len;
   uint32_t _path_seq;
