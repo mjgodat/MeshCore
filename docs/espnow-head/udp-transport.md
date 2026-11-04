@@ -268,15 +268,51 @@ were put on channel 2 for the test and back on 6 afterwards.
 | 7 Channel safety (simulated by moving the repeater's bridge channel) | FAIL: the bridge stopped instead of the station |
 | 8 Roll back | PASS |
 
-Found on hardware, to fix before UDP is used on a live repeater:
+Found on hardware, and fixed since (not yet re-tested on hardware):
 
-- **Panic when WiFi first starts while the ESP-NOW bridge runs**
-  (`esp_netif_receive` with no lwIP input after `dhcp client start failed`).
-  It happens once per runtime enable; the repeater reboots in about 3 s and,
-  with UDP saved on, then joins cleanly at boot.
-- **A bridge channel change while the station is joined on another channel
-  stops the ESP-NOW bridge** (`channel.conflict`) and saves it off, instead
-  of dropping the station. Recover with the old channel or
-  `set espnow.enabled on`.
-- The head's `udp.ssid` / `udp.secret` and a non-MQTT repeater's
-  `wifi.ssid` cannot be cleared from the CLI yet (overwrite them).
+- **Panic when WiFi first starts while the ESP-NOW bridge runs.** The
+  bridge starts the WiFi driver through ESP-IDF without a network
+  interface; Arduino's first `WiFi.mode(WIFI_STA)` then created the station
+  netif after the driver's `STA_START` event, so the netif never started
+  (no lwIP input, `dhcp client start failed`, a null call in
+  `esp_netif_receive`). The station join now replays `STA_START` once for
+  that late netif before any join or DHCP; the radio is never stopped or
+  re-initialised and ESP-NOW stays up.
+- **A bridge channel change while joined elsewhere stopped the bridge.**
+  Now the station is dropped first (`wrong-channel`), the bridge starts on
+  the new channel, a lost race is retried every 2 s, and the station
+  rejoins only on the bridge channel. The M5 coming back with the bridge
+  off after the rollback was a different cause: the UDP image saved its
+  bridge intent without the marker the Full image expects; it now saves it.
+- **Clearing.** `set wifi.ssid off` on the repeater (password included),
+  `set udp.ssid off`, `set udp.secret off`, `set udp.password off`,
+  `set udp.peer off` on the heads.
+- **Partition table.** `ThinkNode_M5_Repeater_bridge_espnow_udp` now uses
+  the M5's shipped Full layout (`variants/dual_ota_full_4MB.csv`, 1984 KiB
+  app slots, byte-identical `partitions.bin`); the image fills 92.9% of a
+  slot.
+
+### Second supervised test (after the fixes)
+
+Same setup as above (router on channel 2 unless it can be moved to 6;
+rollback image and USB access ready). Check `partitions.bin` of the build
+equals the M5's table before writing app-only at 0x10000.
+
+1. **Baseline, UDP off**, as step 1 above.
+2. **Runtime enable, no panic.** With the bridge running: `set wifi.ssid`,
+   `set wifi.pwd`, peers, `set udp.enabled on`. Check `powerlog` and
+   `stats-core` uptime: no panic/reboot; `get udp.status` ready; head
+   pages live over UDP; login and Ver over UDP. Repeat `udp.enabled off` /
+   `on` twice; no reboot.
+3. **both / auto**, as steps 5-6 above.
+4. **Channel change while joined.** `set bridge.channel 6` with WiFi on 2:
+   reply `OK`, `get espnow.status` `ready ch=6/6`, `get udp.status`
+   `wrong-channel`, ESP-NOW heads on 6 keep working; `get espnow.enabled`
+   stays on. Then `set bridge.channel 2`: the station rejoins within 2 min.
+5. **LoRa during UDP**: `stats-packets` recv climbing throughout.
+6. **Clearing and roll back.** Repeater: `set udp.enabled off`,
+   `set wifi.ssid off` (`get wifi.ssid` empty), `observer.transport espnow`,
+   `bridge.channel 6`. Head: `set udp.ssid off`, `set udp.secret off`,
+   `set udp.password off`, `set udp.peer off`, `transport espnow`,
+   `espnow.channel 6`. Flash the rollback image app-only: `get espnow.enabled`
+   on without any manual fix, `ver`, `get radio`, `get preset` as before.
