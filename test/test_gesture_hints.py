@@ -86,7 +86,8 @@ class GestureHintsTest(unittest.TestCase):
     def test_carousel_draws_its_zones(self):
         ui = strip_comments((UI_NEW / 'UITask.cpp').read_text(encoding='utf-8'))
         self.assertIn('gesture_hints::carouselZones(display.width(), display.height(), TOUCH_CENTER_ZONE_PERCENT', ui)
-        self.assertIn('display.drawRect(r.x, r.y, r.w, r.h)', ui)
+        # The column's inner edge is drawn (a 1 px divider), with the chevron.
+        self.assertIn('display.drawRect(i == 0 ? r.x + r.w - 1 : r.x, r.y, 1, r.h)', ui)
         self.assertIn('_hintMs = millis();', ui)   # page turn brightens
 
 

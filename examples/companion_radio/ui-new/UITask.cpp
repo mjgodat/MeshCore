@@ -981,6 +981,19 @@ class HomeScreen : public UIScreen {
 public:
 #if UI_POCKET_GUI
   bool isPocketBoard() const { return _page == HomePage::FIRST; }
+#if UI_REPEATER_HEAD
+  // Test consoles: the carousel page.
+  int pageIndex() const { return _page; }
+  const char* pageName() const {
+    switch (_page) {
+      case HomePage::FIRST: return "first";
+      case HomePage::COMPOSE: return "compose";
+      case HomePage::REPEATER: return "repeater";
+      case HomePage::SCREEN: return "screen";
+      default: return "other";
+    }
+  }
+#endif
   void pocketMessageAdded(int channel) {
     if (channel == _task->pocketSettings().channel) _pocket.messageAdded();
   }
@@ -1088,10 +1101,12 @@ public:
   }
 
 #if UI_REPEATER_HEAD && defined(HAS_TOUCH) && !UI_POCKET_GUI
-  // Heads: the page, then the side chevron tiles (GestureHints.h). The tiles
-  // are the carousel's Previous / Next touch zones below the title bar,
-  // drawn: a ghost chevron, bright for a moment after a page turn or when
-  // the carousel appears.
+  // Heads: the page, then the side chevrons (GestureHints.h). The carousel's
+  // Previous / Next touch zones below the title bar are drawn as columns:
+  // a thin divider along the inner edge and a ghost chevron in the middle,
+  // bright for a moment after a page turn or when the carousel appears.
+  // Only the divider and the chevron: the page's own text stays readable
+  // where it runs into a column.
   uint32_t _hintMs = 0;
   uint32_t _lastRenderMs = 0;
   int render(DisplayDriver& display) override {
@@ -1111,7 +1126,7 @@ public:
     for (int i = 0; i < 2; i++) {
       const gesture_hints::Rect& r = zone[i];
       display.setColor(UIColor::secondary_txt);
-      display.drawRect(r.x, r.y, r.w, r.h);
+      display.drawRect(i == 0 ? r.x + r.w - 1 : r.x, r.y, 1, r.h);   // the column's inner edge
       display.setColor(lv == gesture_hints::kBright ? UIColor::corp_blue : UIColor::secondary_txt);
       display.setTextSize(2);
       display.drawTextCentered(r.x + r.w / 2, r.y + r.h / 2 - 8, kChevron[i]);
@@ -2858,6 +2873,9 @@ bool UITask::adminLoggedIn() const {
 }
 
 void UITask::describeHead(char* out, size_t size) const {
+  char carousel[24] = "";
+  if (home) snprintf(carousel, sizeof(carousel), " carousel=%s:%d", static_cast<const HomeScreen*>(home)->pageName(),
+                     static_cast<const HomeScreen*>(home)->pageIndex());
   const char* screen = curr == home ? "home" : curr == splash ? "splash"
       : (admin && curr == admin) ? "admin" : (compose && curr == compose) ? "compose"
       : (msg_preview && curr == msg_preview) ? "messages" : "other";
@@ -2866,9 +2884,9 @@ void UITask::describeHead(char* out, size_t size) const {
 #if UI_HEAD_CHAT_LIST
   char chats[64] = "-";
   if (msg_preview) static_cast<const MsgPreviewScreen*>(msg_preview)->chatsDescribe(chats, sizeof(chats));
-  snprintf(out, size, "screen=%s admin[%s] chats[%s]", screen, admin_state, chats);
+  snprintf(out, size, "screen=%s%s admin[%s] chats[%s]", screen, curr == home ? carousel : "", admin_state, chats);
 #else
-  snprintf(out, size, "screen=%s admin[%s]", screen, admin_state);
+  snprintf(out, size, "screen=%s%s admin[%s]", screen, curr == home ? carousel : "", admin_state);
 #endif
 }
 #endif
