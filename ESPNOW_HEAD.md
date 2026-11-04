@@ -40,6 +40,7 @@ each one builds on the previous:
 ```text
 espnow/bridge-improvements -> espnow/observer-feed -> head/cyd -> head/freenove -> head/cyd-hmi
 espnow/observer-feed -> espnow/observer-udp;  head/cyd-hmi + espnow/observer-udp -> head/transport-udp
+espnow/observer-udp -> espnow/wrapped-primary -> espnow/discovery;  head/transport-udp + espnow/discovery
 m5/hold-actions   (independent)
 espnow-head       (everything above combined, plus this file)
 ```
@@ -53,7 +54,9 @@ espnow-head       (everything above combined, plus this file)
 | `head/freenove` | Freenove FNK0104N visual head (`variants/freenove_s3_35_head`, `ui-freenove/`), chats list/threads, relay-name store, UI test env, fonts with licences, screenshots | head/cyd |
 | `head/cyd-hmi` | The visual head's pages on the CYD: screen profile (`HMI_PROFILE_CYD`), strip renderer (320x40 bands, no PSRAM), CYD layouts, HEAD page in the HMI style, chats; keyboard with one mode key (abc / ABC / 123) where every touchable key is drawn; CYD uitest env; CYD screenshots | head/freenove |
 | `espnow/observer-udp` | `observer on\|off`, `observer.transport espnow\|udp\|both`: the observer feed over Cascade's UDP bridge too (Observer/Subscribe frame kinds, shared rate limiter, `obs` stats pages), opt-in `ThinkNode_M5_Repeater_bridge_espnow_udp` env | observer-feed (+ keymindCascade) |
-| `head/transport-udp` | Heads over ESP-NOW / UDP / both / auto: `HeadLinkRadio`, `transport` + `udp.*` settings, Link page, `docs/espnow-head/udp-transport.md` | head/cyd-hmi + observer-udp |
+| `head/transport-udp` | Heads over ESP-NOW / UDP / both / auto: `HeadLinkRadio`, `transport` + `udp.*` settings, Link page, `docs/espnow-head/udp-transport.md`; learns the repeater from its announces and answers them (`HeadDiscovery.h`) | head/cyd-hmi + observer-udp (+ espnow/discovery) |
+| `espnow/wrapped-primary` | `espnow.format raw\|wrapped` + `espnow.secret` on primary ESP-NOW nodes (heads, relays, `Generic_ESPNOW_*`): the bridge's wrapped framing, one shared codec (`ESPNowWrappedFrame.h`); observer feed wrapped too on a wrapped link | observer-udp |
+| `espnow/discovery` | Repeater announces (`bridge.announce`), auto-paired UDP heads (`bridge.autopeers`), `bridge.rxlimit` for packets from the bridges; `DiscoveryFrame.h` | wrapped-primary |
 | `espnow-head` | The combined line used on the owner's devices, plus this document | all |
 
 Each branch builds and passes its host tests on its own; the commit messages
@@ -91,17 +94,22 @@ What they must agree on:
 | Setting | Bridge repeater | ESP-NOW-only nodes |
 |---------|-----------------|--------------------|
 | Channel (1-13) | `set bridge.channel <n>` | `set espnow.channel <n>`, reboot. Default 6 on the DevKit relay and heads, 1 on `Generic_ESPNOW_*` |
-| Wire format | `set bridge.format raw` | always raw (plain serialized MeshCore packets) |
-| Secret | `bridge.secret` applies to `wrapped` only; ignored in `raw` | none |
+| Wire format | `set bridge.format raw\|wrapped` | `set espnow.format raw\|wrapped` (default raw), reboot |
+| Secret | `bridge.secret` (wrapped; also UDP and discovery) | `set espnow.secret` (wrapped), `udp.secret` (UDP, discovery) on heads |
 | PHY | raw mode turns on the ESP-NOW LR PHY | primary ESP-NOW nodes use the LR PHY |
 
-`wrapped` (magic, checksum, XOR with `bridge.secret`) is only for
-bridge-to-bridge links; primary ESP-NOW nodes cannot read it. In `raw`,
+`wrapped` (magic, checksum, XOR with `bridge.secret`) was only for
+bridge-to-bridge links; primary ESP-NOW nodes now speak it too with
+`espnow.format wrapped` and `espnow.secret` (byte-for-byte the bridge's
+format, applied at the next reboot). Then the whole ESP-NOW link, observer
+feed and announces included, needs the secret. Receive is strict per
+format, so switch every node; the order of steps is in
+[udp-transport.md](docs/espnow-head/udp-transport.md#switching-an-installation-to-wrapped). In `raw`,
 MeshCore's own encryption still protects DMs and channel messages; public
 frames and routing metadata are visible to anyone on the channel. Raw mode
 does not start while the repeater runs a WiFi AP.
 
-How they find each other: there is no pairing. Every node sends to the
+How they find each other: on ESP-NOW there is no pairing. Every node sends to the
 ESP-NOW broadcast address by default (`espnow.peer` can pin a unicast MAC) on
 the shared channel; anything on that channel with the same format hears it.
 Nodes then learn each other through normal MeshCore adverts. A head treats
@@ -140,10 +148,13 @@ On the bridge repeater (`docs/cli_commands.md` has the full text):
 | `set espnow.repeat.gap <0-200>` | `30` ms | Spacing between copies |
 | `set espnow.observer on\|off` | `off` | Observer feed for visual heads; admin-only remotely (`set observer on\|off` is the same switch) |
 | `set observer.transport espnow\|udp\|both` | `espnow` | Where the feed goes ([transports](#transports-esp-now-default-and-udpip-optional)); `get espnow.stats obs`, `get udp.stats obs` |
+| `set bridge.announce on\|off` | `on` | Announce every 5 s (ESP-NOW) / 10 s (UDP), signed with `bridge.secret`; heads learn the UDP address and are auto-paired (`get bridge.autopeers`) |
+| `set bridge.rxlimit <0-6000>` | `120` | Packets/min admitted from the ESP-NOW and UDP bridges (burst a quarter of it, `0` = off); drops in `get bridge.rxlimit` |
 
 On the heads: `set transport espnow|udp|both|auto` and `udp.*` (see
 [transports](#transports-esp-now-default-and-udpip-optional)).
 On ESP-NOW-only nodes: `set espnow.channel <1-13>` (reboot),
+`set espnow.format raw|wrapped` and `set espnow.secret` (reboot),
 `espnow.repeat` / `espnow.repeat.gap` (companions: local clients only),
 `powersaving off` (the default on the heads and the DevKit relay).
 
@@ -191,10 +202,14 @@ Full reference, wire format and owner test plan:
 - **Never blocks**: joining is an asynchronous scan of the ESP-NOW channel
   plus WiFi's asynchronous join; retries back off 15 s to 2 min, so LoRa
   receive is never held up by WiFi.
-- **Pairing is manual**: the repeater lists the head as `udp.peer.N`
-  (head IP from `get transport`), the head stores the repeater's IP:port and
-  `bridge.secret`; set `bridge.source tx` and `udp.enabled on` on the
-  repeater. Reserve both addresses on the router.
+- **Pairing is automatic** (owner design 2026-11-04): the repeater
+  announces itself (signed with `bridge.secret`); a head with `udp.secret`
+  and `udp.peer off` learns the repeater's address from an announce heard
+  over ESP-NOW or UDP and answers with its own; the repeater adds it as an
+  expiring UDP peer (4 slots, 4 new per minute, 5 min after the last
+  answer). Manual `udp.peer` / `udp.peer.N` still work and win. Set
+  `bridge.source tx` and `udp.enabled on` on the repeater. Details:
+  [udp-transport.md](docs/espnow-head/udp-transport.md#discovery-and-auto-pairing).
 - **Security**: UDP payloads are authenticated (HMAC-SHA256 with
   `bridge.secret`, per-boot handshake, replay window), not encrypted.
   Observer frames carry raw LoRa packets (already on air) plus the
@@ -216,6 +231,12 @@ Full reference, wire format and owner test plan:
 - On ESP-NOW primary nodes observer frames are taken by the demux only when a
   handler is registered (the visual heads). Every other build passes all
   frames to MeshCore as before.
+- `bridge.announce` is on by default: one 53-byte announce every 5 s on
+  ESP-NOW (raw nodes that do not know it drop it; MeshCore rejects its first
+  byte) and every 10 s on UDP. `bridge.rxlimit` (120/min) caps what the
+  bridges can push into LoRa.
+- `espnow.format` defaults to `raw`: an upgraded head or relay talks
+  exactly as before until it is switched and rebooted.
 - `espnow.repeat` defaults to 1 (send once, unchanged behaviour). OTA payloads
   are never repeated; copies stop while `radio.mode` disables transmit.
 - Heads auto-add only their home repeater from adverts; chat companions are
