@@ -10,8 +10,8 @@
 #include <helpers/esp32/ManagementPassword.h>
 #if MESH_ENABLE_EMERGENCY_POWER
 #include <esp_task_wdt.h>
-#include <helpers/esp32/LoopWatchdog.h>
 #endif
+#include <helpers/esp32/LoopWatchdog.h>   // serviceWatchdog, the OTA wait
 
 namespace mesh {
 namespace esp32_clock {
