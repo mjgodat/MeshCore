@@ -499,7 +499,10 @@ is normal while WebConfig is inactive; run `start webconfig` when a temporary
 connection is wanted. `get wifi.powersave` reports the saved standalone setting
 as `none`, `min`, or `max`. Fresh Cascade-profile builds default to `min`;
 target-default builds use `none`. A saved setting takes precedence after an
-upgrade.
+upgrade. While an ESP-NOW bridge runs the radio stays awake: `get wifi.powersave`
+then adds `(saved; effective none while the ESP-NOW bridge runs)`, `set
+wifi.powersave min|max` replies `OK - saved (radio kept awake while the ESP-NOW
+bridge runs)`, and the saved setting returns when the bridge stops.
 
 On ESP32, `get wifi.diag` reports the current connection attempt, application
 attempt count, time since the last attempt, and the driver's last disconnect
@@ -6676,8 +6679,14 @@ get espnow.stats rx
 get espnow.stats tx
 get espnow.stats drops
 get espnow.stats test
+get espnow.stats awake
 get espnow.peer
 ```
+
+`get espnow.stats awake` shows the modem-sleep mode, how often the bridge
+turned modem sleep back off (`repairs`), how often the driver refused
+(`refused`, e.g. Bluetooth active; retries back off up to 10 s) and the
+current back-off.
 
 `set espnow.peer AA:BB:CC:DD:EE:FF` saves a fixed unicast destination and
 restarts an enabled bridge. Unicast uses MAC acknowledgements and up to three

@@ -1,7 +1,8 @@
 # PlatformIO pre-script: give an env the same FIRMWARE_VERSION /
 # FIRMWARE_BUILD_DATE / FIRMWARE_BUILD_EPOCH as the shipped build.sh image
 # (scripts/firmware_version_scheme.py). The tag prefix comes from the env's
-# custom_firmware_tag_prefix option (e.g. "repeater").
+# custom_firmware_tag_prefix option (e.g. "repeater"). Macros build.sh (or
+# the env) already defines are left alone, so nothing is defined twice.
 import datetime
 import os
 import subprocess
@@ -26,9 +27,9 @@ tags = git("tag", "--list", prefix + "-v*", "--sort=-version:refname").splitline
 commit = git("rev-parse", "HEAD") or "00000000"
 now = datetime.datetime.now(datetime.timezone.utc)
 version, date, epoch = scheme.scheme(tags, commit, now, prefix, os.environ.get("FIRMWARE_VERSION"))
-env.Append(BUILD_FLAGS=[  # noqa: F821
-    "-DFIRMWARE_VERSION='\"%s\"'" % version,
-    "-DFIRMWARE_BUILD_DATE='\"%s\"'" % date,
-    "-DFIRMWARE_BUILD_EPOCH=%d" % epoch,
-])
-print("firmware_version_env: FIRMWARE_VERSION=%s FIRMWARE_BUILD_DATE=%s" % (version, date))
+existing = " ".join([os.environ.get("PLATFORMIO_BUILD_FLAGS", ""),
+                     " ".join(str(f) for f in env.GetProjectOption("build_flags", "").split())])  # noqa: F821
+flags = scheme.missing_flags(existing, version, date, epoch)
+if flags:
+    env.Append(BUILD_FLAGS=flags)  # noqa: F821
+print("firmware_version_env: %s" % (" ".join(flags) if flags else "already defined by the build"))

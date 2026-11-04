@@ -5,6 +5,7 @@
 #include <esp_wifi.h>
 #include <helpers/WiFiChannelPolicy.h>
 #include <helpers/esp32/WiFiCompatibility.h>
+#include <helpers/BridgeAwake.h>
 #include <atomic>
 
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW

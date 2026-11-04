@@ -6,9 +6,15 @@ is the latest "<tag prefix>-v*" git tag without its prefix plus "-dev"
 no tag; FIRMWARE_BUILD_DATE is the UTC date "DD-Mon-YYYY" and
 FIRMWARE_BUILD_EPOCH the UTC epoch. A FIRMWARE_VERSION environment variable
 overrides the version, as with build.sh --firmware-version.
-Pure: test/test_firmware_version_scheme.py.
+test/test_firmware_version_scheme.py checks these rules against the
+functions in build_legacy.sh itself.
 """
 import datetime
+import re
+
+FALLBACK_PREFIX = "dev"
+FALLBACK_DATE_FORMAT = "%Y-%m-%d-%H-%M"   # build.sh FALLBACK_VERSION_DATE_FORMAT
+BUILD_DATE_FORMAT = "%d-%b-%Y"            # build.sh: date -u '+%d-%b-%Y'
 
 
 def default_version(tags, now, prefix):
@@ -18,7 +24,7 @@ def default_version(tags, now, prefix):
             base = tag[len(prefix) + 1:]
             break
     else:
-        return "dev-" + now.strftime("%Y-%m-%d-%H-%M")
+        return FALLBACK_PREFIX + "-" + now.strftime(FALLBACK_DATE_FORMAT)
     if base.endswith("-dev") or base.startswith("dev-"):
         return base
     return base + "-dev"
@@ -29,7 +35,7 @@ def embedded_version(version, commit):
 
 
 def build_date(now):
-    return now.strftime("%d-%b-%Y")
+    return now.strftime(BUILD_DATE_FORMAT)
 
 
 def scheme(tags, commit, now, prefix, explicit_version=None):
@@ -38,3 +44,16 @@ def scheme(tags, commit, now, prefix, explicit_version=None):
     epoch = int(now.replace(tzinfo=datetime.timezone.utc).timestamp()) if now.tzinfo is None \
         else int(now.timestamp())
     return embedded_version(version, commit), build_date(now), epoch
+
+
+def missing_flags(existing_flags, version, date, epoch):
+    """-D flags for the macros not already defined by `existing_flags` (for
+    example build.sh's PLATFORMIO_BUILD_FLAGS), so nothing is defined twice."""
+    flags = []
+    for name, value in (("FIRMWARE_VERSION", "'\"%s\"'" % version),
+                        ("FIRMWARE_BUILD_DATE", "'\"%s\"'" % date),
+                        ("FIRMWARE_BUILD_EPOCH", str(epoch))):
+        if re.search(r"-D\s*%s(=|\s|$)" % name, existing_flags or ""):
+            continue
+        flags.append("-D%s=%s" % (name, value))
+    return flags

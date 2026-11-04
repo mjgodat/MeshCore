@@ -7,6 +7,7 @@
 #include <array>
 #include <vector>
 #include <helpers/WirelessControl.h>
+#include <helpers/BridgeAwake.h>
 #include <helpers/ESPNowRawFragmentation.h>
 #include <helpers/esp32/EspNowRepeatScheduler.h>
 #include <helpers/bridges/ESPNowBridgeFormat.h>
