@@ -252,3 +252,31 @@ with this firmware, and a 2.4 GHz network. Keep a USB terminal open on both.
    `set observer.transport espnow`, `set udp.enabled off`. Confirm the
    step-1 baseline. `get udp` on the head shows `password=set secret=set`;
    no output anywhere contains them.
+
+### Results, 2026-11-03 (ThinkNode M5 + CYD, router fixed on channel 2)
+
+Run on channel 2 because the router could not be moved to 6; both devices
+were put on channel 2 for the test and back on 6 afterwards.
+
+| Step | Result |
+|------|--------|
+| 1 `_udp` image, UDP off: LoRa, ESP-NOW, pages, login as before | PASS |
+| 2-3 Pinned channel, separate setup | PASS (channel 2 on both) |
+| 3-4 UDP only: vitals, pages, login and Ver over UDP | PASS, but see the blocker below |
+| 5 both: one copy of each frame (packet counter not doubled) | PASS |
+| 6 auto: fail-over after ~30 s without ESP-NOW vitals, fail-back, no flapping | PASS |
+| 7 Channel safety (simulated by moving the repeater's bridge channel) | FAIL: the bridge stopped instead of the station |
+| 8 Roll back | PASS |
+
+Found on hardware, to fix before UDP is used on a live repeater:
+
+- **Panic when WiFi first starts while the ESP-NOW bridge runs**
+  (`esp_netif_receive` with no lwIP input after `dhcp client start failed`).
+  It happens once per runtime enable; the repeater reboots in about 3 s and,
+  with UDP saved on, then joins cleanly at boot.
+- **A bridge channel change while the station is joined on another channel
+  stops the ESP-NOW bridge** (`channel.conflict`) and saves it off, instead
+  of dropping the station. Recover with the old channel or
+  `set espnow.enabled on`.
+- The head's `udp.ssid` / `udp.secret` and a non-MQTT repeater's
+  `wifi.ssid` cannot be cleared from the CLI yet (overwrite them).
