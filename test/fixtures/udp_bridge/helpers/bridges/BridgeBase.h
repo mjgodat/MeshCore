@@ -105,7 +105,7 @@ protected:
   };
   enum class IngressResult : uint8_t { Stopped, Filtered, Duplicate, Queued };
   virtual void onIngressResult(IngressResult) {}
-  virtual bool admitIngress() { return true; }
+  virtual bool admitIngress(const uint8_t*) { return true; }
   bool _initialized = false;
   NodePrefs* _prefs;
   mesh::PacketManager* _mgr;
@@ -129,7 +129,12 @@ protected:
     if (packet->getPayloadType() != PAYLOAD_TYPE_OTA && _seen_packets.wasSeen(packet)) {
       onIngressResult(IngressResult::Duplicate); _mgr->free(packet); return;
     }
-    if (!admitIngress()) { onIngressResult(IngressResult::Filtered); _mgr->free(packet); return; }
+    // the shared rxlimit key: the first 8 payload bytes (BridgeBase uses the
+    // seen-table hash)
+    uint8_t key[8] = {};
+    for (size_t i = 0; i < 8 && i < packet->payload.size(); ++i) key[i] = packet->payload[i];
+    const bool ota = packet->getPayloadType() == PAYLOAD_TYPE_OTA;
+    if (!admitIngress(ota ? nullptr : key)) { onIngressResult(IngressResult::Filtered); _mgr->free(packet); return; }
     if (packet->getPayloadType() != PAYLOAD_TYPE_OTA) _seen_packets.markSeen(packet);
     onIngressResult(IngressResult::Queued);
     _mgr->received_sources.push_back(ingress_source ? *ingress_source : mesh::bridge::IngressSource());

@@ -476,6 +476,45 @@ static int preview(const char* dir) {
   return ok ? 0 : 1;
 }
 
+// CYD TELEMETRY: the HEAP column of the VITALS strip shows the repeater's
+// free heap (health frame) and its trend line; "--" and no line without.
+[[maybe_unused]] static int nearColour(const std::vector<uint16_t>& px, int x0, int y0, int x1, int y1, uint16_t c) {
+  int n = 0;
+  for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) {
+    const uint16_t p = px[(size_t)y * W + x];
+    const int dr = ((p >> 11) & 31) - ((c >> 11) & 31), dg = ((p >> 5) & 63) - ((c >> 5) & 63), db = (p & 31) - (c & 31);
+    n += std::abs(dr) <= 3 && std::abs(dg) <= 6 && std::abs(db) <= 3;
+  }
+  return n;
+}
+
+static void cyd_heap() {
+#if HMI_CYD
+  std::vector<uint16_t> full((size_t)W * H);
+  {
+    Stack s(true);
+    s.set.page(PageSet::kTelemetry)->onShow(s.t);
+    FrameBuffer565 fb(full.data(), W, H);
+    s.ctx.now_ms = s.t;
+    drawFrame(fb, *s.set.page(PageSet::kTelemetry), s.ctx, PageSet::kTelemetry, PageSet::kCount, s.t);
+    CHECK(nearColour(full, 218, 186, 262, 206, theme::kText) > 20);     // "173k"
+    CHECK(nearColour(full, 264, 186, 312, 204, theme::kAccent) > 15);   // trend line
+    CHECK(nearColour(full, 250, 170, 312, 184, theme::kTextDim) > 10);  // "min 148k"
+  }
+  {
+    MeshModel m(16, 64);
+    PageContext ctx; ctxInit(ctx, &m);
+    PageSet set; set.attach(&ctx);
+    set.page(PageSet::kTelemetry)->onShow(1000);
+    FrameBuffer565 fb(full.data(), W, H);
+    ctx.now_ms = 1000;
+    drawFrame(fb, *set.page(PageSet::kTelemetry), ctx, PageSet::kTelemetry, PageSet::kCount, 1000);
+    CHECK(nearColour(full, 264, 186, 312, 204, theme::kAccent) == 0);
+  }
+#endif
+  if (!failures) std::printf("PASS cyd_heap\n");
+}
+
 int main(int argc, char** argv) {
   const std::string name = argc > 1 ? argv[1] : "";
   if (name == "preview") return preview(argc > 2 ? argv[2] : ".");
@@ -486,6 +525,7 @@ int main(int argc, char** argv) {
   else if (name == "hit_targets_drawn") hit_targets_drawn();
   else if (name == "touch_debounce") touch_debounce();
   else if (name == "nodes_hints") nodes_hints();
+  else if (name == "cyd_heap") cyd_heap();
   else { std::printf("unknown scenario %s\n", name.c_str()); return 2; }
   return failures ? 1 : 0;
 }
@@ -493,7 +533,7 @@ int main(int argc, char** argv) {
 
 SOURCES = test_widgets.SOURCES
 SCENARIOS = ('band_primitives', 'strip_renderer_pushes', 'pages_strip_equals_full', 'cyd_layout',
-             'hit_targets_drawn', 'touch_debounce', 'nodes_hints')
+             'hit_targets_drawn', 'touch_debounce', 'nodes_hints', 'cyd_heap')
 
 
 def build(work, cyd):

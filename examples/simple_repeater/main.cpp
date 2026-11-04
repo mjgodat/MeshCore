@@ -40,6 +40,8 @@
   #include <helpers/ESP32TrueRandom.h>
   #include <helpers/esp32/ProfileIdleSleep.h>
   #include <helpers/esp32/BootFileSystem.h>
+  #include <helpers/esp32/LoopWatchdog.h>
+  #include <helpers/esp32/ResetHistoryEsp32.h>
 #endif
 #if defined(NRF52_PLATFORM)
   #include <helpers/nrf52/InternalPrimaryFsBoot.h>
@@ -74,6 +76,12 @@ extern "C" bool btInUse() { return false; }
 #endif
 
 StdRNG fast_rng;
+#if defined(ESP32_PLATFORM)
+// Evidence for the next unexplained stop: `powerlog` prints how the previous
+// run ended and when it was last alive (ResetHistory.h).
+static mesh::esp32::ResetHistory reset_history;
+size_t meshFormatResetHistory(char* out, size_t cap) { return reset_history.format(out, cap); }
+#endif
 #if MAX_RECENT_REPEATERS > 0
 // Compact rows retain the complete prefix/SNR/32-bit age at every capacity.
 // All accesses are owned by this loop, including deferred network commands.
@@ -515,6 +523,12 @@ void setup() {
   mesh::endEsp32BootFileInventory();
 #endif
   board.onBootComplete();
+#if defined(ESP32_PLATFORM)
+  reset_history.begin();
+  // Last: from here a loop() that does not return within the timeout panics
+  // and resets (LoopWatchdog.h); 0 leaves the loop unwatched.
+  mesh::esp32::beginLoopWatchdog(MESH_LOOP_WATCHDOG_SECS);
+#endif
   mesh::hilStartupTrace("boot_complete_ready");
 }
 
@@ -784,6 +798,14 @@ void loop() {
   board.feedWatchdog(the_mesh.getNodePrefs()->system_watchdog_enabled != 0);
 #endif
   serviceCommandInterfaces();
+#if defined(ESP32_PLATFORM)
+  {
+    // A clock still running from the boot seed (ESP32RTCClock) is not a time.
+    const uint32_t uptime_s = static_cast<uint32_t>(esp_timer_get_time() / 1000000LL);   // no 49-day wrap
+    const uint32_t epoch = rtc_clock.getCurrentTime();
+    reset_history.service(uptime_s, epoch > RTC_TIME_MIN + uptime_s + 120 ? epoch : 0);
+  }
+#endif
 
 #if MESH_ENABLE_EMERGENCY_POWER
   static mesh::power::EmergencyPowerRuntime emergency_power;
@@ -901,6 +923,11 @@ void loop() {
     }
 #ifdef HAS_EXTERNAL_WATCHDOG
     if (sleep_ms > 0) external_watchdog.feed();
+#endif
+#if defined(ESP32_PLATFORM)
+    // The loop watchdog keeps counting through a sleep: wake well before it.
+    if (sleep_ms > mesh::esp32::loopWatchdogSleepCapMs()) sleep_ms = mesh::esp32::loopWatchdogSleepCapMs();
+    mesh::esp32::feedLoopWatchdog();
 #endif
 #if defined(NRF52_PLATFORM)
     if (sleep_ms > 0 && the_mesh.canIdleDualRadio()) {

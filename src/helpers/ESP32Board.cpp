@@ -10,6 +10,7 @@
 #include <helpers/esp32/ManagementPassword.h>
 #if MESH_ENABLE_EMERGENCY_POWER
 #include <esp_task_wdt.h>
+#include <helpers/esp32/LoopWatchdog.h>
 #endif
 
 namespace mesh {
@@ -1123,6 +1124,8 @@ bool ESP32Board::otaFromManifest(const char* manifest_base, const char* current_
     strcpy(reply, "ERR: OTA task spawn failed");
     return false;
   }
+  // A download takes as long as the network needs: not a loop hang.
+  mesh::esp32::LoopWatchdogPause watchdog_pause;
   while (!args.done) {
     delay(50);  // Arduino delay() yields to other tasks
   }

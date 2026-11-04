@@ -232,11 +232,12 @@ bool handleBridgeDiscoveryCommand(const char* command, char* reply, size_t capac
     } else {
       const RxLimiter& l = rxLimiter();
       if (current.rx_limit == 0)
-        snprintf(reply, capacity, "> 0 (no limit) passed=%lu dropped=%lu",
-                 (unsigned long)l.passed(), (unsigned long)l.dropped());
+        snprintf(reply, capacity, "> 0 (no limit) passed=%lu dropped=%lu shared=%lu",
+                 (unsigned long)l.passed(), (unsigned long)l.dropped(), (unsigned long)l.shared());
       else
-        snprintf(reply, capacity, "> %u/min (burst %u) passed=%lu dropped=%lu", unsigned(current.rx_limit),
-                 unsigned(l.burst()), (unsigned long)l.passed(), (unsigned long)l.dropped());
+        snprintf(reply, capacity, "> %u/min (burst %u) passed=%lu dropped=%lu shared=%lu", unsigned(current.rx_limit),
+                 unsigned(l.burst()), (unsigned long)l.passed(), (unsigned long)l.dropped(),
+                 (unsigned long)l.shared());
     }
     return true;
   }

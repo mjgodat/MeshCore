@@ -273,6 +273,12 @@ static const Rep kReps[] = {
 };
 static const int kRepCount = 6;
 
+static void health(MeshModel& m, uint32_t t, uint32_t free_heap) {
+  mesh::observer::Health h;
+  h.free_heap = free_heap; h.min_free_heap = 151234; h.largest_block = 65524; h.reset_reason = 1;
+  m.onHealth(h, t);
+}
+
 // A fake hour of mesh around the M5 (host previews / tests only): adverts,
 // then 60 minutes of traffic relayed by the repeaters with per-minute vitals.
 static uint32_t populate(MeshModel& m, PageContext& ctx, bool fix) {
@@ -313,6 +319,7 @@ static uint32_t populate(MeshModel& m, PageContext& ctx, bool fix) {
           t0 + (uint32_t)k * (55000u / (uint32_t)n), snr, -70 - (int)(rnd() % 40));
     }
     vitals(m, ctx, t0 + 59000, (int16_t)(-116 + (int)(3.0 * std::sin(min / 9.0)) + (int)(rnd() % 3)), (uint16_t)n, fix);
+    health(m, t0 + 59500, 186000u - (uint32_t)min * 150u - (uint32_t)(rnd() % 1500));
   }
   t = start + 60u * 60000u;
   ctx.data_gen += 5;
@@ -500,6 +507,57 @@ static void telemetry_renders() {
   s.frame(tp, t + 10u * 60000u);
   CHECK(s.near(400, 238, 470, 290, theme::kText) < 5);
   if (!failures) std::printf("PASS telemetry_renders\n");
+}
+
+// The repeater's heap (observer health frame): the model keeps the lowest
+// free heap per 10 min over 8 h; TELEMETRY shows it in the VITALS panel.
+static void telemetry_heap() {
+  {
+    MeshModel m(16, 64);
+    uint32_t low[MeshModel::kHeapSlots]; bool has[MeshModel::kHeapSlots];
+    CHECK(m.health() == nullptr);
+    m.heapLowPerSlot(low, has);
+    for (size_t i = 0; i < MeshModel::kHeapSlots; i++) CHECK(!has[i]);
+    health(m, 1000, 180000); health(m, 2000, 170000); health(m, 3000, 175000);
+    CHECK(m.health() != nullptr && m.health()->free_heap == 175000 && m.healthMs() == 3000);
+    m.heapLowPerSlot(low, has);
+    CHECK(has[MeshModel::kHeapSlots - 1] && low[MeshModel::kHeapSlots - 1] == 170000);   // the slot's lowest
+    health(m, 1000 + MeshModel::kHeapSlotMs, 172000);                                      // next slot
+    m.heapLowPerSlot(low, has);
+    CHECK(has[MeshModel::kHeapSlots - 1] && low[MeshModel::kHeapSlots - 1] == 172000);
+    CHECK(has[MeshModel::kHeapSlots - 2] && low[MeshModel::kHeapSlots - 2] == 170000);
+    // 8 h later the old slots have rolled out of the window
+    m.tick(1000 + 49u * MeshModel::kHeapSlotMs);
+    m.heapLowPerSlot(low, has);
+    int any = 0;
+    for (size_t i = 0; i < MeshModel::kHeapSlots; i++) any += has[i];
+    CHECK(any == 0);
+  }
+  MeshModel m(64, 512);
+  PageContext ctx; ctxInit(ctx, &m);
+  TelemetryPage tp; tp.attach(&ctx);
+  Screen s(&ctx);
+  const uint32_t t = populate(m, ctx, true);
+  // a repeater that sends no health frame: "--", no trend
+  MeshModel old(64, 512);
+  PageContext octx; ctxInit(octx, &old);
+  TelemetryPage otp; otp.attach(&octx);
+  Screen os(&octx);
+  os.show(otp, 500, PageSet::kTelemetry);
+  os.frame(otp, 500);
+  CHECK(os.near(400, 259, 440, 273, theme::kAccent) == 0);
+  CHECK(os.near(440, 259, 470, 287, theme::kText) == 0);
+  // with health: the value (row 4), the "min" note and the trend line
+  s.show(tp, t, PageSet::kTelemetry);
+  s.frame(tp, t);
+  CHECK(s.near(440, 259, 470, 273, theme::kText) > 8);       // "173k"
+  CHECK(s.near(402, 260, 436, 273, theme::kAccent) > 8);     // trend line
+  CHECK(s.near(440, 273, 470, 287, theme::kText) > 8);       // HEAP MIN "148k"
+  // stale after 95 s without a health frame: grey
+  s.frame(tp, t + 100000u);
+  CHECK(s.near(440, 259, 470, 287, theme::kText) < 3);
+  CHECK(s.near(402, 260, 436, 273, theme::kAccent) == 0);
+  if (!failures) std::printf("PASS telemetry_heap\n");
 }
 
 static void map_page_plots_and_taps() {
@@ -1051,6 +1109,7 @@ int main(int argc, char** argv) {
   else if (name == "node_card_handles_no_gps") node_card_handles_no_gps();
   else if (name == "node_card_with_history") node_card_with_history();
   else if (name == "telemetry_renders") telemetry_renders();
+  else if (name == "telemetry_heap") telemetry_heap();
   else if (name == "map_page_plots_and_taps") map_page_plots_and_taps();
   else if (name == "nodes_page_sorts_scrolls_and_taps") nodes_page_sorts_scrolls_and_taps();
   else if (name == "home_tap_opens_card") home_tap_opens_card();
@@ -1131,6 +1190,14 @@ class WidgetsTest(unittest.TestCase):
 
     def test_telemetry_renders(self):
         self.run_scenario('telemetry_renders')
+
+    def test_telemetry_heap(self):
+        self.run_scenario('telemetry_heap')
+
+    def test_ui_task_feeds_health_frames_to_the_model(self):
+        task = (UI / 'FreenoveUITask.cpp').read_text()
+        self.assertRegex(task, r'frame\[5\] == \(uint8_t\)mesh::observer::Kind::Health\) \{\s+mesh::observer::Health health;\s+'
+                               r'if \(mesh::observer::decodeHealth\(frame, len, health\)\) _model->onHealth\(health, now_ms\);')
 
     def test_map_page_plots_and_taps(self):
         self.run_scenario('map_page_plots_and_taps')

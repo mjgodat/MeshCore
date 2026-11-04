@@ -297,6 +297,12 @@ private:
 // packet that passed the duplicate check, just before it is queued. One
 // shared token bucket, burst = a fifth of the rate (at least 1): the
 // suggested 300/min gives bursts of 60.
+// Each bridge has its own duplicate table, so a packet that arrives over
+// both bridges (a head on `transport both`) is new to each. admit() with the
+// packet's hash remembers the last kSharedKeys admitted packets: the second
+// bridge's copy passes without a token (counted as `shared`; the mesh then
+// drops it as a duplicate), so each unique packet costs one token. A packet
+// refused for lack of tokens is not remembered: a later copy may pass.
 constexpr uint16_t kRxLimitDefault = 0;
 constexpr uint16_t kRxLimitSuggested = 300;
 constexpr uint16_t kRxLimitMax = 6000;
@@ -309,9 +315,34 @@ public:
   }
   uint16_t rate() const { return _rate; }
   uint16_t burst() const { return _rate == 0 ? 0 : (uint16_t)(_rate / 5 ? _rate / 5 : 1); }
-  // True when the packet may pass; counts passes and drops.
-  bool admit(uint32_t now) {
-    if (_rate == 0) { ++_passed; return true; }
+  // True when the packet may pass; counts passes and drops. `key` (the
+  // packet hash, MAX_HASH_SIZE bytes, or null) shares the admission across
+  // bridges (see above).
+  bool admit(uint32_t now, const uint8_t* key = nullptr) {
+    uint32_t k = 0;
+    if (key != nullptr) {
+      k = (uint32_t)key[0] | ((uint32_t)key[1] << 8) | ((uint32_t)key[2] << 16) | ((uint32_t)key[3] << 24);
+      for (uint8_t i = 0; i < _keys_used; ++i)
+        if (_keys[i] == k) { ++_shared; return true; }
+    }
+    if (!take(now)) { ++_dropped; return false; }
+    ++_passed;
+    if (key != nullptr) {
+      _keys[_keys_next] = k;
+      _keys_next = (uint8_t)((_keys_next + 1) % kSharedKeys);
+      if (_keys_used < kSharedKeys) ++_keys_used;
+    }
+    return true;
+  }
+  uint32_t passed() const { return _passed; }
+  uint32_t dropped() const { return _dropped; }
+  uint32_t shared() const { return _shared; }
+  void resetCounters() { _passed = _dropped = _shared = 0; }
+  static const uint8_t kSharedKeys = 16;
+
+private:
+  bool take(uint32_t now) {
+    if (_rate == 0) return true;
     const uint32_t cap = (uint32_t)burst() * 60000U;   // milli-token-minutes
     if (!_started) { _started = true; _last = now; _level = cap; }
     uint32_t elapsed = now - _last;
@@ -319,19 +350,15 @@ public:
     if (elapsed > 3600000U) elapsed = 3600000U;
     const uint64_t added = (uint64_t)elapsed * _rate;   // ms * pkts/min
     _level = (uint64_t)_level + added >= cap ? cap : (uint32_t)(_level + added);
-    if (_level < 60000U) { ++_dropped; return false; }
+    if (_level < 60000U) return false;
     _level -= 60000U;
-    ++_passed;
     return true;
   }
-  uint32_t passed() const { return _passed; }
-  uint32_t dropped() const { return _dropped; }
-  void resetCounters() { _passed = _dropped = 0; }
-
-private:
   uint16_t _rate = kRxLimitDefault;
   bool _started = false;
-  uint32_t _last = 0, _level = 0, _passed = 0, _dropped = 0;
+  uint32_t _last = 0, _level = 0, _passed = 0, _dropped = 0, _shared = 0;
+  uint32_t _keys[kSharedKeys] = {};
+  uint8_t _keys_used = 0, _keys_next = 0;
 };
 
 inline RxLimiter& rxLimiter() {

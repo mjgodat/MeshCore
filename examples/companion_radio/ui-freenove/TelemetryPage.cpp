@@ -47,6 +47,11 @@ const AAFont& kValueFont = kFontTitle;
 const int kRateX = 30, kRateY = 124, kRateW = 158, kRateH = 22;
 const int kWfX = 0, kWfY = 0, kWfW = 2, kWfH = 1;   // no waterfall on the CYD
 const int kNfX = 206, kNfY = 126, kNfW = 104, kNfH = 32;
+// VITALS strip: four columns (x in the panel); HEAP is the widest: its
+// label row also carries "min", its trend line sits right of the value.
+const int kVitColX[4] = {10, 78, 148, 214};
+const int kVitRowY = 0, kVitRowPitch = 0;   // the Freenove rows (not on the CYD)
+const int kHeapSparkX = 4 + 214 + 46, kHeapSparkY = 166 + 22, kHeapSparkW = 4 + 312 - 6 - (4 + 214 + 46), kHeapSparkH = 14;
 #else
 const int kGaugeCx = 27, kGaugeCy = 47;   // ring centre in its panel
 const float kGaugeR = 19.0f, kGaugeThick = 4.5f;
@@ -57,6 +62,9 @@ const AAFont& kValueFont = kFontDigits;
 const int kRateX = 42, kRateY = 146, kRateW = 182, kRateH = 40;
 const int kWfX = 276, kWfY = 146, kWfW = 188, kWfH = 54;
 const int kNfX = 250, kNfY = 242, kNfW = 96, kNfH = 40;
+// VITALS: five rows (14 px font); the heap trend between "HEAP" and its value.
+const int kVitRowY = 217, kVitRowPitch = 14;
+const int kHeapSparkX = 362 + 45, kHeapSparkY = 217 + 3 * 14 + 2, kHeapSparkW = 30, kHeapSparkH = 11;
 #endif
 
 uint16_t rssiColour(int rssi) {
@@ -72,6 +80,11 @@ int niceMax(int v) {
   for (size_t i = 0; i < sizeof(kSteps) / sizeof(kSteps[0]); i++)
     if (v <= kSteps[i]) return kSteps[i];
   return 65535;
+}
+
+// Bytes as "182k" (KiB, rounded).
+void formatKiB(char* out, size_t cap, uint32_t bytes) {
+  snprintf(out, cap, "%luk", (unsigned long)((bytes + 512u) / 1024u));
 }
 
 void formatUptime(char* out, size_t cap, uint32_t s) {
@@ -124,8 +137,9 @@ void TelemetryPage::drawBackground(FrameBuffer565& fb) {
   fb.text(kRateX + kRateW, kRateY + kRateH + 1, "now", theme::kTextDim, kFontSmall, FrameBuffer565::kRightTop);
   drawPanel(fb, kNoisePanel, "NOISE", nullptr);
   drawPanel(fb, kVitalsPanel, nullptr, nullptr);
-  static const char* const kVitCyd[3] = {"ESP-NOW 15m", "BATTERY", "UPTIME"};
-  for (int i = 0; i < 3; i++) fb.text(kVitalsPanel.x + 10 + i * 104, kVitalsPanel.y + 4, kVitCyd[i], theme::kTextDim, kFontSmall);
+  static const char* const kVitCyd[4] = {"ESP-NOW", "BATTERY", "UPTIME", "HEAP"};
+  for (int i = 0; i < 4; i++)
+    fb.text(kVitalsPanel.x + kVitColX[i], kVitalsPanel.y + 4, kVitCyd[i], theme::kTextDim, kFontSmall);
   return;
 #endif
   fb.text(kRateX, kRateY + kRateH + 2, "-60m", theme::kTextDim, kFontSmall);
@@ -142,9 +156,10 @@ void TelemetryPage::drawBackground(FrameBuffer565& fb) {
   fb.text(kWfX - 4, zy - 8, "0", theme::kTextDim, kFontSmall, FrameBuffer565::kRightTop);
   drawPanel(fb, kActivePanel, "ACTIVE NODES", "SNR dB");
   drawPanel(fb, kNoisePanel, "NOISE", nullptr);
-  drawPanel(fb, kVitalsPanel, "VITALS", nullptr);
-  static const char* const kVit[3] = {"ESP-NOW 15m", "BATT", "UPTIME"};
-  for (int i = 0; i < 3; i++) fb.text(kVitalsPanel.x + 8, 240 + i * 17, kVit[i], theme::kTextDim, kFontSmall);
+  // Five rows: no room for a title (the strip reads as the repeater's vitals).
+  drawPanel(fb, kVitalsPanel, nullptr, nullptr);
+  static const char* const kVit[5] = {"ESP-NOW 15m", "BATT", "UPTIME", "HEAP", "HEAP MIN"};
+  for (int i = 0; i < 5; i++) fb.text(kVitalsPanel.x + 8, kVitRowY + i * kVitRowPitch, kVit[i], theme::kTextDim, kFontSmall);
 }
 
 void TelemetryPage::draw(FrameBuffer565& fb, uint32_t now_ms) {
@@ -164,6 +179,7 @@ void TelemetryPage::draw(FrameBuffer565& fb, uint32_t now_ms) {
   }
   drawNoise(fb, now_ms);
   drawVitals(fb, now_ms);
+  drawHeap(fb, now_ms);
 }
 
 void TelemetryPage::drawGauges(FrameBuffer565& fb, uint32_t now_ms) const {
@@ -383,12 +399,56 @@ void TelemetryPage::drawVitals(FrameBuffer565& fb, uint32_t now_ms) const {
   }
 #if HMI_CYD
   for (int i = 0; i < 3; i++)
-    fb.text(kVitalsPanel.x + 10 + i * 104, kVitalsPanel.y + 20, vals[i], live ? theme::kText : kDimText, kFontTitle);
+    fb.text(kVitalsPanel.x + kVitColX[i], kVitalsPanel.y + 20, vals[i], live ? theme::kText : kDimText, kFontTitle);
 #else
   for (int i = 0; i < 3; i++)
-    fb.text(kVitalsPanel.x + kVitalsPanel.w - 8, 240 + i * 17, vals[i], live ? theme::kText : kDimText, kFontSmall,
-            FrameBuffer565::kRightTop);
+    fb.text(kVitalsPanel.x + kVitalsPanel.w - 8, kVitRowY + i * kVitRowPitch, vals[i], live ? theme::kText : kDimText,
+            kFontSmall, FrameBuffer565::kRightTop);
 #endif
+}
+
+void TelemetryPage::drawHeap(FrameBuffer565& fb, uint32_t now_ms) const {
+  const MeshModel& m = *_ctx->model;
+  const mesh::observer::Health* h = m.health();
+  const bool live = h != nullptr && (uint32_t)(now_ms - m.healthMs()) < kHealthStaleMs;
+  char now_txt[12] = "--", min_txt[16] = "";
+  if (h != nullptr) {
+    formatKiB(now_txt, sizeof(now_txt), h->free_heap);
+    char k[12];
+    formatKiB(k, sizeof(k), h->min_free_heap);
+    snprintf(min_txt, sizeof(min_txt), "min %s", k);
+  }
+  const uint16_t c = live ? theme::kText : kDimText;
+#if HMI_CYD
+  const int x = kVitalsPanel.x + kVitColX[3];
+  fb.text(x, kVitalsPanel.y + 20, now_txt, c, kFontTitle);
+  if (min_txt[0])
+    fb.text(kVitalsPanel.x + kVitalsPanel.w - 6, kVitalsPanel.y + 4, min_txt, theme::kTextDim, kFontSmall,
+            FrameBuffer565::kRightTop);
+#else
+  fb.text(kVitalsPanel.x + kVitalsPanel.w - 8, kVitRowY + 3 * kVitRowPitch, now_txt, c, kFontSmall,
+          FrameBuffer565::kRightTop);
+  fb.text(kVitalsPanel.x + kVitalsPanel.w - 8, kVitRowY + 4 * kVitRowPitch, min_txt[0] ? min_txt + 4 : "--", c,
+          kFontSmall, FrameBuffer565::kRightTop);
+#endif
+  // Trend: the lowest free heap per 10 min over 8 h, in KiB.
+  uint32_t low[MeshModel::kHeapSlots];
+  bool has[MeshModel::kHeapSlots];
+  m.heapLowPerSlot(low, has);
+  int16_t v[MeshModel::kHeapSlots];
+  for (size_t i = 0; i < MeshModel::kHeapSlots; i++) {
+    const uint32_t kib = (low[i] + 512u) / 1024u;
+    v[i] = has[i] ? (int16_t)(kib > 32767u ? 32767u : kib) : INT16_MIN;
+  }
+  // From the oldest slot with data (up to 8 h back) to now, so the line
+  // shows from the second slot on rather than as a stub at the right.
+  int first = 0;
+  while (first < (int)MeshModel::kHeapSlots && v[first] == INT16_MIN) first++;
+  const int n = (int)MeshModel::kHeapSlots - first;
+  int lo = 0, hi = 0;
+  if (n < 2 || widgets::sparkRange(v + first, n, INT16_MIN, 8, lo, hi) < 2) return;
+  widgets::sparkline(fb, kHeapSparkX, kHeapSparkY, kHeapSparkW, kHeapSparkH, v + first, n, INT16_MIN, lo, hi,
+                     live ? theme::kAccent : kDimText, 50);
 }
 
 }  // namespace freenove_ui

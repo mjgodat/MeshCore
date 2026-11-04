@@ -459,6 +459,10 @@ void FreenoveUITask::drainObserver(uint32_t now_ms) {
       mesh::observer::PacketRecord rec;
       if (mesh::observer::decodePacket(frame, len, rec)) _model->onObserverPacket(rec, now_ms);
       else _ctx.obs_bad++;
+    } else if (frame[5] == (uint8_t)mesh::observer::Kind::Health) {
+      mesh::observer::Health health;
+      if (mesh::observer::decodeHealth(frame, len, health)) _model->onHealth(health, now_ms);
+      else _ctx.obs_bad++;
     } else {
       mesh::observer::Vitals vit;
       if (mesh::observer::decodeVitals(frame, len, vit)) _model->onVitals(vit, now_ms);

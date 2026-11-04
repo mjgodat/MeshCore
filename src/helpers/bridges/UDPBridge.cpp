@@ -273,9 +273,10 @@ void UDPBridge::drainReceive() {
 void UDPBridge::onPacketReceived(mesh::Packet* packet) {
   if (packet) { packet->udp_bridge_ingress = true; handleReceivedPacket(packet); }
 }
-bool UDPBridge::admitIngress() {
-  // bridge.rxlimit: one budget shared with the ESP-NOW bridge, new packets only.
-  return mesh::discovery::rxLimiter().admit(millis());
+bool UDPBridge::admitIngress(const uint8_t* shared_key) {
+  // bridge.rxlimit: one budget shared with the ESP-NOW bridge, new packets
+  // only; a packet the ESP-NOW bridge already admitted passes free.
+  return mesh::discovery::rxLimiter().admit(millis(), shared_key);
 }
 void UDPBridge::onIngressResult(IngressResult result) {
   switch (result) {
