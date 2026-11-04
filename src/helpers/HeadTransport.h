@@ -178,11 +178,13 @@ private:
 // ---- the all-channel diagnosis scan ----------------------------------------
 // Looking for the network on every channel pauses ESP-NOW receive (~1.5 s).
 // Only allowed when ESP-NOW has nothing to lose: the head is in udp or auto
-// mode and has heard no ESP-NOW vitals for the fail-over time (or never).
-// StationJoin adds the once-per-10-minutes limit.
+// mode and has heard no ESP-NOW vitals for the fail-over time (or never, once
+// it has been up for the fail-over time: right after boot "never" just means
+// "not yet"). StationJoin adds the once-per-10-minutes limit.
 inline bool allChannelDiagnosisAllowed(Mode mode, bool espnow_vitals_seen, uint32_t espnow_vitals_age_ms,
-                                       uint32_t failover_ms) {
+                                       uint32_t failover_ms, uint32_t uptime_ms) {
   if (mode != Mode::Udp && mode != Mode::Auto) return false;
+  if (uptime_ms < failover_ms) return false;
   return !espnow_vitals_seen || espnow_vitals_age_ms >= failover_ms;
 }
 
