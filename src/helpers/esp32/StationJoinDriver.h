@@ -56,18 +56,33 @@ struct StationJoinDriver {
         && sdk_mode != WIFI_MODE_NULL;
   }
 
+  // Arduino 2.0.17 reports an asynchronous scan as failed once 20 x its
+  // per-channel time has passed (2.2 s for the all-channel diagnosis),
+  // while the driver keeps scanning and stores the result later. Our own
+  // scan counts as running until it lands or kScanLimitMs has passed.
+  static const uint32_t kScanLimitMs = 10000;
+  uint32_t scan_started_ms = 0;
+  bool scan_in_flight = false;
+
   bool startScan(uint8_t channel, const char* ssid) {
-    if (WiFi.scanComplete() == WIFI_SCAN_RUNNING || !prepare()) return false;
+    if (scanResult() == -1 || !prepare()) return false;
     if (channel && restoreEspNowChannel() != ESP_OK) return false;
     WiFi.scanDelete();
     // Asynchronous; 300 ms on one channel (it stays there), 110 ms per
     // channel for the heads' rare all-channel diagnosis.
-    return WiFi.scanNetworks(true, false, false, channel ? 300 : 110, channel, ssid, nullptr)
-        == WIFI_SCAN_RUNNING;
+    if (WiFi.scanNetworks(true, false, false, channel ? 300 : 110, channel, ssid, nullptr)
+        != WIFI_SCAN_RUNNING) return false;
+    scan_started_ms = millis();
+    scan_in_flight = true;
+    return true;
   }
-  int scanResult() const {
+  int scanResult() {
     const int16_t n = WiFi.scanComplete();
-    return n == WIFI_SCAN_RUNNING ? -1 : n < 0 ? -2 : n;
+    if (n >= 0) { scan_in_flight = false; return n; }
+    if (n == WIFI_SCAN_RUNNING) return -1;
+    if (scan_in_flight && millis() - scan_started_ms < kScanLimitMs) return -1;   // Arduino gave up early
+    scan_in_flight = false;
+    return -2;
   }
   bool pick(const char* ssid, uint8_t channel, uint8_t bssid[6], uint8_t& strongest) {
     const int16_t n = WiFi.scanComplete();
@@ -87,7 +102,7 @@ struct StationJoinDriver {
     memcpy(bssid, b, 6);
     return true;
   }
-  void scanDelete() { WiFi.scanDelete(); }
+  void scanDelete() { WiFi.scanDelete(); scan_in_flight = false; }
 
   bool begin(const char* ssid, const char* password, uint8_t channel, const uint8_t* bssid) {
     if (!prepare()) return false;
