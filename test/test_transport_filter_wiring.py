@@ -72,6 +72,8 @@ struct Seen {
  unsigned checks=0,marks=0;
  bool wasSeen(mesh::Packet*) {++checks;return false;}
  void markSeen(mesh::Packet*) {++marks;}
+ struct SeenKey {uint8_t hash[8]={};};
+ SeenKey seenKey(const mesh::Packet&) const {return SeenKey();}   // bridge.rxlimit shared key
 };
 struct Manager {
  unsigned freed=0,queued=0;
