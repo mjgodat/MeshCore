@@ -81,7 +81,8 @@ struct FakeJoinDriver {
    mesh::wifi::beginStation(ssid,pw);return true;}
  bool linkUp(){return WiFi.getMode()==WIFI_STA&&WiFi.status()==WL_CONNECTED&&WiFi.localIP()!=0;}
  uint8_t linkChannel(){return 6;}
- void disconnect(){}
+ int disconnects=0;
+ void disconnect(){++disconnects;}
  void restoreChannel(){}
 };
 struct NodePrefs {char bridge_secret[16]="test-secret";};
@@ -116,7 +117,7 @@ struct MyMesh {
  UDPBridge*udp_bridge=nullptr;uint32_t udp_station_retry_at=0;bool udp_network_paused=false;
  mesh::wifi::StationJoin<FakeJoinDriver> udp_join;FakeJoinDriver udp_join_driver;
  char udp_station_ssid[33]={};char udp_station_password[65]={};void loadUDPStationCredentials();
- bool udp_bridge_restart_wanted=false;uint32_t udp_bridge_restart_at=0;
+ bool udp_bridge_restart_wanted=false;uint32_t udp_bridge_restart_at=0;bool udpBridgeSwitchedOn()const;
  uint8_t udpPinnedEspNowChannel() const {return 0;}
  MQTT* mqtt_bridge=nullptr;bool web_active=false,web_stopping=false;
  WebConfig* _webconfig=nullptr;
@@ -386,7 +387,7 @@ int main(){
             'bool MyMesh::ensureUDPBridge(', 'bool MyMesh::isUDPBridgeNetworkEnabled(',
             'bool MyMesh::setUDPBridgeNetworkState(', 'bool MyMesh::setUDPBridgePrefs(',
             'void MyMesh::serviceUDPBridge(', 'void MyMesh::formatUDPBridgeStatus(',
-            'void MyMesh::loadUDPStationCredentials('))
+            'void MyMesh::loadUDPStationCredentials(', 'bool MyMesh::udpBridgeSwitchedOn('))
         for flags in ((),('WITH_MQTT_BRIDGE',),('WITH_WEBCONFIG',),('WITH_MQTT_BRIDGE','WITH_WEBCONFIG')):
             with self.subTest(flags=flags),tempfile.TemporaryDirectory() as tmp:
                 path=Path(tmp);(path/'test.cpp').write_text(HARNESS.replace('@METHODS@',methods)
@@ -396,5 +397,56 @@ int main(){
                     '-fno-omit-frame-pointer','-fno-pie','-no-pie','-I',str(ROOT/'src'),
                     *['-D'+flag+'=1' for flag in flags],str(path/'test.cpp'),'-o',str(binary)],check=True)
                 subprocess.run([str(binary)],check=True)
+
+    def test_joins_without_peers_and_leaves_its_own_network_when_switched_off(self):
+        """udp.enabled on joins WiFi with no udp.peer.N yet (peers only gate who
+        gets frames); udp.enabled off leaves the network UDP joined, frees the
+        socket object, and never drops a link another owner made."""
+        source=(ROOT/'examples/simple_repeater/MyMesh.cpp').read_text()
+        methods='\n'.join(body(source,signature) for signature in (
+            'bool MyMesh::ensureUDPBridge(', 'bool MyMesh::isUDPBridgeNetworkEnabled(',
+            'bool MyMesh::setUDPBridgeNetworkState(', 'bool MyMesh::setUDPBridgePrefs(',
+            'void MyMesh::serviceUDPBridge(', 'void MyMesh::formatUDPBridgeStatus(',
+            'void MyMesh::loadUDPStationCredentials(', 'bool MyMesh::udpBridgeSwitchedOn('))
+        program=HARNESS[:HARNESS.index('int main(){')]+r"""
+int main(){
+ { MyMesh node; auto prefs=node.udp_bridge_settings.data; prefs.enabled=1;   // no peers at all
+   assert(node.setUDPBridgePrefs(prefs));
+   assert(node.isUDPBridgeNetworkEnabled()&&WiFi.begins==1&&node.udp_bridge);
+   WiFi.state=WL_CONNECTED;WiFi.ip=0x0100000a;node.serviceUDPBridge();
+   assert(node.udp_bridge->running);
+   char status[157];node.formatUDPBridgeStatus(status,sizeof(status));assert(strstr(status,"ready"));
+   const int before=node.udp_join_driver.disconnects;
+   prefs.enabled=0;assert(node.setUDPBridgePrefs(prefs));
+   assert(!node.udp_bridge&&UDPBridge::allocations==0);              // socket owner freed
+   assert(node.udp_join_driver.disconnects==before+1);               // left its own network
+   assert(!node.udp_join.connected()&&!node.udp_join.owned());
+   assert(!mesh::wifi::networkPower().foregroundActive());
+   WiFi.state=WL_IDLE_STATUS;WiFi.ip=0; }
+ { // A station MQTT or WebConfig joined: UDP adopts it, and off never drops it.
+   MyMesh node;WiFi.current=WIFI_STA;WiFi.state=WL_CONNECTED;WiFi.ip=0x0100000a;
+   const int begins=WiFi.begins;
+   auto prefs=node.udp_bridge_settings.data;prefs.enabled=1;
+   assert(node.setUDPBridgePrefs(prefs));
+   assert(node.udp_bridge&&node.udp_bridge->running&&WiFi.begins==begins);   // adopted, not rejoined
+   prefs.enabled=0;assert(node.setUDPBridgePrefs(prefs));
+   assert(!node.udp_bridge&&node.udp_join_driver.disconnects==0&&WiFi.state==WL_CONNECTED); }
+ { // A pause (WiFi master off, OTA) keeps the association for its owners.
+   MyMesh node;WiFi.state=WL_IDLE_STATUS;WiFi.ip=0;
+   auto prefs=node.udp_bridge_settings.data;prefs.enabled=1;assert(node.setUDPBridgePrefs(prefs));
+   WiFi.state=WL_CONNECTED;WiFi.ip=0x0100000a;node.serviceUDPBridge();assert(node.udp_join.owned());
+   node._cli.board.ota=true;node.serviceUDPBridge();
+   assert(node.udp_join_driver.disconnects==0);
+   node._cli.board.ota=false; }
+}
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp);(path/'test.cpp').write_text(program.replace('@METHODS@',methods)
+                .replace('@POWER_POLICY@',power_policy()))
+            binary=path/'test'
+            subprocess.run([os.environ.get('CXX','g++'),'-std=c++17','-fsanitize=address,undefined',
+                '-fno-omit-frame-pointer','-fno-pie','-no-pie','-I',str(ROOT/'src'),
+                str(path/'test.cpp'),'-o',str(binary)],check=True)
+            subprocess.run([str(binary)],check=True)
 
 if __name__=='__main__':unittest.main()
