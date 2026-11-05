@@ -12,11 +12,18 @@
 // A hang then ends in a "Task watchdog" panic + reset, which `powerlog`
 // reports (ResetHistory.h).
 //
+// ESP-IDF 5 (Arduino-ESP32 3.x, the pioarduino ESP32-C6 / RC32 envs) takes
+// a config struct instead: the same timeout and panic flag, the idle-task
+// mask the SDK was built with (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPUx),
+// applied with esp_task_wdt_reconfigure() when the SDK already started the
+// TWDT, else esp_task_wdt_init(). The IDF 4 call is unchanged.
+//
 // Work that legitimately blocks the loop for longer (a firmware download,
 // an OTA apply, a filesystem format) runs inside a LoopWatchdogPause.
 // Sleep is capped at half the timeout (loopWatchdogSleepCapMs).
 
 #include <Arduino.h>
+#include <esp_idf_version.h>
 #include <esp_task_wdt.h>
 #include <stdint.h>
 
@@ -32,10 +39,31 @@ inline bool& loopWatchdogActive() {
   return active;
 }
 
+// Sets the task WDT timeout (seconds) with panic, starting it if needed.
+inline esp_err_t applyTaskWatchdogTimeout(uint32_t timeout_s) {
+#if ESP_IDF_VERSION_MAJOR >= 5
+  esp_task_wdt_config_t config = {};
+  config.timeout_ms = timeout_s * 1000UL;
+  config.idle_core_mask = 0;
+#if defined(CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0) && CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+  config.idle_core_mask |= 1U << 0;
+#endif
+#if defined(CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1) && CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
+  config.idle_core_mask |= 1U << 1;
+#endif
+  config.trigger_panic = true;
+  esp_err_t err = esp_task_wdt_reconfigure(&config);
+  if (err == ESP_ERR_INVALID_STATE) err = esp_task_wdt_init(&config);   // TWDT not started by the SDK
+  return err;
+#else
+  return esp_task_wdt_init(timeout_s, true);   // IDF 4.4: updates a running TWDT
+#endif
+}
+
 // From setup() (it runs on loopTask), last.
 inline bool beginLoopWatchdog(uint32_t timeout_s) {
   if (timeout_s == 0 || loopWatchdogActive()) return loopWatchdogActive();
-  if (esp_task_wdt_init(timeout_s, true) != ESP_OK) return false;
+  if (applyTaskWatchdogTimeout(timeout_s) != ESP_OK) return false;
   enableLoopWDT();
   loopWatchdogActive() = esp_task_wdt_status(nullptr) == ESP_OK;
   return loopWatchdogActive();
