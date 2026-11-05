@@ -145,6 +145,47 @@ int main() {
 '''
 
 
+WATCHDOG_IDF5 = r'''
+#include <cassert>
+#include <cstdio>
+#include <cstdint>
+typedef int esp_err_t;
+#define ESP_OK 0
+#define ESP_ERR_NOT_FOUND 0x105
+#define ESP_ERR_INVALID_STATE 0x103
+#define CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0 1
+typedef void* TaskHandle_t;
+typedef struct { uint32_t timeout_ms; uint32_t idle_core_mask; bool trigger_panic; } esp_task_wdt_config_t;
+static bool running = false, subscribed = false; static int inits = 0, reconfigs = 0;
+static esp_task_wdt_config_t applied = {0, 0, false};
+esp_err_t esp_task_wdt_init(const esp_task_wdt_config_t* c) {
+  if (running) { return ESP_ERR_INVALID_STATE; } ++inits; running = true; applied = *c; return ESP_OK; }
+esp_err_t esp_task_wdt_reconfigure(const esp_task_wdt_config_t* c) {
+  if (!running) { return ESP_ERR_INVALID_STATE; } ++reconfigs; applied = *c; return ESP_OK; }
+esp_err_t esp_task_wdt_status(TaskHandle_t) { return !running ? ESP_ERR_INVALID_STATE : subscribed ? ESP_OK : ESP_ERR_NOT_FOUND; }
+esp_err_t esp_task_wdt_add(TaskHandle_t) { subscribed = true; return ESP_OK; }
+esp_err_t esp_task_wdt_delete(TaskHandle_t) { if (!subscribed) return ESP_ERR_NOT_FOUND; subscribed = false; return ESP_OK; }
+esp_err_t esp_task_wdt_reset() { return subscribed ? ESP_OK : ESP_ERR_NOT_FOUND; }
+void enableLoopWDT() { esp_task_wdt_add(nullptr); }
+#define MESH_LOOP_WATCHDOG_SECS 30
+#include "helpers/esp32/LoopWatchdog.h"
+int main() {
+  // the SDK already runs the TWDT (CONFIG_ESP_TASK_WDT_INIT): reconfigured
+  running = true;
+  assert(mesh::esp32::applyTaskWatchdogTimeout(30) == ESP_OK && reconfigs == 1 && inits == 0);
+  assert(applied.timeout_ms == 30000 && applied.trigger_panic && applied.idle_core_mask == 1);
+  // not running: started with the same config
+  running = false;
+  assert(mesh::esp32::applyTaskWatchdogTimeout(20) == ESP_OK && inits == 1 && applied.timeout_ms == 20000);
+  // the full start subscribes loopTask
+  running = true; reconfigs = 0;
+  assert(mesh::esp32::beginLoopWatchdog(30) && subscribed && reconfigs == 1);
+  printf("PASS idf5\n");
+  return 0;
+}
+'''
+
+
 def compile_and_run(test, source, extra=()):
     compiler = shutil.which("g++") or shutil.which("clang++")
     if compiler is None:
@@ -177,8 +218,21 @@ class ResetHistoryTests(unittest.TestCase):
 class LoopWatchdogTests(unittest.TestCase):
     def test_subscribe_pause_feed(self):
         stubs = (("Arduino.h", "#pragma once\nvoid enableLoopWDT();\n"),
-                 ("esp_task_wdt.h", "#pragma once\n"))
+                 ("esp_task_wdt.h", "#pragma once\n"),
+                 ("esp_idf_version.h", "#pragma once\n#define ESP_IDF_VERSION_MAJOR 4\n"))
         self.assertIn("PASS watchdog", compile_and_run(self, WATCHDOG, stubs))
+
+    def test_idf5_config_struct(self):
+        # Arduino-ESP32 3.x / IDF 5 (pioarduino C6 and RC32 envs): config
+        # struct, reconfigure a running TWDT, init otherwise (re-review).
+        stubs = (("Arduino.h", "#pragma once\nvoid enableLoopWDT();\n"),
+                 ("esp_task_wdt.h", "#pragma once\n"),
+                 ("esp_idf_version.h", "#pragma once\n#define ESP_IDF_VERSION_MAJOR 5\n"))
+        self.assertIn("PASS idf5", compile_and_run(self, WATCHDOG_IDF5, stubs))
+        # the IDF 4 call (the M5) is unchanged
+        header = text("src/helpers/esp32/LoopWatchdog.h")
+        self.assertIn("return esp_task_wdt_init(timeout_s, true);", header)
+        self.assertIn("#if ESP_IDF_VERSION_MAJOR >= 5", header)
 
 
 class WiringTests(unittest.TestCase):
